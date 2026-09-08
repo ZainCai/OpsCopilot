@@ -14,8 +14,33 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROTO_DIR="$ROOT/internal/contracts/proto"
 OUT_DIR="$ROOT/internal/contracts"
+PKG_DIR="$OUT_DIR/pb"
 
-mkdir -p "$OUT_DIR/pb"
+mkdir -p "$PKG_DIR"
+
+# Windows + 中文路径兜底：protoc 是原生 Windows 程序，无法打开含中文的路径
+# （Git Bash 传参 / PowerShell Unicode 传参均无效，8.3 短名对 CJK 仍保留汉字）。
+# 故将 proto 拷到全 ASCII 临时目录生成，再把 .pb.go 拷回仓库。
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*)
+    if printf '%s' "$PROTO_DIR" | grep -qP '[^\x00-\x7F]'; then
+      TMPBASE="C:/tmp"
+      mkdir -p "$TMPBASE"
+      TMP="$(mktemp -d "$TMPBASE/protoc.XXXXXX")/proto"
+      mkdir -p "$TMP"
+      cp "$PROTO_DIR"/*.proto "$TMP/"
+      protoc \
+        --proto_path="$TMP" \
+        --go_out="$(dirname "$TMP")" --go_opt=paths=source_relative \
+        --go-grpc_out="$(dirname "$TMP")" --go-grpc_opt=paths=source_relative \
+        "$TMP"/*.proto
+      cp "$(dirname "$TMP")"/*.pb.go "$PKG_DIR/"
+      rm -rf "$(dirname "$TMP")"
+      echo "generated -> $PKG_DIR (via ASCII-temp fallback for CJK path)"
+      exit 0
+    fi
+    ;;
+esac
 
 protoc \
   --proto_path="$PROTO_DIR" \
@@ -23,4 +48,4 @@ protoc \
   --go-grpc_out="$OUT_DIR" --go-grpc_opt=paths=source_relative \
   "$PROTO_DIR"/*.proto
 
-echo "generated -> $OUT_DIR/pb"
+echo "generated -> $PKG_DIR"
