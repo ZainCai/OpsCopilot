@@ -1,3 +1,8 @@
+# 若存在 .env 则载入（供 make migrate 的 DB_DSN 等使用）
+ifneq (,$(wildcard .env))
+include .env
+endif
+
 .PHONY: help env-up env-down migrate gen check test build smoke
 
 GOPROXY ?= https://goproxy.cn,direct

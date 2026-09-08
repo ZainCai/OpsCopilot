@@ -14,8 +14,8 @@ services:
     ports:
       - "5432:5432"
     volumes:
+      # schema 由 golang-migrate 应用（make migrate），不在此自动执行，避免与 ADR-006 双写
       - db-data:/var/lib/postgresql/data
-      - ./migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U opscopilot"]
       interval: 5s
