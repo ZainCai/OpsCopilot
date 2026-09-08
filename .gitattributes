@@ -1,0 +1,7 @@
+# 统一换行符，避免 Windows/Linux 交叉开发产生全量 diff
+* text=auto eol=lf
+
+# 二进制文件不做换行转换
+*.exe binary
+*.png binary
+*.ico binary

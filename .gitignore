@@ -1,0 +1,19 @@
+# 构建产物
+bin/
+*.exe
+*.test
+*.out
+
+# 依赖缓存（Go 模块缓存不应入库）
+vendor/
+
+# 本地配置与密钥（架构要求：凭证绝不入库）
+.env
+*.local.yaml
+credentials.yaml
+
+# 编辑器/系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
