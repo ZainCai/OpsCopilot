@@ -16,7 +16,7 @@ opscopilot/
 ├── scripts/
 │   └── check_module_boundaries.py  # 模块边界静态检查（P1-2，已验证）
 ├── tools/smoke/goplugin/    # T2 冒烟：go-plugin Windows 可用性（已通过）
-├── docs/adr/                # ADR-006：数据库部署 + 关键外部依赖清单（T1）
+├── docs/adr/                # ADR-001~006 + 索引（见 docs/adr/README.md）
 └── .github/workflows/ci.yml # CI：build/test + 边界检查 + Windows 冒烟
 ```
 
@@ -59,6 +59,22 @@ cd tools/smoke/goplugin && go build -o bin/plugin.exe ./plugin && go run ./host
 ```
 
 > 若想把 GOPROXY 固化：`go env -w GOPROXY=https://goproxy.cn,direct`（在原生终端执行，Git Bash 下可能因缺 %AppData% 报错）。
+
+## 架构决策记录
+
+`docs/adr/` 存 6 份 ADR（ADR-001 事件骨干 / 002 算子前置 / 003 LLM 单出口 / 004 Redis 双实例 / 005 审计分离 / 006 数据库部署 + 关键外部依赖清单）。
+
+**任何 P0 修订或影响其他决策的变更，先写 ADR 再改文档**——这是 v1.3 §5.2 的硬性流程，源于 C17 部署策略与数据层特性冲突的事故。每份 ADR 末尾的"交叉检查提醒"记录耦合项。
+
+## 版本状态
+
+- 仓库已初始化，首次提交 `6d9d0c7`（24 文件）；
+- 提交身份为占位值 `cai <cai@localhost>`，**推送远端前需修正**：
+  ```bash
+  git config user.name "你的名字" && git config user.email "你的邮箱"
+  git commit --amend --reset-author --no-edit
+  ```
+- 未关联远端。
 
 ## 已知限制
 
