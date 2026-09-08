@@ -17,38 +17,50 @@ opscopilot/
 │   └── check_module_boundaries.py  # 模块边界静态检查（P1-2，已验证）
 ├── tools/smoke/goplugin/    # T2 冒烟：go-plugin Windows 可用性（已通过）
 ├── docs/adr/                # ADR-001~006 + 索引（见 docs/adr/README.md）
-└── .github/workflows/ci.yml # CI：build/test + 边界检查 + Windows 冒烟
+└── .github/workflows/ci.yml # CI：build/test + 边界检查 + Windows/Linux 冒烟
 ```
 
 ## M1 第 0 周四条并行任务状态：全部完成
 
 | 任务 | 状态 | 落点 |
 |---|---|---|
-| T1 TimescaleDB 许可对照落档 | ✅ 完成（法务程序性确认待办） | `docs/adr/ADR-006-database-deployment.md` |
-| T2 go-plugin Windows 冒烟 | ✅ **已通过**（windows/386，TCP 回环确认） | `tools/smoke/goplugin/`，结论见 ADR-006 |
+| T1 TimescaleDB 许可对照落档 | ✅ 完成（法务程序性确认待办，见 O8） | `docs/adr/ADR-006-database-deployment.md` |
+| T2 go-plugin Windows 冒烟 | ✅ **已通过**（windows/amd64，TCP 回环确认） | `tools/smoke/goplugin/`，结论见 ADR-006 |
 | P1-1 会话状态落持久 Redis 实例 | ✅ 完成（启动期强制 + panic 守卫 + 单元测试） | `internal/config` + `internal/sessionstore` |
 | P1-2 调用纪律守护 | ✅ 完成（静态检查三连验证 + 单元测试覆盖） | `scripts/check_module_boundaries.py` + `internal/transport` |
 
-## 验证结果（2026-09-08，Go 1.27.1 windows/386）
+## W1 环境底座：已完成并本机验证
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| 本地编排 `docker-compose.yaml` | ✅ | TimescaleDB 社区版 + Redis 双实例（AOF/noeviction 与 LRU 按 ADR-004 区分）+ app |
+| 数据库 schema `migrations/000001` | ✅ | 时态拓扑（valid_from/valid_to + as_of 索引）、变更记录、告警簇（幂等键 + 直通标记）、告警事件、审计索引 |
+| 跨模块契约 `internal/contracts` | ✅ | `topology.proto` + 生成的 `pb/topology.pb.go`（603 行）/ `pb/topology_grpc.pb.go`（169 行），`scripts/gen.sh` 含中文路径兜底 |
+| `Dockerfile` / `.env.example` / `Makefile` | ✅ | 多阶段 distroless；迁移统一走 golang-migrate（ADR-006） |
+| 本机验证 | ✅ | `docker compose up` 起 3 容器；`migrate up` 建 7 表 + timescaledb 扩展；双 Redis `PONG` |
+
+> W1 **产品功能尚未开工**：连接器（Prometheus + 阿里/AWS）、语义模型 v1（as_of）、降噪影子模式、告警簇 API + 控制台均未写。M1 出口标准（影子降噪准确率 >85%）远未达。
+
+## 验证结果（2026-09-08，Go 1.27.1 windows/amd64）
 
 ```
 go build ./...   → 通过（无输出）
 go vet ./...     → 通过（无输出）
-go test ./...    → ok opscopilot/internal/config / ok opscopilot/internal/sessionstore
+go test ./...    → ok opscopilot/internal/config / ok opscopilot/internal/sessionstore / ok opscopilot/internal/transport
 模块边界检查      → 通过：无跨模块内部 import
-go-plugin 冒烟    → PASS handshake + rpc call / PASS kill protocol / GO-PLUGIN windows/386 OK
+go-plugin 冒烟    → PASS handshake + rpc call / PASS kill protocol / GO-PLUGIN windows/amd64 OK
 骨架功能验证      → 双实例未配置 exit 1、同地址 exit 1、合法配置 exit 0（约定行为全部符合）
 ```
 
 ## 本机环境说明（重要）
 
-当前 Go 为 **32 位（windows/386）**——安装的是 `go1.27.1.windows-386.msi`，装在 `C:\Program Files (x86)\Go`。纯 Go 代码编译运行正常（本次全部验证基于此），但建议后续换装 **windows-amd64** 版本（32 位在 CGO、部分依赖和性能上有局限）。
+当前 Go 为 **64 位（windows/amd64）**——已重装 `go1.27.1.windows-amd64`，装在 `C:\Program Files\Go`，与私有化分发目标一致。旧的 32 位残留 `C:\Program Files (x86)\Go` 建议删除，避免 `go` 命令混淆。
 
 常用命令（Git Bash）：
 
 ```bash
-export PATH="/c/Program Files (x86)/Go/bin:$PATH"   # 每次新开 shell 需执行
-export GOPROXY=https://goproxy.cn,direct            # proxy.golang.org 不通，用国内镜像
+export PATH="/c/Program Files/Go/bin:$PATH"       # 每次新开 shell 需执行
+export GOPROXY=https://goproxy.cn,direct          # proxy.golang.org 不通，用国内镜像
 
 # 全量校验
 go build ./... && go vet ./... && go test ./...
@@ -56,9 +68,13 @@ python scripts/check_module_boundaries.py
 
 # go-plugin 冒烟
 cd tools/smoke/goplugin && go build -o bin/plugin.exe ./plugin && go run ./host
+
+# 本地数据库迁移（需先 cp .env.example .env）
+migrate -path migrations -database "postgres://opscopilot:opscopilot@localhost:5432/opscopilot?sslmode=disable" up
 ```
 
 > 若想把 GOPROXY 固化：`go env -w GOPROXY=https://goproxy.cn,direct`（在原生终端执行，Git Bash 下可能因缺 %AppData% 报错）。
+> `make` 在 Git Bash 缺省未装，`make migrate` 改用上条等价的直接 `migrate` 命令即可（golang-migrate CLI 须以 `go install -tags 'postgres'` 安装，否则报 `unknown driver postgres`）。
 
 ## 架构决策记录
 
@@ -68,16 +84,15 @@ cd tools/smoke/goplugin && go build -o bin/plugin.exe ./plugin && go run ./host
 
 ## 版本状态
 
-- 仓库已初始化，首次提交 `6d9d0c7`（24 文件）；
-- 提交身份为占位值 `cai <cai@localhost>`，**推送远端前需修正**：
-  ```bash
-  git config user.name "你的名字" && git config user.email "你的邮箱"
-  git commit --amend --reset-author --no-edit
-  ```
-- 未关联远端。
+- 远端：`https://github.com/ZainCai/OpsCopilot.git`，分支 `main` 已与 `origin/main` 同步（ahead 0）；
+- 提交身份：`ZainCai <zaincai@outlook.com>`（已通过 `git filter-branch` 将历史 4 个提交改写对齐）；
+- 历史提交：`0549778`(M1 第0周骨架) → `26fb640`/`45170d6`(ADR 索引) → `0e91c1b`(W1 环境准备) → `4dbdc39`(契约生成) → `b6e1a78`(编排修复：移除 initdb.d 双写)；
+- 授权：专有软件，保留所有权利（详见仓库 `LICENSE` 文件）。
 
 ## 已知限制
 
-- `internal/contracts` 目前只有占位文件，跨模块 gRPC 契约（protobuf）待 M1 主体开发时生成；
-- 尚无真实 Redis 集成测试（sessionstore 的单测只覆盖构造期角色守卫，未覆盖读写路径）；
-- CI 尚未在真实仓库运行过（.github/workflows/ci.yml 已就位，待推送 GitHub 验证）。
+- 跨模块 gRPC 契约已生成：`internal/contracts/proto/topology.proto` + 生成的 `pb/topology.pb.go` / `pb/topology_grpc.pb.go`；更多服务契约随 W1 主体开发补充；
+- 尚无真实 Redis 集成测试（sessionstore 单测只覆盖构造期角色守卫，读写路径待 O10，计划 W5 用 miniredis/testcontainers 补齐）；
+- `alert_event` 当前为普通表，TimescaleDB 的 hypertable/连续聚合/保留策略尚未启用（M1 单机联调可接受，数据量上来或 W7 时转换）；
+- CI 已随 `git push` 在 GitHub Actions 运行：`build-and-check`（build/test/边界检查）+ `goplugin-smoke-windows` + `goplugin-smoke-linux`（T2 双平台冒烟）；
+- W1 主体功能（连接器 / 语义模型 / 降噪 / API）尚未开工，M1 出口标准（影子降噪准确率 >85%）未达。
