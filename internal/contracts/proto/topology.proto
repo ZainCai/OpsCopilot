@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+package opscopilot.contracts.v1;
+
+option go_package = "opscopilot/internal/contracts/pb;pb";
+
+// 语义模型服务：拓扑与变更的时点查询（v1.2 C15）
+service SemanticModel {
+  // GetTopology 查询时点拓扑。as_of 为空表示当前时刻。
+  // RCA 必须传入故障时刻 T0，禁止用当前拓扑分析历史事件。
+  rpc GetTopology(GetTopologyRequest) returns (GetTopologyResponse);
+  // GetRecentChanges 查询节点在窗口内的变更（RCA 证据）。
+  rpc GetRecentChanges(GetRecentChangesRequest) returns (GetRecentChangesResponse);
+}
+
+message GetTopologyRequest {
+  string tenant_id = 1;
+  string node_key = 2;
+  int32 depth = 3;
+  // RFC3339 时间戳；为空=当前时刻
+  string as_of = 4;
+}
+
+message TopologyNode {
+  string node_key = 1;
+  string node_type = 2;
+  string valid_from = 3;
+  string valid_to = 4;
+  string confidence = 5;
+  string source = 6;
+}
+
+message TopologyEdge {
+  string src_key = 1;
+  string dst_key = 2;
+  string relation = 3;
+  string confidence = 4;
+  string source = 5;
+}
+
+message GetTopologyResponse {
+  repeated TopologyNode nodes = 1;
+  repeated TopologyEdge edges = 2;
+  string resolved_as_of = 3;
+}
+
+message GetRecentChangesRequest {
+  string tenant_id = 1;
+  string node_key = 2;
+  string window_start = 3;
+  string window_end = 4;
+}
+
+message ChangeRecord {
+  string node_key = 1;
+  string change_type = 2;
+  string occurred_at = 3;
+  string actor = 4;
+}
+
+message GetRecentChangesResponse {
+  repeated ChangeRecord changes = 1;
+}

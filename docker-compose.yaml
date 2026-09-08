@@ -1,0 +1,67 @@
+# OpsCopilot 本地开发环境
+# 依据：ADR-001（事件骨干）、ADR-004（Redis 双实例）、ADR-006（数据库部署）
+# 依赖：Docker Desktop（当前本机未安装，W1 阻塞项）
+services:
+  timescaledb:
+    # 自建 TimescaleDB 社区版（TSL）：保住连续聚合/保留策略/压缩
+    # 说明：SaaS 生产用 Patroni 主备；本机单机仅用于开发联调
+    image: timescale/timescaledb:2.29.2-pg17
+    container_name: opscopilot-db
+    environment:
+      POSTGRES_DB: opscopilot
+      POSTGRES_USER: opscopilot
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-opscopilot}
+    ports:
+      - "5432:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U opscopilot"]
+      interval: 5s
+      retries: 10
+
+  redis-alert:
+    # 持久化告警实例：AOF everysec、noeviction（ADR-004）
+    # 承载：告警流 Streams、会话状态、llm 调度队列
+    image: redis:7-alpine
+    container_name: opscopilot-redis-alert
+    command: >
+      redis-server --appendonly yes --appendfsync everysec
+      --maxmemory-policy noeviction
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis-alert-data:/data
+
+  redis-cache:
+    # 缓存实例：LRU 可逐出，仅放可重建数据（ADR-004）
+    image: redis:7-alpine
+    container_name: opscopilot-redis-cache
+    command: >
+      redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6381:6379"
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: opscopilot-app
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis-alert:
+        condition: service_started
+      redis-cache:
+        condition: service_started
+    environment:
+      REDIS_ALERT_ADDR: redis-alert:6379
+      REDIS_CACHE_ADDR: redis-cache:6379
+      DB_DSN: postgres://opscopilot:${DB_PASSWORD:-opscopilot}@timescaledb:5432/opscopilot?sslmode=disable
+    ports:
+      - "8080:8080"
+
+volumes:
+  db-data:
+  redis-alert-data:
