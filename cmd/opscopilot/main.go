@@ -113,15 +113,20 @@ func main() {
 	}()
 
 	// 启动可见性：明确当前 main 装配的 W 阶段，
-	// 避免运维把"骨架就绪"误读为"产品就绪"——降噪/gRPC/会话均未接线。
-	logger.Printf("=== M1 stage: W4-1.1 (topology + change webhook + connector host) ===")
-	logger.Printf("  wired:    topology builder + topology sink + change store + change webhook + credential store(sweep) + connector host")
+	// 避免运维把"骨架就绪"误读为"产品就绪"。
+	logger.Printf("=== M1 stage: W4-1.4 (topology + change webhook + connector host + shadow noise) ===")
+	logger.Printf("  wired:    topology builder + topology sink + change store + change webhook + credential store(sweep) + connector host + shadow noise engine")
 	if len(registered) > 0 {
 		logger.Printf("  connectors: %v (interval 30s, conn timeout 30s)", registered)
 	} else {
 		logger.Printf("  connectors: none (set OPS_PROM_URL / OPS_AZURE_SUBSCRIPTION_ID+OPS_AZURE_TOKEN to enable)")
 	}
-	logger.Printf("  not wired (W4-1.2+): noise engine, gRPC SemanticModelServer, sessionstore, /metrics, alert pipeline")
+	if asm.Noise == nil {
+		logger.Printf("  noise: shadow mode OFF (OPS_NOISE_SHADOW=off)")
+	} else {
+		logger.Printf("  noise: shadow mode ON (alerts annotated, NOT suppressed; window %s)", noiseWindowForLog())
+	}
+	logger.Printf("  not wired (W4-1.5+): cluster persistence, gRPC SemanticModelServer, sessionstore, /metrics")
 	logger.Printf("POST %s (change events) | GET /healthz | listening on %s",
 		changeWebhookPath, addr)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -130,4 +135,12 @@ func main() {
 	}
 	<-done
 	logger.Printf("bye")
+}
+
+// noiseWindowForLog 启动日志用：当前生效的降噪窗口。
+func noiseWindowForLog() string {
+	if raw := os.Getenv("OPS_NOISE_WINDOW"); raw != "" {
+		return raw
+	}
+	return "10m0s"
 }

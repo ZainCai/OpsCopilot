@@ -225,6 +225,15 @@ func (c *Clusterer) newClusterLocked(e Event) *Cluster {
 	return cl
 }
 
+// SetDomain 更换故障域函数（并发安全）。场景：域函数依赖拓扑快照，
+// 装配层每批采集重建一次快照后注入（见 cmd/ 侧接线）。
+// 传 nil 退化为"同 NodeKey 即同域"。
+func (c *Clusterer) SetDomain(f FaultDomainFunc) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.domain = f
+}
+
 // Ack 算子确认：open → acked。acked/resolved 原样返回（幂等，不报错）。
 // 未知簇返回 ErrUnknownCluster。
 func (c *Clusterer) Ack(clusterKey string) (ClusterState, error) {

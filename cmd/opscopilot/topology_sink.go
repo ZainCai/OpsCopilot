@@ -29,10 +29,20 @@ import (
 type TopologySink struct {
 	mu      sync.Mutex
 	builder *topology.Builder
-	// alerts 累计收到的告警条数。W4 降噪流水线（指纹去重/时间窗聚类）
-	// 的接入点：届时在 IngestCollect 里把告警转交降噪，而非只计数。
+	// alerts 累计收到的告警条数。
 	alerts int
 	logger connector.Logger
+	// noise W4-1.4 影子降噪引擎（可选，nil = 只计数不处理）。
+	noise *NoiseEngine
+}
+
+// AttachNoise 挂载影子降噪引擎（W4-1.4）。传 nil 等价于卸载。
+// 挂载点在装配层而非构造参数：NoiseEngine 依赖 sink 的拓扑快照，
+// 二者互相引用，只能先建 sink 再挂引擎。
+func (s *TopologySink) AttachNoise(ne *NoiseEngine) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.noise = ne
 }
 
 // NewTopologySink 构造。builder 须非 nil（拓扑图的归属在调用方，
@@ -73,9 +83,9 @@ func (s *TopologySink) IngestDiscover(_ context.Context, r *connector.DiscoverRe
 	return nil
 }
 
-// IngestCollect 实现 connector.Sink。W3 阶段仅对告警计数——
-// 告警的真正消费方是 W4 降噪流水线，此处不做任何处理、也不丢弃信息
-// （计数会体现在日志与后续报告中）。
+// IngestCollect 实现 connector.Sink：告警计数 + 影子降噪转交（W4-1.4）。
+// 降噪处理在锁外调用：NoiseEngine 自带互斥，且其内部读拓扑快照
+// （graphSnapshot）需要拿 s.mu——若在持锁区间内调用会自死锁。
 func (s *TopologySink) IngestCollect(_ context.Context, r *connector.CollectResult) error {
 	if r == nil {
 		return nil
@@ -83,9 +93,13 @@ func (s *TopologySink) IngestCollect(_ context.Context, r *connector.CollectResu
 	s.mu.Lock()
 	s.alerts += len(r.Alerts)
 	total := s.alerts
+	ne := s.noise
 	s.mu.Unlock()
+	if ne != nil {
+		ne.ProcessAlerts(r.Alerts)
+	}
 	if len(r.Alerts) > 0 {
-		s.logf("collect ingested: %d alerts this round (total %d) — W4 降噪接入点", len(r.Alerts), total)
+		s.logf("collect ingested: %d alerts this round (total %d)", len(r.Alerts), total)
 	}
 	return nil
 }

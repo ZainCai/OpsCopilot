@@ -21,14 +21,16 @@ import (
 // changeWebhookPath 变更事件提交路由（手动 curl / Git/Jenkins webhook 共用）。
 const changeWebhookPath = "/api/v1/changes"
 
-// Assembly W3 装配产物：各组件的持有者，供 main 做生命周期管理与测试断言。
+// Assembly W4 装配产物：各组件的持有者，供 main 做生命周期管理与测试断言。
 type Assembly struct {
 	Sink    *TopologySink
 	Changes *topology.ChangeStore
 	Webhook *ChangeWebhook
+	// Noise 影子降噪引擎（W4-1.4）；nil = envNoiseShadow=off 已关闭。
+	Noise *NoiseEngine
 }
 
-// NewAssembly 组装 W3 全部组件并接线。
+// NewAssembly 组装 W3+W4 组件并接线。
 //
 // webhookToken：变更 webhook 的共享密钥；非空时 POST /api/v1/changes
 // 必须携带匹配的 X-OpsCopilot-Token 头（S1 写路径准入）。传空表示
@@ -36,6 +38,9 @@ type Assembly struct {
 //
 // 变更库的节点校验钩子经 Sink.HasNode（锁内读图）实现——变更事件只能
 // 关联到拓扑图里真实存在的节点，防止"幽灵节点"静默失败。
+//
+// 影子降噪（W4-1.4）：OPS_NOISE_SHADOW=off 可整体关闭；OPS_NOISE_WINDOW
+// 配置去重/聚类时间窗（默认 10m，解析失败启动失败）。
 func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error) {
 	builder := topology.NewBuilder()
 	sink, err := NewTopologySink(builder, logger)
@@ -48,7 +53,16 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 		return nil, err
 	}
 	hook.Token = webhookToken
-	return &Assembly{Sink: sink, Changes: store, Webhook: hook}, nil
+
+	// 影子降噪：挂在 sink 上（告警经 IngestCollect 转交），引擎持有
+	// sink 引用做拓扑快照——互相引用只能后挂（见 AttachNoise 注释）。
+	noiseEngine, err := NewNoiseEngine(sink, logger)
+	if err != nil {
+		return nil, err
+	}
+	sink.AttachNoise(noiseEngine)
+
+	return &Assembly{Sink: sink, Changes: store, Webhook: hook, Noise: noiseEngine}, nil
 }
 
 // Handler 装配 HTTP 路由：
