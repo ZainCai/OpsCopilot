@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"opscopilot/internal/connector"
 	"opscopilot/pkg/readonly"
@@ -270,6 +271,116 @@ func TestResourceGroupOf(t *testing.T) {
 	for in, want := range cases {
 		if got := resourceGroupOf(in); got != want {
 			t.Errorf("resourceGroupOf(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestDiscover_NextLinkHostMismatchRejected(t *testing.T) {
+	// W3 审查 P2-2 回归：nextLink 指向别的 host 必须拒绝——
+	// 不能带着 Bearer 令牌跟着游标去任意主机。
+	evil := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"value": []}`)) // "劫持方"正常应答，验证我们根本没去
+	}))
+	defer evil.Close()
+
+	// 合法服务端把 nextLink 指向 evil 的地址
+	page1 := fmt.Sprintf(`{"value": [%s], "nextLink": %q}`,
+		vmJSON("r1", "vm-1", "guid-1", "rg"), evil.URL+"/steal?token=here")
+	srv := newFakeARM(t, page1)
+
+	d, err := New(testConfig(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = d.Discover(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "host mismatch") {
+		t.Fatalf("error = %v, want host mismatch rejection", err)
+	}
+}
+
+func TestDiscover_RetriesOn429WithRetryAfter(t *testing.T) {
+	// W3 审查 P2-3 回归：429 按 Retry-After 退避后重试，最终成功。
+	page := fmt.Sprintf(`{"value": [%s]}`, vmJSON("r1", "vm-1", "guid-1", "rg"))
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls <= 2 {
+			w.Header().Set("Retry-After", "0") // 0 秒：测试不等待
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_, _ = w.Write([]byte(page))
+	}))
+	defer srv.Close()
+
+	d, err := New(testConfig(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := d.Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover after 429s: %v", err)
+	}
+	if len(res.Nodes) != 1 {
+		t.Errorf("nodes = %d, want 1", len(res.Nodes))
+	}
+	if calls != 3 {
+		t.Errorf("calls = %d, want 3 (2 throttle + 1 success)", calls)
+	}
+}
+
+func TestDiscover_429ExhaustedFails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	d, err := New(testConfig(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Discover(context.Background()); err == nil {
+		t.Error("persistent 429 must surface an error after retries exhausted")
+	}
+}
+
+func TestDiscover_RejectsUnnamedVM(t *testing.T) {
+	// 无 vmId 且无资源 ID 的异常数据：显式失败而非静默跳过。
+	body := fmt.Sprintf(`{"value": [%s, {"name":"broken"}]}`,
+		vmJSON("r1", "vm-1", "guid-1", "rg"))
+	srv := newFakeARM(t, body)
+
+	d, err := New(testConfig(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = d.Discover(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "neither vmId nor id") {
+		t.Fatalf("error = %v, want explicit rejection of unnamed resource", err)
+	}
+}
+
+func TestRetryAfterDelay(t *testing.T) {
+	mk := func(v string) http.Header {
+		h := http.Header{}
+		if v != "" {
+			h.Set("Retry-After", v)
+		}
+		return h
+	}
+	cases := []struct {
+		v    string
+		want time.Duration
+	}{
+		{"", time.Second},         // 缺失 → 1s 兜底
+		{"5", 5 * time.Second},    // 秒数形式
+		{"999", 30 * time.Second}, // 封顶防恶意大值
+		{"garbage", time.Second},  // 解析失败 → 1s
+	}
+	for _, tc := range cases {
+		if got := retryAfterDelay(mk(tc.v)); got != tc.want {
+			t.Errorf("retryAfterDelay(%q) = %v, want %v", tc.v, got, tc.want)
 		}
 	}
 }

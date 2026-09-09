@@ -41,8 +41,13 @@ func ParseAsOf(s string) (time.Time, error) {
 // Node/Edge 指针与原图共享——图是不可变约定，调用方不得修改，
 // 见 Builder.Build 注释），可见性规则见文件头。
 //
-// t 为零值时等价于返回全图当前可见部分（ValidFrom 已发生的全部证据）。
+// t 为零值时按**当前时刻**处理（W3 审查 P2-1：原实现会跳过 ValidTo
+// 判定，导致"零值=当前"的契约下已失效节点被错误返回；统一转
+// time.Now() 后零值与显式当前时刻行为完全一致）。
 func (g *Graph) AsOf(t time.Time) *Graph {
+	if t.IsZero() {
+		t = time.Now()
+	}
 	out := &Graph{Nodes: make(map[string]*Node)}
 	if g == nil {
 		return out

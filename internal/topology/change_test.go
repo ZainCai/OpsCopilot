@@ -208,3 +208,41 @@ func TestChangeStore_Concurrent(t *testing.T) {
 		t.Errorf("Len = %d, want 400", s.Len())
 	}
 }
+
+func TestPruneBefore(t *testing.T) {
+	s := NewChangeStore(nil)
+	base := time.Now().Add(-time.Hour)
+	mustRecord(t, s, ChangeEvent{ID: "old1", NodeKey: "h", Type: ChangeDeploy, OccurredAt: base.Add(-40 * time.Minute)})
+	mustRecord(t, s, ChangeEvent{ID: "old2", NodeKey: "h2", Type: ChangeConfig, OccurredAt: base.Add(-20 * time.Minute)})
+	mustRecord(t, s, ChangeEvent{ID: "keep", NodeKey: "h", Type: ChangeRollback, OccurredAt: base.Add(30 * time.Minute)})
+
+	// 边界：恰好等于 cutoff 的事件保留（严格早于才清除）
+	cutoff := base.Add(-20 * time.Minute)
+	if n := s.PruneBefore(cutoff); n != 1 {
+		t.Fatalf("pruned = %d, want 1 (only old1, boundary kept)", n)
+	}
+	if s.Len() != 2 {
+		t.Errorf("Len = %d, want 2", s.Len())
+	}
+	// byNode 索引在部分清理后仍正确（边界事件 old2 保留在 h2 链上）
+	if got := s.ByNode("h2"); len(got) != 1 || got[0].ID != "old2" {
+		t.Errorf("ByNode(h2) after prune = %+v, want old2 (boundary kept)", got)
+	}
+	if got := s.ByNode("h"); len(got) != 1 || got[0].ID != "keep" {
+		t.Errorf("ByNode after prune = %+v, want keep", got)
+	}
+	// Get 移除已清事件
+	if _, ok := s.Get("old1"); ok {
+		t.Error("pruned event still retrievable")
+	}
+	// 再清一次：无变化
+	if n := s.PruneBefore(cutoff); n != 0 {
+		t.Errorf("second prune = %d, want 0", n)
+	}
+	if s.PruneBefore(time.Now().Add(time.Hour)) != 2 {
+		t.Errorf("prune all = want 2 remaining removed")
+	}
+	if s.Len() != 0 {
+		t.Errorf("Len after prune-all = %d, want 0", s.Len())
+	}
+}

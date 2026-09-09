@@ -91,6 +91,11 @@ type ChangeEvent struct {
 // 节点确实存在于拓扑图中（ErrNodeNotFound），防止"变更关联到一个不存在的
 // 节点"这种静默失败。由编排层（cmd/）注入图的节点查找函数，本模块不
 // 反向依赖图的持有者。
+//
+// **钩子约束（P2-5）**：nodeCheck 在 ChangeStore.mu 持锁期间被调用，
+// 因此钩子内**严禁**回调本 Store 的任何方法（会死锁），也不得做慢 IO
+// （会阻塞所有 Record/查询）。当前编排层注入的是 Sink.HasNode（另一把
+// 独立的锁，锁序恒定 Store→Sink，无死锁风险）。
 type ChangeStore struct {
 	mu        sync.RWMutex
 	events    map[string]*ChangeEvent // ID → 事件（存指针，取值时拷贝）
@@ -229,6 +234,36 @@ func (s *ChangeStore) Len() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.events)
+}
+
+// PruneBefore 清除 OccurredAt 早于 cutoff 的事件，返回清除条数。
+//
+// 这是保留窗口的清理原语（W3 审查 P2-4：进程内 map 永不清理会无限
+// 增长）。调用约定：由编排层定期调用（如每小时清一次、保留 7 天），
+// 本模块不内置后台 goroutine——定时策略属于编排层，模块保持纯粹。
+// 清理用到的最小保留窗由调用方对齐变更关联查询的最大时间窗（如
+// "告警前 30 分钟"远小于 7 天，7 天窗留足了回溯余地）。
+func (s *ChangeStore) PruneBefore(cutoff time.Time) int {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	removed := 0
+	for id, ev := range s.events {
+		if ev.OccurredAt.Before(cutoff) {
+			delete(s.events, id)
+			removed++
+		}
+	}
+	if removed > 0 {
+		// byNode 索引整体重建：O(n) 且实现简单，胜过逐链表摘除的边界处理。
+		s.byNode = make(map[string][]string, len(s.byNode))
+		for id, ev := range s.events {
+			s.byNode[ev.NodeKey] = append(s.byNode[ev.NodeKey], id)
+		}
+	}
+	return removed
 }
 
 // filterWindow 原地过滤出 [from, to] 闭区间内的事件（零值表示不设限）。

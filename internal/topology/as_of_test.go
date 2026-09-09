@@ -68,12 +68,25 @@ func TestAsOf_Visibility(t *testing.T) {
 	}
 }
 
-func TestAsOf_ZeroTimeReturnsCurrentView(t *testing.T) {
+func TestAsOf_ZeroTimeMeansNow(t *testing.T) {
 	g, base := buildTemporalGraph(t)
-	// 零 t：全部已发生的证据都可见（当前视图）
+	// 零值 = 当前时刻（P2-1 语义统一）：host:dead 的 ValidTo（base+3h）
+	// 相对"现在"已过期，必须被排除——原实现跳过 ValidTo 判定属缺陷。
 	snap := g.AsOf(time.Time{})
-	if len(snap.Nodes) != 3 || len(snap.Edges) != 2 {
-		t.Errorf("zero as_of = %d nodes / %d edges, want 3/2", len(snap.Nodes), len(snap.Edges))
+	if len(snap.Nodes) != 2 {
+		t.Errorf("zero as_of = %d nodes, want 2 (dead node expired by now)", len(snap.Nodes))
+	}
+	if _, ok := snap.Nodes["host:dead"]; ok {
+		t.Error("expired node must not appear in zero-time (current) view")
+	}
+	if len(snap.Edges) != 1 || snap.Edges[0].DstKey != "host:new" {
+		t.Errorf("edges = %+v, want only old->new (dead endpoint invisible)", snap.Edges)
+	}
+	// 与显式 time.Now() 行为一致（等价性断言）
+	explicit := g.AsOf(time.Now())
+	if len(explicit.Nodes) != len(snap.Nodes) || len(explicit.Edges) != len(snap.Edges) {
+		t.Errorf("zero-time view differs from explicit now: %d/%d vs %d/%d",
+			len(snap.Nodes), len(snap.Edges), len(explicit.Nodes), len(explicit.Edges))
 	}
 	_ = base
 }

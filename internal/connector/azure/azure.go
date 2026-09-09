@@ -21,10 +21,12 @@ package azure
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,6 +43,11 @@ const (
 	defaultMaxResponseBytes = 32 << 20 // 32 MiB
 	// maxPages 分页硬上限：防御恶意/异常服务端用 nextLink 造成死循环。
 	maxPages = 100
+	// maxRetriesOn429 ARM 限流（HTTP 429）的最大重试次数。
+	maxRetriesOn429 = 3
+	// maxRetryAfterSecs / maxRetryAfter Retry-After 退避封顶（防御恶意大值）。
+	maxRetryAfterSecs = 30
+	maxRetryAfter     = 30 * time.Second
 )
 
 // Config Azure ARM 发现器配置。
@@ -69,6 +76,10 @@ type Config struct {
 type Discoverer struct {
 	cfg    Config
 	client *http.Client
+	// armHost BaseURL 的主机名（构造期解析）。nextLink 跟随前必须校验
+	// 目标 host 与之一致——被入侵/配置错乱的源若能引导我们带着 Bearer
+	// 访问任意主机，等于把令牌递出去（W3 审查 P2-2）。
+	armHost string
 }
 
 // New 构造并做构造期校验（配置错误早失败）。
@@ -100,7 +111,11 @@ func New(cfg Config) (*Discoverer, error) {
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}
 	}
-	return &Discoverer{cfg: cfg, client: client}, nil
+	base, err := url.Parse(cfg.BaseURL)
+	if err != nil || base.Host == "" {
+		return nil, fmt.Errorf("azure: invalid BaseURL %q", cfg.BaseURL)
+	}
+	return &Discoverer{cfg: cfg, client: client, armHost: base.Host}, nil
 }
 
 // ID 实现 connector.Connector。
@@ -119,7 +134,7 @@ func (d *Discoverer) Collect(_ context.Context, _ connector.CollectRequest) (*co
 // HealthCheck 实现 connector.Connector：GET 订阅资源（最便宜的只读探针），
 // 200 即视为凭证有效、ARM 可达。
 func (d *Discoverer) HealthCheck(ctx context.Context) (connector.Health, error) {
-	status, _, err := d.get(ctx,
+	status, _, _, err := d.get(ctx,
 		"/subscriptions/"+url.PathEscape(d.cfg.SubscriptionID),
 		"2022-12-01")
 	now := time.Now()
@@ -152,25 +167,39 @@ func (d *Discoverer) Discover(ctx context.Context) (*connector.DiscoverResult, e
 
 	nodes := make([]connector.ResourceNode, 0, 16)
 	for page := 0; ; page++ {
-		status, body, err := d.get(ctx, pageURL, "")
+		status, _, body, err := d.getWithRetry(ctx, pageURL)
 		if err != nil {
 			return nil, fmt.Errorf("azure: list virtualMachines: %w", err)
 		}
 		if status != http.StatusOK {
-			return nil, fmt.Errorf("azure: list virtualMachines: HTTP %d", status)
+			// 带响应体摘要便于排障（ARM 错误 body 含错误码与消息；
+			// 不含凭证——Authorization 只在请求头）。
+			return nil, fmt.Errorf("azure: list virtualMachines: HTTP %d: %.256s", status, body)
 		}
 		var listing vmList
 		if err := json.Unmarshal(body, &listing); err != nil {
 			return nil, fmt.Errorf("azure: decode virtualMachines: %w", err)
 		}
-		for _, vm := range listing.Value {
-			nodes = append(nodes, d.normalize(vm))
+		for i, vm := range listing.Value {
+			n, err := d.normalize(vm)
+			if err != nil {
+				// 异常资源显式失败而非静默跳过：拓扑缺一截比发现失败更危险，
+				// 静默丢资源会让下游误以为覆盖完整。
+				return nil, fmt.Errorf("azure: vm[%d]: %w", i, err)
+			}
+			nodes = append(nodes, n)
 		}
 		if listing.NextLink == "" {
 			break
 		}
+		// nextLink host 必须与 ARM 端点一致（P2-2）：不一致的游标
+		// 极可能是注入/劫持——拒绝比带着 Bearer 跟过去安全得多。
+		if u, err := url.Parse(listing.NextLink); err != nil || u.Host == "" ||
+			!strings.EqualFold(u.Host, d.armHost) {
+			return nil, fmt.Errorf("azure: nextLink host mismatch (want %q): %q",
+				d.armHost, listing.NextLink)
+		}
 		pageURL = listing.NextLink
-		// nextLink 是绝对 URL，直接作为下一页地址（get 会原样请求）。
 		if page+1 >= maxPages {
 			// 分页超限仍未取完：报错而非静默截断——
 			// 拓扑缺一截资源比发现失败更危险（下游会误以为覆盖完整）。
@@ -184,8 +213,12 @@ func (d *Discoverer) Discover(ctx context.Context) (*connector.DiscoverResult, e
 	}, nil
 }
 
-// normalize 单台虚拟机 → ResourceNode。
-func (d *Discoverer) normalize(vm vmResource) connector.ResourceNode {
+// normalize 单台虚拟机 → ResourceNode。缺 vmId 且缺资源 ID 的数据
+// 视为源异常，返回错误（由 Discover 携带下标拒绝整批）。
+func (d *Discoverer) normalize(vm vmResource) (connector.ResourceNode, error) {
+	if vm.Properties.VMID == "" && vm.ID == "" {
+		return connector.ResourceNode{}, errors.New("resource has neither vmId nor id")
+	}
 	labels := map[string]string{
 		"name":            vm.Name,
 		"location":        vm.Location,
@@ -216,7 +249,7 @@ func (d *Discoverer) normalize(vm vmResource) connector.ResourceNode {
 		Labels:     labels,
 		Source:     d.cfg.ID,
 		ObservedAt: time.Now().UTC(),
-	}
+	}, nil
 }
 
 // resourceGroupOf 从 ARM 资源 ID 提取资源组名。
@@ -233,8 +266,10 @@ func resourceGroupOf(id string) string {
 }
 
 // get 统一 GET：注入 Bearer 凭证，读取响应体受上限约束。
-// fullURL 为空时用 baseURL+path，否则直接请求 fullURL（分页 nextLink 场景）。
-func (d *Discoverer) get(ctx context.Context, pathOrURL, apiVersion string) (int, []byte, error) {
+// 返回响应头（Retry-After 等控制信息由调用方消费）。
+// pathOrURL 为相对路径时用 baseURL+path 并按需追加 api-version；
+// 为绝对 URL 时原样请求（分页 nextLink 场景，host 校验在调用方）。
+func (d *Discoverer) get(ctx context.Context, pathOrURL, apiVersion string) (int, http.Header, []byte, error) {
 	reqURL := pathOrURL
 	if !strings.HasPrefix(reqURL, "http://") && !strings.HasPrefix(reqURL, "https://") {
 		reqURL = d.cfg.BaseURL + pathOrURL
@@ -248,21 +283,64 @@ func (d *Discoverer) get(ctx context.Context, pathOrURL, apiVersion string) (int
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Bearer "+d.cfg.Credential.Secret)
 
 	resp, err := d.client.Do(req)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	defer resp.Body.Close()
 	body, err := readLimited(resp.Body, d.cfg.MaxResponseBytes)
 	if err != nil {
-		return resp.StatusCode, nil, err
+		return resp.StatusCode, resp.Header, nil, err
 	}
-	return resp.StatusCode, body, nil
+	return resp.StatusCode, resp.Header, body, nil
+}
+
+// getWithRetry 对 429（ARM 限流）按 Retry-After 退避重试，最多
+// maxRetriesOn429 次——生产 ARM 在批量列举时几乎必然限流，
+// 不处理就是"测试通过、上线即挂"（W3 审查 P2-3）。
+func (d *Discoverer) getWithRetry(ctx context.Context, reqURL string) (int, http.Header, []byte, error) {
+	for attempt := 0; ; attempt++ {
+		status, hdr, body, err := d.get(ctx, reqURL, "")
+		if err != nil || status != http.StatusTooManyRequests || attempt >= maxRetriesOn429 {
+			return status, hdr, body, err
+		}
+		wait := retryAfterDelay(hdr)
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return status, hdr, body, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+// retryAfterDelay 从响应头解析退避时长：支持秒数与 HTTP-date 两种
+// 形式；解析失败退回 1s；封顶 maxRetryAfterSecs 防御恶意大值。
+func retryAfterDelay(h http.Header) time.Duration {
+	v := h.Get("Retry-After")
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs > maxRetryAfterSecs {
+			secs = maxRetryAfterSecs
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		d := time.Until(t)
+		if d < 0 {
+			d = 0
+		}
+		if d > maxRetryAfter {
+			d = maxRetryAfter
+		}
+		return d
+	}
+	return time.Second
 }
 
 // readLimited 按上限读取响应体，超过 limit 直接报错。
