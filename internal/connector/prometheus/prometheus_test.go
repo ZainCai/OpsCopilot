@@ -466,3 +466,26 @@ func TestBareTokenRequiresExplicitOptIn(t *testing.T) {
 		t.Fatalf("bare Token with explicit opt-in should pass: %v", err)
 	}
 }
+
+// TestErrorContextCarriesSourceAndEndpoint C11 回归：逃逸错误必须带
+// 数据源 ID 与端点路径——多个 Prometheus 实例同时接入时，只有
+// "prometheus: ..." 无从定位是哪台、哪个端点出的问题。
+func TestErrorContextCarriesSourceAndEndpoint(t *testing.T) {
+	big := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(strings.Repeat("A", 8192)))
+	}))
+	t.Cleanup(big.Close)
+
+	c, _ := New(Config{ID: "p1", BaseURL: big.URL, MaxResponseBytes: 1024})
+	_, err := c.Collect(context.Background(), connector.CollectRequest{})
+	if err == nil {
+		t.Fatal("oversized response should fail")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "prometheus[p1]") {
+		t.Errorf("error lacks source id: %v", err)
+	}
+	if !strings.Contains(msg, "/api/v1/alerts") {
+		t.Errorf("error lacks endpoint: %v", err)
+	}
+}

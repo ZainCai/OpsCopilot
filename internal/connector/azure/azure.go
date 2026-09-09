@@ -131,6 +131,14 @@ func (d *Discoverer) Collect(_ context.Context, _ connector.CollectRequest) (*co
 	return nil, fmt.Errorf("azure: metric collection requires Azure Monitor, planned for a later iteration: %w", connector.ErrUnsupported)
 }
 
+// errWith 统一错误上下文（全局审查 C11）：与 prometheus 连接器同一约定，
+// 逃逸错误一律裹上数据源身份，多实例排障可定位：
+//
+//	azure[<实例 ID>] <操作> <端点>: <原因>
+func (d *Discoverer) errWith(op, endpoint string, err error) error {
+	return fmt.Errorf("azure[%s] %s %s: %w", d.cfg.ID, op, endpoint, err)
+}
+
 // HealthCheck 实现 connector.Connector：GET 订阅资源（最便宜的只读探针），
 // 200 即视为凭证有效、ARM 可达。
 //
@@ -138,12 +146,12 @@ func (d *Discoverer) Collect(_ context.Context, _ connector.CollectRequest) (*co
 // （Host 记日志并退避），HTTP 非 200 归入 degraded 但不上抛——
 // "云端拒绝/异常"是可自愈状态，"连不上"才是故障。
 func (d *Discoverer) HealthCheck(ctx context.Context) (connector.Health, error) {
-	status, _, _, err := d.get(ctx,
-		"/subscriptions/"+url.PathEscape(d.cfg.SubscriptionID),
-		"2022-12-01")
+	probe := "/subscriptions/" + url.PathEscape(d.cfg.SubscriptionID)
+	status, _, _, err := d.get(ctx, probe, "2022-12-01")
 	now := time.Now()
 	if err != nil {
-		return connector.Health{Status: connector.HealthDown, Detail: err.Error(), CheckedAt: now}, err
+		return connector.Health{Status: connector.HealthDown, Detail: err.Error(), CheckedAt: now},
+			d.errWith("probe", probe, err)
 	}
 	switch {
 	case status == http.StatusOK:
@@ -173,16 +181,17 @@ func (d *Discoverer) Discover(ctx context.Context) (*connector.DiscoverResult, e
 	for page := 0; ; page++ {
 		status, _, body, err := d.getWithRetry(ctx, pageURL)
 		if err != nil {
-			return nil, fmt.Errorf("azure: list virtualMachines: %w", err)
+			return nil, d.errWith("list virtualMachines", pageURL, err)
 		}
 		if status != http.StatusOK {
 			// 带响应体摘要便于排障（ARM 错误 body 含错误码与消息；
 			// 不含凭证——Authorization 只在请求头）。
-			return nil, fmt.Errorf("azure: list virtualMachines: HTTP %d: %.256s", status, body)
+			return nil, fmt.Errorf("azure[%s] list virtualMachines HTTP %d: %.256s",
+				d.cfg.ID, status, body)
 		}
 		var listing vmList
 		if err := json.Unmarshal(body, &listing); err != nil {
-			return nil, fmt.Errorf("azure: decode virtualMachines: %w", err)
+			return nil, d.errWith("decode virtualMachines", pageURL, err)
 		}
 		now := time.Now().UTC()
 		for i, vm := range listing.Value {

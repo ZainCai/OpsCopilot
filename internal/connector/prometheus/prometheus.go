@@ -174,11 +174,12 @@ func (p *PrometheusConnector) Collect(ctx context.Context, req connector.Collect
 		return nil, err
 	}
 	if status != http.StatusOK {
-		return nil, fmt.Errorf("prometheus: alerts endpoint status %d: %s", status, httpx.Excerpt(body, 200))
+		return nil, fmt.Errorf("prometheus[%s] alerts endpoint HTTP %d: %s",
+			p.cfg.ID, status, httpx.Excerpt(body, 200))
 	}
 	var resp alertsResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("prometheus: decode alerts: %w", err)
+		return nil, p.errWith("decode", p.cfg.AlertsPath, err)
 	}
 	alerts := make([]connector.Alert, 0, len(resp.Data.Alerts))
 	for _, a := range resp.Data.Alerts {
@@ -234,11 +235,12 @@ func (p *PrometheusConnector) queryMetrics(ctx context.Context, q Query) ([]conn
 		return nil, err
 	}
 	if status != http.StatusOK {
-		return nil, fmt.Errorf("prometheus: query endpoint status %d: %s", status, httpx.Excerpt(body, 200))
+		return nil, fmt.Errorf("prometheus[%s] query endpoint HTTP %d: %s",
+			p.cfg.ID, status, httpx.Excerpt(body, 200))
 	}
 	var resp queryResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("prometheus: decode query result: %w", err)
+		return nil, p.errWith("decode", p.cfg.QueryPath, err)
 	}
 	if resp.Data.ResultType != "" && resp.Data.ResultType != "vector" {
 		return nil, fmt.Errorf("prometheus: unsupported resultType %q (only instant vector supported)", resp.Data.ResultType)
@@ -263,11 +265,12 @@ func (p *PrometheusConnector) Discover(ctx context.Context) (*connector.Discover
 		return nil, err
 	}
 	if status != http.StatusOK {
-		return nil, fmt.Errorf("prometheus: targets endpoint status %d: %s", status, httpx.Excerpt(body, 200))
+		return nil, fmt.Errorf("prometheus[%s] targets endpoint HTTP %d: %s",
+			p.cfg.ID, status, httpx.Excerpt(body, 200))
 	}
 	var resp targetsResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("prometheus: decode targets: %w", err)
+		return nil, p.errWith("decode", p.cfg.TargetsPath, err)
 	}
 	// C2：轮内统一观测时刻——逐节点 time.Now() 会让同一轮发现的
 	// 节点时间戳各不相同，与 DiscoveredAt 语义也不一致。
@@ -283,12 +286,27 @@ func (p *PrometheusConnector) Discover(ctx context.Context) (*connector.Discover
 	}, nil
 }
 
+// errWith 统一错误上下文（全局审查 C11）：底层错误（网络/解码/超限）
+// 逃逸前裹上数据源身份——多实例排障时只有 "prometheus: ..." 无从知道
+// 是哪台 Prometheus、哪个端点。约定格式：
+//
+//	prometheus[<实例 ID>] <操作> <端点>: <原因>
+//
+// 端点传相对路径即可，BaseURL 含主机与凭据信息。
+func (p *PrometheusConnector) errWith(op, endpoint string, err error) error {
+	return fmt.Errorf("prometheus[%s] %s %s: %w", p.cfg.ID, op, endpoint, err)
+}
+
 // get 发起只读 GET，返回状态码、响应体、错误。
 // 响应体读取受 MaxResponseBytes 限制，避免异常响应耗尽内存。
 func (p *PrometheusConnector) get(ctx context.Context, path string) (int, []byte, error) {
 	// 共享 HTTP 层（全局审查 C1）：Bearer 注入与响应体上限统一在 pkg/httpx。
 	status, _, body, err := httpx.Get(ctx, p.client, p.cfg.BaseURL+path, p.cfg.Token, p.cfg.MaxResponseBytes)
-	return status, body, err
+	if err != nil {
+		// 网络错误 / 响应体超限——C11：叶子处统一裹上下文，避免裸 err 逃逸。
+		return status, body, p.errWith("GET", path, err)
+	}
+	return status, body, nil
 }
 
 // postQuery 以 POST form 方式执行查询，仅在 PromQL 超长（> maxQueryURLLen）时启用。
@@ -303,7 +321,7 @@ func (p *PrometheusConnector) postQuery(ctx context.Context, expr string) (int, 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		p.cfg.BaseURL+p.cfg.QueryPath, strings.NewReader(form.Encode()))
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, p.errWith("POST", p.cfg.QueryPath, err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
@@ -312,13 +330,13 @@ func (p *PrometheusConnector) postQuery(ctx context.Context, expr string) (int, 
 	}
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, p.errWith("POST", p.cfg.QueryPath, err)
 	}
 	defer resp.Body.Close()
 
 	body, err := httpx.ReadLimited(resp.Body, p.cfg.MaxResponseBytes)
 	if err != nil {
-		return resp.StatusCode, nil, err
+		return resp.StatusCode, nil, p.errWith("POST", p.cfg.QueryPath, err)
 	}
 	return resp.StatusCode, body, nil
 }

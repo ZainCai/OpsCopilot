@@ -384,3 +384,35 @@ func TestRetryAfterDelay(t *testing.T) {
 		}
 	}
 }
+
+// TestDiscoverErrorCarriesSourceAndEndpoint C11 回归：逃逸错误必须带
+// 实例 ID 与请求标识（端点 URL）——azure 此前 decode 错误只有
+// "azure: decode virtualMachines"，多订阅多连接器时无从定位。
+func TestDiscoverErrorCarriesSourceAndEndpoint(t *testing.T) {
+	big := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"value": []` + strings.Repeat(" ", 8192) + `}`))
+	}))
+	defer big.Close()
+
+	cfg := testConfig(big.URL)
+	cfg.MaxResponseBytes = 1024
+	d, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = d.Discover(context.Background())
+	if err == nil {
+		t.Fatal("oversized response should fail")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "azure[azure-test]") {
+		t.Errorf("error lacks source id: %v", err)
+	}
+	if !strings.Contains(msg, "virtualMachines") {
+		t.Errorf("error lacks operation/endpoint context: %v", err)
+	}
+}
