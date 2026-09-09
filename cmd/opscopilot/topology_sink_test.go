@@ -45,7 +45,7 @@ func TestTopologySink_DiscoverToGraph(t *testing.T) {
 		t.Fatalf("IngestDiscover: %v", err)
 	}
 
-	g := sink.Graph()
+	g := sink.graphSnapshot()
 	if len(g.Nodes) != 2 {
 		t.Fatalf("nodes = %d, want 2", len(g.Nodes))
 	}
@@ -97,7 +97,7 @@ func TestTopologySink_CollectCountsAlerts(t *testing.T) {
 		t.Fatalf("alert count = %d, want 4 (累计计数)", got)
 	}
 	// 告警不进拓扑图（消费方是 W4 降噪）
-	if len(sink.Graph().Nodes) != 0 {
+	if len(sink.graphSnapshot().Nodes) != 0 {
 		t.Error("alerts must not become topology nodes in W3")
 	}
 }
@@ -115,4 +115,33 @@ func TestTopologySink_Defensive(t *testing.T) {
 	if err := sink.IngestCollect(context.Background(), nil); err != nil {
 		t.Errorf("nil collect should be no-op, got %v", err)
 	}
+}
+
+func TestTopologySink_CoverageReportConcurrentWithDiscover(t *testing.T) {
+	// W3 审查 P1-1 回归测试：CoverageReport 的 Stats 遍历必须与
+	// IngestDiscover 的写入互斥。此测试在 -race 下运行（CI ubuntu job）
+	// 才有判别力；本地 Windows 无 cgo，仅作为行为冒烟。
+	b := topology.NewBuilder()
+	sink, _ := NewTopologySink(b, discardLogger{})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			_ = sink.IngestDiscover(context.Background(), &connector.DiscoverResult{
+				Nodes: []connector.ResourceNode{
+					{Key: "host:c1", Type: "host", ObservedAt: time.Now()},
+					{Key: "host:c2", Type: "host", ObservedAt: time.Now()},
+				},
+			})
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		st := sink.CoverageReport()
+		if st.Nodes < st.CausalNodes {
+			t.Fatalf("stats inconsistent: %+v", st)
+		}
+		_ = sink.HasNode("host:c1")
+	}
+	<-done
 }

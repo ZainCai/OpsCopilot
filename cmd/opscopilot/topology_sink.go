@@ -90,8 +90,10 @@ func (s *TopologySink) IngestCollect(_ context.Context, r *connector.CollectResu
 	return nil
 }
 
-// Graph 返回当前拓扑图快照。
-func (s *TopologySink) Graph() *topology.Graph {
+// graphSnapshot 返回当前拓扑图（W3 审查 P3：从公开 API 收窄为包内私有——
+// 返回的是共享底层 map 的指针，对外暴露易被误用为无保护读；包外的
+// 读需求走 HasNode / CoverageReport 这类锁内方法，包内仅测试使用）。
+func (s *TopologySink) graphSnapshot() *topology.Graph {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.builder.Build()
@@ -110,8 +112,14 @@ func (s *TopologySink) HasNode(key string) bool {
 // CoverageReport 覆盖率自检输出（W3 验收 1）：
 // 对比 Nodes/Edges 与 CausalNodes/CausalEdges 即知被门禁拦下多少证据；
 // 按置信度/来源的分桶用于 ADR-007 的后续演进决策。
+//
+// 锁纪律：Stats() 会遍历节点与边 map，必须发生在持锁区间内——
+// 与 IngestDiscover 的写入互斥。不能写成 Graph().Stats()：
+// 那是"持锁取引用、锁外遍历"的无保护读（W3 审查 P1-1）。
 func (s *TopologySink) CoverageReport() topology.Stats {
-	return s.Graph().Stats()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.builder.Build().Stats()
 }
 
 // AlertCount 返回累计收到的告警条数（供测试与运维自检）。

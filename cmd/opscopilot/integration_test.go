@@ -63,7 +63,7 @@ func TestIntegration_DiscoverFeedsTopology(t *testing.T) {
 	}
 
 	// pb 映射冒烟：契约层能承接真实图（W5 API 的前置）
-	resp := sink.Graph().ToProto()
+	resp := sink.graphSnapshot().ToProto()
 	if len(resp.GetNodes()) != st.Nodes {
 		t.Errorf("pb nodes = %d, want %d", len(resp.GetNodes()), st.Nodes)
 	}

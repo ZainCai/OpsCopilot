@@ -29,6 +29,10 @@ jobs:
         run: go build ./...
       - name: Test
         run: go test ./...
+      - name: Test with race detector
+        # 并发正确性门禁：W3 审查发现两处漏锁（IngestDiscover/CoverageReport），
+        # 根因是本地 Windows 跑不了 -race（cgo 限制），必须由 CI 兜底。
+        run: go test -race ./...
       - name: 模块边界检查（P1-2）
         run: python scripts/check_module_boundaries.py
 
