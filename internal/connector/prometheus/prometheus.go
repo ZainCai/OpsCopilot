@@ -17,7 +17,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -25,6 +24,7 @@ import (
 	"time"
 
 	"opscopilot/internal/connector"
+	"opscopilot/pkg/httpx"
 	"opscopilot/pkg/readonly"
 )
 
@@ -148,7 +148,7 @@ func (p *PrometheusConnector) HealthCheck(ctx context.Context) (connector.Health
 		return connector.Health{Status: connector.HealthDown, Detail: err.Error(), CheckedAt: time.Now()}, err
 	}
 	if status != http.StatusOK {
-		d := fmt.Sprintf("unexpected status %d: %s", status, truncate(body, 200))
+		d := fmt.Sprintf("unexpected status %d: %s", status, httpx.Excerpt(body, 200))
 		return connector.Health{Status: connector.HealthDegraded, Detail: d, CheckedAt: time.Now()}, nil
 	}
 	return connector.Health{Status: connector.HealthHealthy, Detail: "ok", CheckedAt: time.Now()}, nil
@@ -174,7 +174,7 @@ func (p *PrometheusConnector) Collect(ctx context.Context, req connector.Collect
 		return nil, err
 	}
 	if status != http.StatusOK {
-		return nil, fmt.Errorf("prometheus: alerts endpoint status %d: %s", status, truncate(body, 200))
+		return nil, fmt.Errorf("prometheus: alerts endpoint status %d: %s", status, httpx.Excerpt(body, 200))
 	}
 	var resp alertsResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
@@ -234,7 +234,7 @@ func (p *PrometheusConnector) queryMetrics(ctx context.Context, q Query) ([]conn
 		return nil, err
 	}
 	if status != http.StatusOK {
-		return nil, fmt.Errorf("prometheus: query endpoint status %d: %s", status, truncate(body, 200))
+		return nil, fmt.Errorf("prometheus: query endpoint status %d: %s", status, httpx.Excerpt(body, 200))
 	}
 	var resp queryResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
@@ -263,45 +263,32 @@ func (p *PrometheusConnector) Discover(ctx context.Context) (*connector.Discover
 		return nil, err
 	}
 	if status != http.StatusOK {
-		return nil, fmt.Errorf("prometheus: targets endpoint status %d: %s", status, truncate(body, 200))
+		return nil, fmt.Errorf("prometheus: targets endpoint status %d: %s", status, httpx.Excerpt(body, 200))
 	}
 	var resp targetsResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("prometheus: decode targets: %w", err)
 	}
+	// C2：轮内统一观测时刻——逐节点 time.Now() 会让同一轮发现的
+	// 节点时间戳各不相同，与 DiscoveredAt 语义也不一致。
+	now := time.Now()
 	nodes := make([]connector.ResourceNode, 0, len(resp.Data.ActiveTargets))
 	for _, t := range resp.Data.ActiveTargets {
-		nodes = append(nodes, normalizeTarget(t, p.cfg.ID))
+		nodes = append(nodes, normalizeTarget(t, p.cfg.ID, now))
 	}
 	return &connector.DiscoverResult{
 		Nodes:        nodes,
 		TenantID:     p.cfg.TenantID,
-		DiscoveredAt: time.Now(),
+		DiscoveredAt: now,
 	}, nil
 }
 
 // get 发起只读 GET，返回状态码、响应体、错误。
 // 响应体读取受 MaxResponseBytes 限制，避免异常响应耗尽内存。
 func (p *PrometheusConnector) get(ctx context.Context, path string) (int, []byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.cfg.BaseURL+path, nil)
-	if err != nil {
-		return 0, nil, err
-	}
-	req.Header.Set("Accept", "application/json")
-	if p.cfg.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+p.cfg.Token)
-	}
-	resp, err := p.client.Do(req)
-	if err != nil {
-		return 0, nil, err
-	}
-	defer resp.Body.Close()
-
-	body, err := readLimited(resp.Body, p.cfg.MaxResponseBytes)
-	if err != nil {
-		return resp.StatusCode, nil, err
-	}
-	return resp.StatusCode, body, nil
+	// 共享 HTTP 层（全局审查 C1）：Bearer 注入与响应体上限统一在 pkg/httpx。
+	status, _, body, err := httpx.Get(ctx, p.client, p.cfg.BaseURL+path, p.cfg.Token, p.cfg.MaxResponseBytes)
+	return status, body, err
 }
 
 // postQuery 以 POST form 方式执行查询，仅在 PromQL 超长（> maxQueryURLLen）时启用。
@@ -329,23 +316,11 @@ func (p *PrometheusConnector) postQuery(ctx context.Context, expr string) (int, 
 	}
 	defer resp.Body.Close()
 
-	body, err := readLimited(resp.Body, p.cfg.MaxResponseBytes)
+	body, err := httpx.ReadLimited(resp.Body, p.cfg.MaxResponseBytes)
 	if err != nil {
 		return resp.StatusCode, nil, err
 	}
 	return resp.StatusCode, body, nil
-}
-
-// readLimited 按上限读取响应体，超过 limit 直接报错，防止异常响应打爆内存。
-func readLimited(r io.Reader, limit int64) ([]byte, error) {
-	body, err := io.ReadAll(io.LimitReader(r, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(body)) > limit {
-		return nil, fmt.Errorf("prometheus: response exceeds %d bytes", limit)
-	}
-	return body, nil
 }
 
 // ---- 归一化 ----
@@ -371,7 +346,7 @@ func normalizeAlert(a rawAlert, source string) connector.Alert {
 	}
 }
 
-func normalizeTarget(t rawTarget, source string) connector.ResourceNode {
+func normalizeTarget(t rawTarget, source string, now time.Time) connector.ResourceNode {
 	key := "prometheus://" + t.ScrapePool + "/"
 	if inst, ok := t.Labels["instance"]; ok {
 		key += inst
@@ -396,7 +371,7 @@ func normalizeTarget(t rawTarget, source string) connector.ResourceNode {
 		Type:       typ,
 		Labels:     labels,
 		Source:     source,
-		ObservedAt: time.Now(),
+		ObservedAt: now,
 	}
 }
 
@@ -540,12 +515,4 @@ func parseTime(s string) time.Time {
 		return time.Time{}
 	}
 	return t
-}
-
-func truncate(b []byte, n int) string {
-	s := string(b)
-	if len(s) > n {
-		return s[:n]
-	}
-	return s
 }

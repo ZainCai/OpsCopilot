@@ -23,7 +23,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -31,6 +30,7 @@ import (
 	"time"
 
 	"opscopilot/internal/connector"
+	"opscopilot/pkg/httpx"
 	"opscopilot/pkg/readonly"
 )
 
@@ -184,8 +184,9 @@ func (d *Discoverer) Discover(ctx context.Context) (*connector.DiscoverResult, e
 		if err := json.Unmarshal(body, &listing); err != nil {
 			return nil, fmt.Errorf("azure: decode virtualMachines: %w", err)
 		}
+		now := time.Now().UTC()
 		for i, vm := range listing.Value {
-			n, err := d.normalize(vm)
+			n, err := d.normalize(vm, now)
 			if err != nil {
 				// 异常资源显式失败而非静默跳过：拓扑缺一截比发现失败更危险，
 				// 静默丢资源会让下游误以为覆盖完整。
@@ -219,7 +220,7 @@ func (d *Discoverer) Discover(ctx context.Context) (*connector.DiscoverResult, e
 
 // normalize 单台虚拟机 → ResourceNode。缺 vmId 且缺资源 ID 的数据
 // 视为源异常，返回错误（由 Discover 携带下标拒绝整批）。
-func (d *Discoverer) normalize(vm vmResource) (connector.ResourceNode, error) {
+func (d *Discoverer) normalize(vm vmResource, now time.Time) (connector.ResourceNode, error) {
 	if vm.Properties.VMID == "" && vm.ID == "" {
 		return connector.ResourceNode{}, errors.New("resource has neither vmId nor id")
 	}
@@ -252,7 +253,7 @@ func (d *Discoverer) normalize(vm vmResource) (connector.ResourceNode, error) {
 		Type:       "vm",
 		Labels:     labels,
 		Source:     d.cfg.ID,
-		ObservedAt: time.Now().UTC(),
+		ObservedAt: now,
 	}, nil
 }
 
@@ -285,23 +286,8 @@ func (d *Discoverer) get(ctx context.Context, pathOrURL, apiVersion string) (int
 			reqURL += sep + "api-version=" + url.QueryEscape(apiVersion)
 		}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return 0, nil, nil, err
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer "+d.cfg.Credential.Secret)
-
-	resp, err := d.client.Do(req)
-	if err != nil {
-		return 0, nil, nil, err
-	}
-	defer resp.Body.Close()
-	body, err := readLimited(resp.Body, d.cfg.MaxResponseBytes)
-	if err != nil {
-		return resp.StatusCode, resp.Header, nil, err
-	}
-	return resp.StatusCode, resp.Header, body, nil
+	// 共享 HTTP 层（全局审查 C1）：Bearer 注入与响应体上限统一在 pkg/httpx。
+	return httpx.Get(ctx, d.client, reqURL, d.cfg.Credential.Secret, d.cfg.MaxResponseBytes)
 }
 
 // getWithRetry 对 429（ARM 限流）按 Retry-After 退避重试，最多
@@ -345,18 +331,6 @@ func retryAfterDelay(h http.Header) time.Duration {
 		return d
 	}
 	return time.Second
-}
-
-// readLimited 按上限读取响应体，超过 limit 直接报错。
-func readLimited(r io.Reader, limit int64) ([]byte, error) {
-	body, err := io.ReadAll(io.LimitReader(r, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(body)) > limit {
-		return nil, fmt.Errorf("azure: response exceeds %d bytes", limit)
-	}
-	return body, nil
 }
 
 // ---- ARM 响应形状（只声明用到的字段）----
