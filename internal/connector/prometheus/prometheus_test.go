@@ -362,3 +362,96 @@ func TestNew_EmptyQueryExprRejected(t *testing.T) {
 		t.Fatal("empty PromQL expression should be rejected at construction")
 	}
 }
+
+// TestQueryUsesPOSTForLongExpr 超长 PromQL 放不进 URL，应自动降级为 POST
+// （仍属只读查询），保证功能可用。
+func TestQueryUsesPOSTForLongExpr(t *testing.T) {
+	srv, reqs := mockProm(t, sampleAlerts, sampleTargets, sampleQuery)
+	longExpr := `up{job="` + strings.Repeat("a", 2000) + `"}`
+
+	c, err := New(Config{ID: "p1", BaseURL: srv.URL, Queries: []Query{{Name: "x", Expr: longExpr}}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	res, err := c.Collect(context.Background(), connector.CollectRequest{})
+	if err != nil {
+		t.Fatalf("Collect with long expr: %v", err)
+	}
+	if len(res.Metrics) != 2 {
+		t.Fatalf("Metrics len = %d, want 2", len(res.Metrics))
+	}
+
+	var sawQuery bool
+	for _, r := range *reqs {
+		if r.path == "/api/v1/query" {
+			sawQuery = true
+			if r.method != http.MethodPost {
+				t.Errorf("long PromQL should fall back to POST, got %s", r.method)
+			}
+		}
+	}
+	if !sawQuery {
+		t.Fatal("query request not observed")
+	}
+}
+
+// TestCollect_TimestampPrecision 指标时间戳必须保留亚秒精度，
+// 不能因 int64 截断退化到整秒。
+func TestCollect_TimestampPrecision(t *testing.T) {
+	// 1757400000.5 秒 = 整秒 + 500ms
+	q := `{"status":"success","data":{"resultType":"vector","result":[{"metric":{"__name__":"up"},"value":[1757400000.5,"1"]}]}}`
+	srv, _ := mockProm(t, sampleAlerts, sampleTargets, q)
+	c, _ := New(Config{ID: "p1", BaseURL: srv.URL, Queries: []Query{{Expr: "up"}}})
+
+	res, err := c.Collect(context.Background(), connector.CollectRequest{})
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(res.Metrics) != 1 {
+		t.Fatalf("Metrics len = %d, want 1", len(res.Metrics))
+	}
+	want := time.Unix(1757400000, int64(500*time.Millisecond))
+	got := res.Metrics[0].Timestamp
+	// 允许浮点换算带来的纳秒级误差，但必须远小于"整秒截断"（500ms）
+	if d := got.Sub(want); d > time.Microsecond || d < -time.Microsecond {
+		t.Fatalf("Timestamp = %v, want ~%v (sub-second precision lost? diff=%v)", got, want, d)
+	}
+}
+
+// TestCollect_PartialSuccessAggregatesErrors 单条查询失败不应吞掉其余已成功的指标，
+// 且失败要聚合返回（显式，不是静默忽略）。
+func TestCollect_PartialSuccessAggregatesErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v1/alerts":
+			_, _ = w.Write([]byte(sampleAlerts))
+		case r.URL.Path == "/api/v1/query":
+			// 仅让 bad_expr 失败，其余正常返回
+			if strings.Contains(r.URL.RawQuery, "bad_expr") {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			_, _ = w.Write([]byte(sampleQuery))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := New(Config{ID: "p1", BaseURL: srv.URL, Queries: []Query{
+		{Name: "good", Expr: "up"},
+		{Name: "bad", Expr: "bad_expr"},
+	}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	res, err := c.Collect(context.Background(), connector.CollectRequest{})
+	if err == nil {
+		t.Fatal("expected aggregated error for the failing query")
+	}
+	if res == nil || len(res.Metrics) != 2 {
+		t.Fatalf("successful query metrics must be retained, got %v", res)
+	}
+}

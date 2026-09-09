@@ -15,11 +15,13 @@ package prometheus
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"opscopilot/internal/connector"
@@ -28,6 +30,10 @@ import (
 
 // defaultMaxResponseBytes 单次响应体读取上限，防止异常/恶意响应打爆内存。
 const defaultMaxResponseBytes = 32 << 20 // 32 MiB
+
+// maxQueryURLLen 单条 PromQL 编码后允许放进 URL 的最大长度。
+// 超过则自动改用 POST form，规避代理/服务端对 URL 长度的常见限制（约 2~8KB）。
+const maxQueryURLLen = 1800
 
 // Query 一条指标查询配置。
 type Query struct {
@@ -170,33 +176,50 @@ func (p *PrometheusConnector) Collect(ctx context.Context, req connector.Collect
 	}
 
 	// ---- 指标（仅在配置了 PromQL 时采集）----
+	// 多条查询相互独立：单条失败不吞掉其余已成功的指标，
+	// 所有失败聚合后随结果一并返回——显式报错，不是静默忽略。
 	metrics := make([]connector.MetricSample, 0)
+	var qErrs []error
 	for _, q := range p.cfg.Queries {
 		if q.Expr == "" {
 			continue
 		}
 		samples, err := p.queryMetrics(ctx, q)
 		if err != nil {
-			return nil, err
+			qErrs = append(qErrs, fmt.Errorf("query %q: %w", q.Name, err))
+			continue
 		}
 		metrics = append(metrics, samples...)
 	}
 
-	return &connector.CollectResult{
+	result := &connector.CollectResult{
 		Metrics:     metrics,
 		Alerts:      alerts,
 		TenantID:    p.cfg.TenantID,
 		CollectedAt: time.Now(),
-	}, nil
+	}
+	if len(qErrs) > 0 {
+		// 带上已成功采集的部分指标，由调用方决定是降级使用还是整体重试。
+		return result, errors.Join(qErrs...)
+	}
+	return result, nil
 }
 
 // queryMetrics 执行一次 instant 查询（/api/v1/query）并归一化为指标样本。
 //
-// 注意：使用 GET 而非 POST，以严守"只读"可审计性（审计时可按 HTTP 方法判定）。
-// 代价是超长 PromQL 可能受 URL 长度限制，如遇此情况请拆分查询表达式。
+// 默认 GET 以严守"只读"可审计性；仅当 PromQL 编码后超过 maxQueryURLLen 时
+// 自动降级为 POST form（仍为只读查询，见包注释），兼顾纪律与可用性。
 func (p *PrometheusConnector) queryMetrics(ctx context.Context, q Query) ([]connector.MetricSample, error) {
-	path := p.cfg.QueryPath + "?query=" + url.QueryEscape(q.Expr)
-	status, body, err := p.get(ctx, path)
+	var (
+		status int
+		body   []byte
+		err    error
+	)
+	if len(url.QueryEscape(q.Expr)) > maxQueryURLLen {
+		status, body, err = p.postQuery(ctx, q.Expr)
+	} else {
+		status, body, err = p.get(ctx, p.cfg.QueryPath+"?query="+url.QueryEscape(q.Expr))
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -264,15 +287,55 @@ func (p *PrometheusConnector) get(ctx context.Context, path string) (int, []byte
 	}
 	defer resp.Body.Close()
 
-	limit := p.cfg.MaxResponseBytes
-	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	body, err := readLimited(resp.Body, p.cfg.MaxResponseBytes)
 	if err != nil {
 		return resp.StatusCode, nil, err
 	}
-	if int64(len(body)) > limit {
-		return resp.StatusCode, nil, fmt.Errorf("prometheus: response exceeds %d bytes", limit)
+	return resp.StatusCode, body, nil
+}
+
+// postQuery 以 POST form 方式执行查询，仅在 PromQL 超长（> maxQueryURLLen）时启用。
+//
+// 说明：Prometheus 官方对 /api/v1/query 同时支持 GET 与 POST（form-encoded），
+// 本方法只用于规避 URL 长度限制——它仅传递查询参数，不改变服务端任何状态，
+// 因此仍属只读查询，不违反 ADR-002。
+func (p *PrometheusConnector) postQuery(ctx context.Context, expr string) (int, []byte, error) {
+	form := url.Values{}
+	form.Set("query", expr)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		p.cfg.BaseURL+p.cfg.QueryPath, strings.NewReader(form.Encode()))
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	if p.cfg.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+p.cfg.Token)
+	}
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := readLimited(resp.Body, p.cfg.MaxResponseBytes)
+	if err != nil {
+		return resp.StatusCode, nil, err
 	}
 	return resp.StatusCode, body, nil
+}
+
+// readLimited 按上限读取响应体，超过 limit 直接报错，防止异常响应打爆内存。
+func readLimited(r io.Reader, limit int64) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > limit {
+		return nil, fmt.Errorf("prometheus: response exceeds %d bytes", limit)
+	}
+	return body, nil
 }
 
 // ---- 归一化 ----
@@ -354,11 +417,14 @@ func normalizeSample(s rawSample, queryName, source string) (connector.MetricSam
 	for k, v := range s.Metric {
 		labels[k] = v
 	}
+	// tsSec 是浮点秒、含亚秒小数。若直接 int64 截断（time.Unix(sec, 0)）
+	// 会丢弃小数部分，导致同一时刻的多条样本精度失真；
+	// 故换算为纳秒时间戳，保留数据源返回的完整精度。
 	return connector.MetricSample{
 		Name:      name,
 		Labels:    labels,
 		Value:     val,
-		Timestamp: time.Unix(int64(tsSec), 0),
+		Timestamp: time.Unix(0, int64(tsSec*float64(time.Second))),
 		Source:    source,
 	}, nil
 }
