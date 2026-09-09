@@ -249,3 +249,26 @@ func TestBuilder_NilReceiver(t *testing.T) {
 		t.Fatal("nil builder AddEdge should error, not panic")
 	}
 }
+
+// TestCausalSubgraph_NilIsEmptyGraph C4 回归：nil 图不得 panic，
+// 语义与 AsOf 一致（nil = 空图），返回 Nodes map 非 nil 的空图。
+func TestCausalSubgraph_NilIsEmptyGraph(t *testing.T) {
+	var g *Graph
+	out := g.CausalSubgraph()
+	if out == nil || out.Nodes == nil || len(out.Nodes) != 0 || len(out.Edges) != 0 {
+		t.Errorf("CausalSubgraph(nil) = %+v, want empty graph with non-nil map", out)
+	}
+}
+
+// TestStats_NilIsEmptyStats C4 回归：nil 图 Stats 不得 panic，
+// 返回零计数 + 非 nil 分桶 map（与空图统计一致，调用方无 nil map 读风险）。
+func TestStats_NilIsEmptyStats(t *testing.T) {
+	var g *Graph
+	s := g.Stats()
+	if s.Nodes != 0 || s.Edges != 0 || s.CausalNodes != 0 || s.CausalEdges != 0 {
+		t.Errorf("Stats(nil) = %+v, want zero counts", s)
+	}
+	if s.NodesByConfidence == nil || s.EdgesByConfidence == nil || s.NodesBySource == nil {
+		t.Error("Stats(nil) maps must be non-nil")
+	}
+}

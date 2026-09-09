@@ -26,9 +26,12 @@ type Stats struct {
 //  2. 剔除 low 级节点；
 //  3. 剔除因端点被剔除而悬空的边（保持图一致性）。
 //
-// 返回新图，不修改原图。
+// 返回新图，不修改原图。nil 图等价于空图（与 AsOf 的 nil 语义一致）。
 func (g *Graph) CausalSubgraph() *Graph {
 	out := &Graph{Nodes: make(map[string]*Node)}
+	if g == nil {
+		return out
+	}
 	// 1) 先滤 low 边
 	keptEdges := make([]*Edge, 0, len(g.Edges))
 	for _, e := range g.Edges {
@@ -55,15 +58,19 @@ func (g *Graph) CausalSubgraph() *Graph {
 	return out
 }
 
-// Stats 计算统计信息（含因果门禁通过率）。
+// Stats 计算统计信息（含因果门禁通过率）。nil 图等价于空图：
+// 返回各计数为 0、分桶 map 非 nil 的 Stats，调用方可按空图路径处理。
 func (g *Graph) Stats() Stats {
 	s := Stats{
-		Nodes:             len(g.Nodes),
-		Edges:             len(g.Edges),
 		NodesByConfidence: make(map[Confidence]int),
 		EdgesByConfidence: make(map[Confidence]int),
 		NodesBySource:     make(map[string]int),
 	}
+	if g == nil {
+		return s
+	}
+	s.Nodes = len(g.Nodes)
+	s.Edges = len(g.Edges)
 	for _, n := range g.Nodes {
 		s.NodesByConfidence[n.Confidence]++
 		s.NodesBySource[n.Source]++
