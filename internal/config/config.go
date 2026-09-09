@@ -18,10 +18,10 @@ const (
 
 // RedisConfig 单个 Redis 实例配置。
 type RedisConfig struct {
-	Addr     string `yaml:"addr"`
+	Addr     string    `yaml:"addr"`
 	Role     RedisRole `yaml:"role"`
-	Password string `yaml:"password"`
-	DB       int    `yaml:"db"`
+	Password string    `yaml:"password"`
+	DB       int       `yaml:"db"`
 }
 
 // Validate 校验实例角色合法性。

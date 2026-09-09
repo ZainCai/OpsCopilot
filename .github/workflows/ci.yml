@@ -16,6 +16,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: gofmt 检查
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "以下文件未通过 gofmt："
+            echo "$unformatted"
+            echo "请在本地执行: gofmt -w ."
+            exit 1
+          fi
       - name: Build
         run: go build ./...
       - name: Test

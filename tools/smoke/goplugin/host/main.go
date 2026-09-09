@@ -1,6 +1,7 @@
 // T2 冒烟测试宿主侧：验证 go-plugin 在 Windows 上的可用性。
 // 运行方式（在 tools/smoke/goplugin 目录下）：
-//   go build -o bin/plugin.exe ./plugin && go run ./host
+//
+//	go build -o bin/plugin.exe ./plugin && go run ./host
 package main
 
 import (
