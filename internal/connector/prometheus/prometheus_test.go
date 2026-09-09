@@ -299,7 +299,7 @@ func TestDiscover_Normalization(t *testing.T) {
 // TestReadOnlyOnlyGET 只读纪律：所有请求必须是 GET，且按配置透传 Bearer。
 func TestReadOnlyOnlyGET(t *testing.T) {
 	srv, reqs := mockProm(t, sampleAlerts, sampleTargets, sampleQuery)
-	c, _ := New(Config{ID: "p1", BaseURL: srv.URL, Token: "secret-token"})
+	c, _ := New(Config{ID: "p1", BaseURL: srv.URL, Token: "secret-token", AllowInsecureToken: true})
 
 	if _, err := c.HealthCheck(context.Background()); err != nil {
 		t.Fatalf("HealthCheck: %v", err)
@@ -453,5 +453,16 @@ func TestCollect_PartialSuccessAggregatesErrors(t *testing.T) {
 	}
 	if res == nil || len(res.Metrics) != 2 {
 		t.Fatalf("successful query metrics must be retained, got %v", res)
+	}
+}
+
+// TestBareTokenRequiresExplicitOptIn C8 回归：裸 Token 绕过只读闸门
+// 必须显式 AllowInsecureToken=true，默认拒绝。
+func TestBareTokenRequiresExplicitOptIn(t *testing.T) {
+	if _, err := New(Config{ID: "p1", BaseURL: "http://localhost:9090", Token: "tok"}); err == nil {
+		t.Fatal("bare Token without AllowInsecureToken must be rejected")
+	}
+	if _, err := New(Config{ID: "p1", BaseURL: "http://localhost:9090", Token: "tok", AllowInsecureToken: true}); err != nil {
+		t.Fatalf("bare Token with explicit opt-in should pass: %v", err)
 	}
 }

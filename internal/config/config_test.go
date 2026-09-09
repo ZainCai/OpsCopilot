@@ -34,3 +34,15 @@ func TestValidateRoleSwap(t *testing.T) {
 		t.Fatal("expected error when instance roles are swapped")
 	}
 }
+
+// TestValidateCacheAddrRequired G1 回归：cache 实例地址为空必须拒绝
+// （与"两个都必须配置，缺一拒绝启动"的约定一致）。
+func TestValidateCacheAddrRequired(t *testing.T) {
+	c := &Config{
+		RedisAlert: RedisConfig{Addr: "127.0.0.1:6380", Role: RedisAlert},
+		RedisCache: RedisConfig{Addr: "", Role: RedisCache},
+	}
+	if err := c.Validate(); err == nil {
+		t.Fatal("expected error when cache redis addr is empty")
+	}
+}

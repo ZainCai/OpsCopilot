@@ -133,13 +133,17 @@ func (d *Discoverer) Collect(_ context.Context, _ connector.CollectRequest) (*co
 
 // HealthCheck 实现 connector.Connector：GET 订阅资源（最便宜的只读探针），
 // 200 即视为凭证有效、ARM 可达。
+//
+// 错误语义与 prometheus 连接器统一（全局审查 G4）：网络错误上抛 err
+// （Host 记日志并退避），HTTP 非 200 归入 degraded 但不上抛——
+// "云端拒绝/异常"是可自愈状态，"连不上"才是故障。
 func (d *Discoverer) HealthCheck(ctx context.Context) (connector.Health, error) {
 	status, _, _, err := d.get(ctx,
 		"/subscriptions/"+url.PathEscape(d.cfg.SubscriptionID),
 		"2022-12-01")
 	now := time.Now()
 	if err != nil {
-		return connector.Health{Status: connector.HealthDown, Detail: err.Error(), CheckedAt: now}, nil
+		return connector.Health{Status: connector.HealthDown, Detail: err.Error(), CheckedAt: now}, err
 	}
 	switch {
 	case status == http.StatusOK:

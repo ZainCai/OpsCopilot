@@ -243,7 +243,10 @@ func (h *Host) RunOnce(ctx context.Context, sink Sink) error {
 		health, herr := c.HealthCheck(ctx)
 		if herr != nil || health.Status == HealthDown {
 			sched.fail(id, h.maxBackoff)
-			h.logf("connector %s health down: %v", id, herr)
+			// G4：herr 与 health.Detail 都要进日志——azure 风格的实现
+			// 返回 (Down, nil)，只打 herr 会得到 info量为零的 "<nil>"。
+			h.logf("connector %s health check failed: status=%s err=%v detail=%q",
+				id, health.Status, herr, health.Detail)
 			continue
 		}
 

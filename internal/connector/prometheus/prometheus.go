@@ -55,8 +55,13 @@ type Config struct {
 	Credential *readonly.Credential
 	// Token 裸 Bearer Token。**仅用于无鉴权或本地测试场景**；
 	// 生产路径请使用 Credential，否则只读纪律无法被代码强制。
-	// 同时设置时 Credential 优先。
+	// 同时设置时 Credential 优先；单独使用裸 Token 必须显式置
+	// AllowInsecureToken=true（全局审查 C8：把绕过只读强制的口子
+	// 从"默认可用"改为"显式承认"）。
 	Token string
+	// AllowInsecureToken 允许裸 Token 绕过只读凭证强制。仅限本地调试
+	// 与无鉴权数据源（如公开 demo）；生产配置一律走 Credential。
+	AllowInsecureToken bool
 	// TenantID 多租户隔离标记，透传到采集结果。
 	TenantID string
 	// Queries 指标查询列表（PromQL）。
@@ -94,6 +99,11 @@ func New(cfg Config) (*PrometheusConnector, error) {
 			return nil, fmt.Errorf("prometheus: %w", err)
 		}
 		cfg.Token = cfg.Credential.Secret
+	}
+	// 裸 Token 绕过闸门必须显式承认（C8）：默认拒绝，防止配置者
+	// 在不知情的情况下跳过只读强制。
+	if cfg.Token != "" && cfg.Credential == nil && !cfg.AllowInsecureToken {
+		return nil, fmt.Errorf("prometheus: bare Token bypasses read-only credential enforcement — set AllowInsecureToken=true (local/debug only) or use Credential")
 	}
 
 	// 规范化基址，去掉尾部斜杠
