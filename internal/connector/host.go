@@ -251,17 +251,21 @@ func (h *Host) RunOnce(ctx context.Context, sink Sink) error {
 		}
 
 		col, cerr := c.Collect(ctx, CollectRequest{})
-		if cerr != nil {
-			sched.fail(id, h.maxBackoff)
-			h.logf("connector %s collect failed: %v", id, cerr)
-			continue
-		}
+		// 部分成功语义（全局审查 G3）：连接器契约允许"带结果 + 错误"
+		// （如 prometheus 部分查询失败但告警全部成功）。Host 的取舍：
+		// **先投递已成功的数据，再进退避**——告警的时效性不该为指标
+		// 查询的失败陪葬；退避照常生效，避免带病连接器被打爆。
 		if sink != nil && col != nil {
 			if err := sink.IngestCollect(ctx, col); err != nil {
 				sched.fail(id, h.maxBackoff)
 				h.logf("connector %s sink ingest failed: %v", id, err)
 				continue
 			}
+		}
+		if cerr != nil {
+			sched.fail(id, h.maxBackoff)
+			h.logf("connector %s collect failed (partial result delivered): %v", id, cerr)
+			continue
 		}
 
 		disc, derr := c.Discover(ctx)

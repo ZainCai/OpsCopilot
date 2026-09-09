@@ -132,14 +132,15 @@ func TestChangeWebhook_MissingFields(t *testing.T) {
 }
 
 func TestChangeWebhook_DuplicateConflict(t *testing.T) {
+	// G5：重复提交为幂等成功（200），不再返回 409。
+	// 详细断言见 TestChangeWebhook_DuplicateIdempotent。
 	h, _ := newTestWebhook(t)
 	body := `{"id":"dup","node_key":"host:demo","type":"deploy"}`
 	if rec := post(t, h, body); rec.Code != http.StatusOK {
 		t.Fatalf("first post: code = %d, want 200", rec.Code)
 	}
-	rec := post(t, h, body)
-	if rec.Code != http.StatusConflict {
-		t.Errorf("duplicate post: code = %d, want 409", rec.Code)
+	if rec := post(t, h, body); rec.Code != http.StatusOK {
+		t.Errorf("duplicate post: code = %d, want 200 (idempotent)", rec.Code)
 	}
 }
 
@@ -236,5 +237,37 @@ func TestChangeWebhook_AuthRequired(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Errorf("correct token: code = %d, want 200", rec.Code)
+	}
+}
+
+func TestChangeWebhook_DuplicateIdempotent(t *testing.T) {
+	// G5 回归：重复提交返回 200 + 原记录（幂等成功），而非 409——
+	// 自动重试的 webhook 发送方会把 409 当失败无限重发。
+	h, store := newTestWebhook(t)
+	body := `{"id":"dup","node_key":"host:demo","type":"deploy","summary":"v1"}`
+	if rec := post(t, h, body); rec.Code != http.StatusOK {
+		t.Fatalf("first post: code = %d, want 200", rec.Code)
+	}
+	rec := post(t, h, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("duplicate post: code = %d, want 200 (idempotent success)", rec.Code)
+	}
+	var resp struct {
+		Status    string               `json:"status"`
+		Duplicate bool                 `json:"duplicate"`
+		Event     topology.ChangeEvent `json:"event"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not JSON: %v", err)
+	}
+	if !resp.Duplicate || resp.Status != "ok" {
+		t.Errorf("duplicate flag = %v status = %q, want true/ok", resp.Duplicate, resp.Status)
+	}
+	// 返回的是**原记录**：第二次请求的 summary 不覆盖第一次
+	if resp.Event.Summary != "v1" || resp.Event.Type != topology.ChangeDeploy {
+		t.Errorf("duplicate returned mutated record: %+v", resp.Event)
+	}
+	if store.Len() != 1 {
+		t.Errorf("store len = %d, want 1", store.Len())
 	}
 }

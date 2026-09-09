@@ -106,14 +106,18 @@ func (h *ChangeWebhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	stored, err := h.store.Record(ev)
 	switch {
 	case err == nil:
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"status": "ok",
-			"event":  stored,
-		})
+		h.writeEvent(w, map[string]any{"status": "ok", "event": stored})
 	case errors.Is(err, topology.ErrDuplicateChange):
-		http.Error(w, err.Error(), http.StatusConflict)
+		// 幂等成功（全局审查 G5）：重复 ID 返回 200 + 原记录。
+		// Git/Jenkins 等自动重试的发送方把 409 当失败会无限重发——
+		// 幂等键存在的意义就是"重复提交 = 已经成功"。
+		orig, ok := h.store.Get(ev.ID)
+		if !ok {
+			// 理论不可达（重复错误意味着库里必有原记录）；防御兜底。
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		h.writeEvent(w, map[string]any{"status": "ok", "duplicate": true, "event": orig})
 	case errors.Is(err, topology.ErrNodeNotFound):
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 	case errors.Is(err, topology.ErrEmptyChangeID),
@@ -126,4 +130,11 @@ func (h *ChangeWebhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// 未知错误：入库侧内部问题，按 500 上抛而非吞掉。
 		http.Error(w, "internal error: "+err.Error(), http.StatusInternalServerError)
 	}
+}
+
+// writeEvent 输出 JSON 成功响应（200）。
+func (h *ChangeWebhook) writeEvent(w http.ResponseWriter, body map[string]any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(body)
 }

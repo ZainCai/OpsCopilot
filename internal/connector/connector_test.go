@@ -279,3 +279,31 @@ func TestZeroValueHost_RunDoesNotPanic(t *testing.T) {
 		t.Fatal("Run should return ctx error after timeout")
 	}
 }
+
+// TestHost_RunOnce_PartialCollectStillDelivered G3 回归：连接器契约允许
+// "带部分结果 + 错误"，Host 必须先投递已成功的数据再进退避——
+// 告警时效性不该为指标查询失败陪葬。
+func TestHost_RunOnce_PartialCollectStillDelivered(t *testing.T) {
+	fake := newHealthyFake("partial")
+	fake.collectErr = errors.New("one metric query failed")
+	h := NewHost(WithLogger(discardLogger{}))
+	if err := h.Register(fake); err != nil {
+		t.Fatal(err)
+	}
+	sink := &memSink{}
+	if err := h.RunOnce(context.Background(), sink); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	// 已成功的部分必须投递
+	nCollects, _ := sink.len()
+	if nCollects != 1 {
+		t.Fatalf("collects delivered = %d, want 1 (partial result must be delivered)", nCollects)
+	}
+	if len(sink.collects[0].Alerts) != 1 {
+		t.Errorf("alerts in delivered result = %d, want 1", len(sink.collects[0].Alerts))
+	}
+	// 退避照常生效：下一轮应跳过该连接器
+	if !h.sched.shouldSkip("partial", time.Now()) {
+		t.Error("connector must enter backoff after partial failure")
+	}
+}
