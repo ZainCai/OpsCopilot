@@ -42,10 +42,13 @@ case "$(uname -s 2>/dev/null)" in
     ;;
 esac
 
+# X3：--go_out 必须指向 $PKG_DIR（internal/contracts/pb/）。原指向 $OUT_DIR
+# 会在 contracts/ 根生成 topology.pb.go（package pb 位于错误目录），
+# 与仓库实际布局及 Windows 兜底分支（生成到临时目录再拷入 $PKG_DIR）不一致。
 protoc \
   --proto_path="$PROTO_DIR" \
-  --go_out="$OUT_DIR" --go_opt=paths=source_relative \
-  --go-grpc_out="$OUT_DIR" --go-grpc_opt=paths=source_relative \
+  --go_out="$PKG_DIR" --go_opt=paths=source_relative \
+  --go-grpc_out="$PKG_DIR" --go-grpc_opt=paths=source_relative \
   "$PROTO_DIR"/*.proto
 
 echo "generated -> $PKG_DIR"
