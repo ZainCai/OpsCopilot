@@ -76,6 +76,37 @@ migrate -path migrations -database "postgres://opscopilot:opscopilot@localhost:5
 > 若想把 GOPROXY 固化：`go env -w GOPROXY=https://goproxy.cn,direct`（在原生终端执行，Git Bash 下可能因缺 %AppData% 报错）。
 > `make` 在 Git Bash 缺省未装，`make migrate` 改用上条等价的直接 `migrate` 命令即可（golang-migrate CLI 须以 `go install -tags 'postgres'` 安装，否则报 `unknown driver postgres`）。
 
+## 运维接入
+
+### 环境变量
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `REDIS_ALERT_ADDR` | 无（必填） | 持久化告警实例地址（ADR-004，缺一拒绝启动） |
+| `REDIS_CACHE_ADDR` | 无（必填） | 缓存实例地址，必须与 alert 物理分离 |
+| `OPS_LISTEN_ADDR` | `127.0.0.1:8080` | HTTP 监听地址；**默认只绑回环**（S1），容器/对外部署需显式 `0.0.0.0:8080`（compose 已配） |
+| `OPS_WEBHOOK_TOKEN` | 空（无鉴权） | 变更 webhook 共享密钥；非回环暴露前必须设置 |
+
+### 变更事件 webhook
+
+`POST /api/v1/changes`（Git/Jenkins/人工统一入口，变更事件是 RCA 证据链输入）：
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/changes \
+  -H "Content-Type: application/json" \
+  -H "X-OpsCopilot-Token: <OPS_WEBHOOK_TOKEN>" \
+  -d '{"id":"<唯一幂等键>","node_key":"azure://vm/<vmId>","type":"deploy","source":"git","summary":"v1.2.3 上线"}'
+```
+
+状态码语义（调用方按此处理，勿盲目重试）：
+
+- `200` 入库成功；**重复 ID 也返回 200**（响应带 `"duplicate": true` 与原记录）——幂等键的意义就是"重复提交 = 已经成功"，自动重试的发送方不会形成重试风暴；
+- `400` 请求体/字段校验失败；`401` Token 缺失或不匹配；`405` 非 POST；`413` 请求体超 1MiB；`422` 关联节点不在拓扑图中。
+
+### 本地 compose 环境
+
+`make env-up` 启动 TimescaleDB + 双 Redis + 应用。compose 已配置 `OPS_LISTEN_ADDR=0.0.0.0:8080`（容器隔离即安全边界）与 Redis healthcheck；应用容器为 distroless（无 shell），探活用 `GET /healthz` 由外部编排层负责。默认 DB 口令仅限本地开发（见 `.env.example` 注释）。
+
 ## 架构决策记录
 
 `docs/adr/` 存 6 份 ADR（ADR-001 事件骨干 / 002 算子前置 / 003 LLM 单出口 / 004 Redis 双实例 / 005 审计分离 / 006 数据库部署 + 关键外部依赖清单）。

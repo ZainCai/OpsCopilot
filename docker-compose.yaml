@@ -33,6 +33,10 @@ services:
       - "6380:6379"
     volumes:
       - redis-alert-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
 
   redis-cache:
     # 缓存实例：LRU 可逐出，仅放可重建数据（ADR-004）
@@ -42,6 +46,10 @@ services:
       redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
     ports:
       - "6381:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
 
   app:
     build:
@@ -52,13 +60,19 @@ services:
       timescaledb:
         condition: service_healthy
       redis-alert:
-        condition: service_started
+        condition: service_healthy
       redis-cache:
-        condition: service_started
+        condition: service_healthy
     environment:
       REDIS_ALERT_ADDR: redis-alert:6379
       REDIS_CACHE_ADDR: redis-cache:6379
       DB_DSN: postgres://opscopilot:${DB_PASSWORD:-opscopilot}@timescaledb:5432/opscopilot?sslmode=disable
+      # X2：容器内必须绑全接口（0.0.0.0），否则宿主端口映射不可达；
+      # 进程默认 127.0.0.1 是给裸机/本地运行的安全默认（S1），两者不冲突
+      OPS_LISTEN_ADDR: 0.0.0.0:8080
+      # 变更 webhook 共享密钥：为空时端点无鉴权（进程会打警告）。
+      # 容器网络内可接受；暴露到容器外前必须设置（见 README 运维接入）
+      OPS_WEBHOOK_TOKEN: ${OPS_WEBHOOK_TOKEN:-}
     ports:
       - "8080:8080"
 
