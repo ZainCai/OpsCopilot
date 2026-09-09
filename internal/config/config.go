@@ -17,11 +17,15 @@ const (
 )
 
 // RedisConfig 单个 Redis 实例配置。
+//
+// 配置通道为 env-only（main 只读环境变量，无 YAML 装载路径），
+// 因此不带 yaml tag——遗留 tag 暗示着一条并不存在的文件配置通道
+// （全局审查 C6）。Password/DB 同理：redis client 由外部注入
+// （sessionstore.New 收 *redis.Client），本配置尚无消费者；
+// 真正接线 client 构造时随 env key 一并加回，不在无消费者时留半成品。
 type RedisConfig struct {
-	Addr     string    `yaml:"addr"`
-	Role     RedisRole `yaml:"role"`
-	Password string    `yaml:"password"`
-	DB       int       `yaml:"db"`
+	Addr string
+	Role RedisRole
 }
 
 // Validate 校验实例角色合法性与地址必填。
@@ -48,8 +52,8 @@ func (c *RedisConfig) Validate() error {
 // Config all-in-one 进程配置。
 type Config struct {
 	// 双实例：两个都必须配置，缺一拒绝启动。
-	RedisAlert RedisConfig `yaml:"redis_alert"`
-	RedisCache RedisConfig `yaml:"redis_cache"`
+	RedisAlert RedisConfig
+	RedisCache RedisConfig
 }
 
 // Validate 全局校验：双实例角色不得互换、地址不得相同（防止偷偷合并回单实例）、
