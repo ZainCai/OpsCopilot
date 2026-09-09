@@ -27,9 +27,14 @@ type Store struct {
 	ttl time.Duration
 }
 
-// New 构造会话存储。role 必须为 "alert"（持久化实例）。
-// 传入其他角色（尤其 "cache"）是架构违例，直接 panic。
+// New 构造会话存储。rdb 必须非 nil；role 必须为 "alert"（持久化实例）。
+// 传入 nil client 或绑定其他角色（尤其 "cache"）都是启动期配置错误，
+// 直接 panic——失败前移，避免运行时才暴露（全局审查 C10：原 nil 误传
+// 要等 Save 才 panic，晚于构造点）。
 func New(rdb *redis.Client, role string) *Store {
+	if rdb == nil {
+		panic("sessionstore: nil redis client")
+	}
 	if role != "alert" {
 		panic("sessionstore: must bind to persistent 'alert' redis instance, got: " + role)
 	}
