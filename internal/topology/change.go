@@ -31,6 +31,14 @@ import (
 //	"改了什么"。契约对齐动作：① proto 补字段（版本化演进，保持向后兼容）；
 //	② 实现 ChangeEvent→pb.ChangeRecord 映射；③ 类型映射统一走 ChangeType
 //	字符串化而非自由字符串。三步在 gRPC 服务落地时一起做。
+//
+// DB 落库契约（migrations/000002_change_record_align，N2 严重项修复）：
+//
+//	change_record 表已加 event_id TEXT（承载 ChangeEvent.ID）+ UNIQUE(tenant_id, event_id)
+//	+ CHECK(change_type IN ('deploy','config_change','rollback'))。DB 层防重复 +
+//	枚举与 ChangeType 封闭集合一致。W4 接 gRPC/DB 时 ChangeStore 须实现
+//	ChangeEvent → change_record 的列映射：Source→source, Author→actor,
+//	Ref/Revision/Summary/Confidence→detail JSONB；ID 即 event_id。
 
 // ChangeType 变更事件类型（强类型）。
 type ChangeType string

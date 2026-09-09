@@ -37,7 +37,7 @@ opscopilot/
 | 数据库 schema `migrations/000001` | ✅ | 时态拓扑（valid_from/valid_to + as_of 索引）、变更记录、告警簇（幂等键 + 直通标记）、告警事件、审计索引 |
 | 跨模块契约 `internal/contracts` | ✅ | `topology.proto` + 生成的 `pb/topology.pb.go`（603 行）/ `pb/topology_grpc.pb.go`（169 行），`scripts/gen.sh` 含中文路径兜底 |
 | `Dockerfile` / `.env.example` / `Makefile` | ✅ | 多阶段 distroless；迁移统一走 golang-migrate（ADR-006） |
-| 本机验证 | ✅ | `docker compose up` 起 3 容器；`migrate up` 建 7 表 + timescaledb 扩展；双 Redis `PONG` |
+| 本机验证 | ✅ | `docker compose up` 起 3 容器；`migrate up` 建 7 表 + timescaledb 扩展（alert_event 同步转 hypertable，见迁移 000003）；双 Redis `PONG` |
 
 > W1 **产品功能尚未开工**：连接器（Prometheus + 阿里/AWS）、语义模型 v1（as_of）、降噪影子模式、告警簇 API + 控制台均未写。M1 出口标准（影子降噪准确率 >85%）远未达。
 
@@ -124,6 +124,8 @@ curl -X POST http://127.0.0.1:8080/api/v1/changes \
 
 - 跨模块 gRPC 契约已生成：`internal/contracts/proto/topology.proto` + 生成的 `pb/topology.pb.go` / `pb/topology_grpc.pb.go`；更多服务契约随 W1 主体开发补充；
 - 尚无真实 Redis 集成测试（sessionstore 单测只覆盖构造期角色守卫，读写路径待 O10，计划 W5 用 miniredis/testcontainers 补齐）；
-- `alert_event` 当前为普通表，TimescaleDB 的 hypertable/连续聚合/保留策略尚未启用（M1 单机联调可接受，数据量上来或 W7 时转换）；
+- `alert_event` 已通过 `migrations/000003` 转为 TimescaleDB hypertable（1 天 chunk，7 天后压缩按 `tenant_id,fingerprint` 分段，30 天后自动保留删除）；W4 接 alert ingest 之前完成，避免生产数据量起来后转 hypertable 的写入停摆窗口；
+- `change_record` 通过 `migrations/000002` 与内存 `ChangeEvent` 对齐：`event_id TEXT` 承载幂等键（DB 层 UNIQUE 防重复）+ `change_type` CHECK 与 `ChangeType` 封闭集合一致；W4 接 DB 时按 `change.go` 文件头注释实现列映射；
 - CI 已随 `git push` 在 GitHub Actions 运行：`build-and-check`（build/test/边界检查）+ `goplugin-smoke-windows` + `goplugin-smoke-linux`（T2 双平台冒烟）；
-- W1 主体功能（连接器 / 语义模型 / 降噪 / API）尚未开工，M1 出口标准（影子降噪准确率 >85%）未达。
+- W1 主体功能（连接器 / 语义模型 / 降噪 / API）尚未开工，M1 出口标准（影子降噪准确率 >85%）未达；
+- main 启动日志已明确当前 W3 阶段（"wired: topology + change webhook；not wired: Host.Run、gRPC SemanticModelServer、sessionstore、/metrics、alert pipeline"）——**不要把"骨架就绪"误读为"产品就绪"**（N1 修复）。

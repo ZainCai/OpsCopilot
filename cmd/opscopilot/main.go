@@ -1,5 +1,5 @@
 // OpsCopilot all-in-one 入口（M1）。
-// 职责：加载配置 -> 校验双 Redis 实例约束 -> 装配 W3 组件 -> 启动 HTTP 服务。
+// 职责：加载配置 -> 校验双 Redis 实例约束 -> 装配 W3 组件 -> 装配连接器宿主 -> 启动 HTTP 服务。
 package main
 
 import (
@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"opscopilot/internal/config"
+	"opscopilot/internal/credential"
 )
 
 // defaultListenAddr HTTP 监听地址默认值；可用环境变量 OPS_LISTEN_ADDR 覆盖。
@@ -36,7 +37,8 @@ func main() {
 	logger.Printf("config validated (dual-redis enforced)")
 
 	// W3 装配：拓扑引擎 + 发现入口（TopologySink）+ 变更事件库 + webhook。
-	// 连接器注册进 Host 的装配在 W4 降噪接入时一起做（需要告警消费方就位）。
+	// TopologySink 同时实现 connector.Sink——W4 起它既是 webhook 的变更库，
+	// 也是 Host 采集结果的投递终点。
 	webhookToken := os.Getenv("OPS_WEBHOOK_TOKEN")
 	asm, err := NewAssembly(logger, webhookToken)
 	if err != nil {
@@ -49,6 +51,15 @@ func main() {
 			changeWebhookPath)
 	}
 
+	// W4-1.1 接线：凭证库 + 连接器宿主。连接器按 env 按需注册（见 connectors.go），
+	// 未配置任何数据源时 Host 空转，topology + webhook 仍照常服务。
+	creds := credential.NewStore()
+	host, registered, err := newConnectorHost(logger, creds)
+	if err != nil {
+		logger.Printf("connector assembly failed: %v", err)
+		os.Exit(1)
+	}
+
 	addr := os.Getenv("OPS_LISTEN_ADDR")
 	if addr == "" {
 		addr = defaultListenAddr
@@ -59,6 +70,34 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second, // slow-loris 防御
 	}
 
+	// runCtx 同时管两件事的生命周期：Host 调度循环与 credential 周期清扫。
+	// 优雅停机信号先 cancel 再 drain HTTP，采集循环在在途请求落地前先退出。
+	runCtx, runCancel := context.WithCancel(context.Background())
+
+	// Host.Run：周期"健康→采集→发现→投递"，结果进 TopologySink（拓扑 + 告警计数）。
+	go func() {
+		if err := host.Run(runCtx, asm.Sink); err != nil && !errors.Is(err, context.Canceled) {
+			logger.Printf("connector host stopped: %v", err)
+		}
+	}()
+
+	// credential 周期清扫（C9 收尾）：过期条目不再是"删除前一直占内存"。
+	// 周期 10 分钟——清扫是幂等原语，频率只需远小于凭证最小有效期。
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case <-ticker.C:
+				if n := creds.SweepExpired(time.Now()); n > 0 {
+					logger.Printf("credential sweep: removed %d expired entries", n)
+				}
+			}
+		}
+	}()
+
 	// 优雅停机：SIGINT/SIGTERM 触发后最多等 10s 让在途请求落地。
 	done := make(chan struct{})
 	go func() {
@@ -66,13 +105,24 @@ func main() {
 		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 		<-sig
 		logger.Printf("shutdown signal received, draining...")
+		runCancel()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(ctx)
 		close(done)
 	}()
 
-	logger.Printf("W3 assembly ready: POST %s (change events) | GET /healthz | listening on %s",
+	// 启动可见性：明确当前 main 装配的 W 阶段，
+	// 避免运维把"骨架就绪"误读为"产品就绪"——降噪/gRPC/会话均未接线。
+	logger.Printf("=== M1 stage: W4-1.1 (topology + change webhook + connector host) ===")
+	logger.Printf("  wired:    topology builder + topology sink + change store + change webhook + credential store(sweep) + connector host")
+	if len(registered) > 0 {
+		logger.Printf("  connectors: %v (interval 30s, conn timeout 30s)", registered)
+	} else {
+		logger.Printf("  connectors: none (set OPS_PROM_URL / OPS_AZURE_SUBSCRIPTION_ID+OPS_AZURE_TOKEN to enable)")
+	}
+	logger.Printf("  not wired (W4-1.2+): noise engine, gRPC SemanticModelServer, sessionstore, /metrics, alert pipeline")
+	logger.Printf("POST %s (change events) | GET /healthz | listening on %s",
 		changeWebhookPath, addr)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Printf("http server: %v", err)
