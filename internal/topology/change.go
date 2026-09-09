@@ -20,6 +20,17 @@ import (
 //   - 存储为进程内内存实现（M1 规模：百台主机、分钟级窗口查询足够）；
 //     接口按"可换后端"设计，持久化属后续迭代。
 //   - 所有返回值为值拷贝，调用方修改不影响库内状态（并发安全）。
+//
+// 对外契约（pb.ChangeRecord，全局审查 C5——映射暂缓，勿临场改 proto）：
+//
+//	GetRecentChanges gRPC 接线前必须先扩 proto：现 pb.ChangeRecord 只有
+//	node_key/change_type/occurred_at/actor 四字段，而内存 ChangeEvent 还有
+//	id（幂等键，重复提交语义依赖它）、source/ref/revision/summary
+//	（RCA 证据展示必需）、confidence、tenant_id。丢失 id 意味着响应无法
+//	去重；丢失 summary 意味着 RCA 证据只剩"何时改了什么类型"，没有
+//	"改了什么"。契约对齐动作：① proto 补字段（版本化演进，保持向后兼容）；
+//	② 实现 ChangeEvent→pb.ChangeRecord 映射；③ 类型映射统一走 ChangeType
+//	字符串化而非自由字符串。三步在 gRPC 服务落地时一起做。
 
 // ChangeType 变更事件类型（强类型）。
 type ChangeType string

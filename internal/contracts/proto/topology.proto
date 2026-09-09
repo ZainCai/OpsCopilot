@@ -51,6 +51,13 @@ message GetRecentChangesRequest {
   string window_end = 4;
 }
 
+// ChangeRecord 变更记录（对外契约，全局审查 C5）。
+//
+// 注意：字段落后于内存模型 ChangeEvent（internal/topology）——缺 id
+// （幂等键/去重）、source/ref/revision/summary（RCA 证据）、confidence、
+// tenant_id。接线 GetRecentChanges 前必须先扩字段（版本化演进、向后兼容），
+// 再实现映射；勿为单次接线改小契约导致证据不可用。改动请同步 proto + pb
+// 生成代码 + internal/topology/change.go 顶部注释。
 message ChangeRecord {
   string node_key = 1;
   string change_type = 2;
