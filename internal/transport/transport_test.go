@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -44,7 +45,7 @@ func TestDialInProcessRoundTrip(t *testing.T) {
 // 若未来 gRPC 需要多路连接，本测试会失败并提醒重新设计，避免静默退化。
 func TestSingleListenerSecondAcceptBlocks(t *testing.T) {
 	serverConn, _ := net.Pipe()
-	ln := &singleListener{ln: serverConn}
+	ln := &singleListener{ln: serverConn, closed: make(chan struct{})}
 
 	got, err := ln.Accept()
 	if err != nil {
@@ -59,7 +60,7 @@ func TestSingleListenerSecondAcceptBlocks(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		_, _ = ln.Accept() // 设计上应永久阻塞
+		_, _ = ln.Accept() // 设计上应阻塞直到 Close
 		close(done)
 	}()
 	select {
@@ -67,5 +68,45 @@ func TestSingleListenerSecondAcceptBlocks(t *testing.T) {
 		t.Fatal("second Accept should block under single-connection design")
 	case <-time.After(200 * time.Millisecond):
 		// 符合预期
+	}
+
+	// G2：Close 必须解除阻塞并返回 net.ErrClosed——否则 grpc.Server.Stop()
+	// 会因 accept 循环无法退出而卡死。
+	close(ln.closed)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not unblock second Accept")
+	}
+	if _, err := ln.Accept(); !errors.Is(err, net.ErrClosed) {
+		t.Errorf("Accept after close = %v, want net.ErrClosed", err)
+	}
+}
+
+// TestDialInProcess_StopTerminates G2 回归：grpc.Server.Stop() 必须能在
+// 有限时间内返回（accept 循环可退出）。修复前 singleListener 的第二次
+// Accept 永久 select{}，Stop 会卡死。
+func TestDialInProcess_StopTerminates(t *testing.T) {
+	srv := grpc.NewServer()
+	healthpb.RegisterHealthServer(srv, health.NewServer())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := DialInProcess(ctx, srv)
+	if err != nil {
+		t.Fatalf("DialInProcess failed: %v", err)
+	}
+	defer conn.Close()
+
+	stopped := make(chan struct{})
+	go func() {
+		srv.Stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		// 符合预期：Stop 干净返回
+	case <-time.After(3 * time.Second):
+		t.Fatal("grpc.Server.Stop() did not return — accept loop stuck (G2 regression)")
 	}
 }

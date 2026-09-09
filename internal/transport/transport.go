@@ -10,6 +10,7 @@ package transport
 import (
 	"context"
 	"net"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
@@ -21,7 +22,7 @@ import (
 // 返回的 ClientConn 与真实网络连接行为一致，业务代码零改动。
 func DialInProcess(ctx context.Context, srv *grpc.Server) (*grpc.ClientConn, error) {
 	serverLn, clientLn := net.Pipe()
-	go func() { _ = srv.Serve(&singleListener{ln: serverLn}) }()
+	go func() { _ = srv.Serve(&singleListener{ln: serverLn, closed: make(chan struct{})}) }()
 
 	dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -34,21 +35,46 @@ func DialInProcess(ctx context.Context, srv *grpc.Server) (*grpc.ClientConn, err
 }
 
 // singleListener 把一对 pipe 适配为 net.Listener（只接受一次连接）。
+//
+// 停机语义（全局审查 G2）：第二次 Accept 阻塞等待关闭——Close 时必须
+// 返回 net.ErrClosed 而不是永远 select{} 卡死。否则 grpc.Server.Stop()
+// 会因 accept 循环无法退出而卡死（Serve goroutine 与管道资源泄漏）。
+// 测试锁定：单连接约束（第二次 Accept 阻塞）与停机（Close 后 Accept 报错）。
 type singleListener struct {
-	ln    net.Conn
-	ready bool
+	ln net.Conn
+	// accepted 标记唯一一次 Accept 是否已发生。
+	accepted bool
+	// closed 由 Close 触发关闭；Accept 的阻塞等待监听它。
+	closed chan struct{}
+	// closeOnce 保证 Close 幂等（重复 Close 不能重复 close channel）。
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func (l *singleListener) Accept() (net.Conn, error) {
-	if l.ready {
-		// 阻塞等关闭
-		select {}
+	// 已关闭：立即报错（含 Close 先于 Accept 的时序）。
+	select {
+	case <-l.closed:
+		return nil, net.ErrClosed
+	default:
 	}
-	l.ready = true
-	return l.ln, nil
+	if !l.accepted {
+		l.accepted = true
+		return l.ln, nil
+	}
+	// 唯一连接已交付：阻塞直到 Close（这是单连接设计的约束点）。
+	<-l.closed
+	return nil, net.ErrClosed
 }
 
-func (l *singleListener) Close() error   { return l.ln.Close() }
+func (l *singleListener) Close() error {
+	l.closeOnce.Do(func() {
+		close(l.closed)
+		l.closeErr = l.ln.Close()
+	})
+	return l.closeErr
+}
+
 func (l *singleListener) Addr() net.Addr { return pipeAddr{} }
 
 type pipeAddr struct{}
