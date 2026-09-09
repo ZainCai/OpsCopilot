@@ -209,3 +209,32 @@ func TestChangeWebhook_TrailingDataRejected(t *testing.T) {
 		t.Errorf("store len = %d, want 0 (nothing committed)", n)
 	}
 }
+
+func TestChangeWebhook_AuthRequired(t *testing.T) {
+	// S1 回归：配置了 Token 的端点必须校验 X-OpsCopilot-Token。
+	h, _ := newTestWebhook(t)
+	h.Token = "s3cret"
+
+	req := httptest.NewRequest(http.MethodPost, "/changes", strings.NewReader(`{"id":"a","node_key":"host:demo","type":"deploy"}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("no header: code = %d, want 401", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/changes", strings.NewReader(`{"id":"a","node_key":"host:demo","type":"deploy"}`))
+	req.Header.Set(AuthHeader, "wrong")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("wrong token: code = %d, want 401", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/changes", strings.NewReader(`{"id":"a","node_key":"host:demo","type":"deploy"}`))
+	req.Header.Set(AuthHeader, "s3cret")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("correct token: code = %d, want 200", rec.Code)
+	}
+}

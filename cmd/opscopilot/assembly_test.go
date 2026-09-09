@@ -14,11 +14,33 @@ import (
 
 func newTestAssembly(t *testing.T) *Assembly {
 	t.Helper()
-	a, err := NewAssembly(nil)
+	a, err := NewAssembly(nil, "")
 	if err != nil {
 		t.Fatalf("NewAssembly: %v", err)
 	}
 	return a
+}
+
+func TestAssembly_WebhookTokenWired(t *testing.T) {
+	// S1：装配层必须把共享密钥接到 webhook（写路径准入）。
+	a, err := NewAssembly(nil, "s3cret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Webhook.Token != "s3cret" {
+		t.Fatalf("webhook token = %q, want wired from NewAssembly", a.Webhook.Token)
+	}
+	srv := httptest.NewServer(a.Handler())
+	defer srv.Close()
+	resp, err := http.Post(srv.URL+changeWebhookPath, "application/json",
+		strings.NewReader(`{"id":"c1","node_key":"host:x","type":"deploy"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("missing token: code = %d, want 401", resp.StatusCode)
+	}
 }
 
 func TestAssembly_ChangeRequiresDiscoveredNode(t *testing.T) {

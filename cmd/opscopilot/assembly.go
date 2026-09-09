@@ -30,9 +30,13 @@ type Assembly struct {
 
 // NewAssembly 组装 W3 全部组件并接线。
 //
+// webhookToken：变更 webhook 的共享密钥；非空时 POST /api/v1/changes
+// 必须携带匹配的 X-OpsCopilot-Token 头（S1 写路径准入）。传空表示
+// 不鉴权——仅限回环/内网部署。
+//
 // 变更库的节点校验钩子经 Sink.HasNode（锁内读图）实现——变更事件只能
 // 关联到拓扑图里真实存在的节点，防止"幽灵节点"静默失败。
-func NewAssembly(logger connector.Logger) (*Assembly, error) {
+func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error) {
 	builder := topology.NewBuilder()
 	sink, err := NewTopologySink(builder, logger)
 	if err != nil {
@@ -43,6 +47,7 @@ func NewAssembly(logger connector.Logger) (*Assembly, error) {
 	if err != nil {
 		return nil, err
 	}
+	hook.Token = webhookToken
 	return &Assembly{Sink: sink, Changes: store, Webhook: hook}, nil
 }
 

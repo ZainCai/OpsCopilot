@@ -8,6 +8,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,13 +22,22 @@ import (
 // 1MiB 足够，防止误用/恶意大包。
 const changeWebhookDefaultBodyLimit = 1 << 20
 
+// AuthHeader 变更 webhook 的共享密钥头。配置了 Token 的端点必须携带
+// 匹配的头，否则 401（全局审查 S1：变更事件是 RCA 证据链的输入，
+// 无鉴权可写端点等于允许伪造"上线/回滚"误导故障根因判断）。
+const AuthHeader = "X-OpsCopilot-Token"
+
 // ChangeWebhook 变更事件接收端点。
 //
 // DefaultSource：请求体未带 source 时填充的默认值（如 "manual"），
 // 让手动 curl 与 Git/Jenkins 推送共用同一端点、来源可区分。
 type ChangeWebhook struct {
-	store         *topology.ChangeStore
+	store *topology.ChangeStore
+	// DefaultSource 请求体未带 source 时填充的默认来源。
 	DefaultSource string
+	// Token 共享密钥；非空时请求必须携带匹配的 AuthHeader 头（401 拒绝）。
+	// 为空表示不鉴权——仅限回环/内网部署（main.go 会在未配置时打警告）。
+	Token string
 	// MaxBodyBytes 请求体上限；零值取默认 1MiB。
 	MaxBodyBytes int64
 }
@@ -43,11 +53,10 @@ func NewChangeWebhook(store *topology.ChangeStore, defaultSource string) (*Chang
 // ServeHTTP 实现 http.Handler。
 //
 // 状态码语义（显式约定，调用方按此排障）：
-//   - 200：入库成功，返回存储后的事件（含补全的默认值）；
-//   - 400：JSON 解析失败 / 未知字段 / 字段校验失败（缺 id、node_key、
-//     非法 type/confidence）——请求本身有问题；
+//   - 200：入库成功（含幂等重复，见 G5 注释），返回存储后的事件；
+//   - 400：JSON 解析失败 / 未知字段 / 字段校验失败——请求本身有问题；
+//   - 401：配置了 Token 但请求头缺失或不匹配；
 //   - 405：非 POST 方法（响应带 Allow: POST）；
-//   - 409：同 ID 变更重复提交（幂等冲突，重发同一事件属正常场景）；
 //   - 413：请求体超过上限；
 //   - 422：事件关联的节点不在拓扑图中（严格节点校验开启时）——
 //     请求格式正确但语义上指向不存在的资源，区别于 400。
@@ -55,6 +64,12 @@ func (h *ChangeWebhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
 		http.Error(w, "method not allowed: change webhook accepts POST only", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// 写路径准入（S1）：constant-time 比较防时序侧信道。
+	if h.Token != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get(AuthHeader)), []byte(h.Token)) != 1 {
+		http.Error(w, "unauthorized: missing or invalid "+AuthHeader+" header", http.StatusUnauthorized)
 		return
 	}
 

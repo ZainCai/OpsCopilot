@@ -17,7 +17,9 @@ import (
 )
 
 // defaultListenAddr HTTP 监听地址默认值；可用环境变量 OPS_LISTEN_ADDR 覆盖。
-const defaultListenAddr = ":8080"
+// 默认只绑回环（全局审查 S1）：进程暴露了可写的变更 webhook，
+// 无鉴权服务不得默认监听全部网络接口。
+const defaultListenAddr = "127.0.0.1:8080"
 
 func main() {
 	// 双 Redis 实例约束（v1.2 C2/P1-1）在启动期强制。
@@ -35,10 +37,16 @@ func main() {
 
 	// W3 装配：拓扑引擎 + 发现入口（TopologySink）+ 变更事件库 + webhook。
 	// 连接器注册进 Host 的装配在 W4 降噪接入时一起做（需要告警消费方就位）。
-	asm, err := NewAssembly(logger)
+	webhookToken := os.Getenv("OPS_WEBHOOK_TOKEN")
+	asm, err := NewAssembly(logger, webhookToken)
 	if err != nil {
 		logger.Printf("assembly failed: %v", err)
 		os.Exit(1)
+	}
+	if webhookToken == "" {
+		logger.Printf("WARNING: OPS_WEBHOOK_TOKEN not set — %s is UNAUTHENTICATED. "+
+			"Default bind is loopback-only; set the token or put an authenticating reverse proxy in front before any non-loopback exposure",
+			changeWebhookPath)
 	}
 
 	addr := os.Getenv("OPS_LISTEN_ADDR")
