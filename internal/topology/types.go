@@ -12,6 +12,7 @@
 package topology
 
 import (
+	"errors"
 	"fmt"
 	"time"
 )
@@ -29,8 +30,12 @@ const (
 	ConfidenceLow Confidence = "low"
 )
 
+// ErrUnknownConfidence 非法置信度取值（ParseConfidence 返回的错误以此为根因）。
+var ErrUnknownConfidence = errors.New("topology: unknown confidence")
+
 // ParseConfidence 解析置信度字符串（pb / 外部输入用）。
 // 空串按 low 处理——保守原则：未声明的证据一律按最低档对待。
+// 错误以 ErrUnknownConfidence 为根因（%w 包装），调用方可 errors.Is 匹配。
 func ParseConfidence(s string) (Confidence, error) {
 	switch Confidence(s) {
 	case ConfidenceHigh, ConfidenceMedium, ConfidenceLow:
@@ -38,7 +43,7 @@ func ParseConfidence(s string) (Confidence, error) {
 	case "":
 		return ConfidenceLow, nil
 	default:
-		return "", fmt.Errorf("topology: unknown confidence %q", s)
+		return "", fmt.Errorf("%w %q", ErrUnknownConfidence, s)
 	}
 }
 
