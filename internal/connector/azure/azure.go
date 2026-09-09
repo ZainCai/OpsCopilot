@@ -39,8 +39,6 @@ const (
 	defaultBaseURL = "https://management.azure.com"
 	// defaultAPIVersion 虚拟机列表 API 版本（稳定 GA 版本，不追新）。
 	defaultAPIVersion = "2022-11-01"
-	// defaultMaxResponseBytes 单页响应体上限，防止异常响应打爆内存。
-	defaultMaxResponseBytes = 32 << 20 // 32 MiB
 	// maxPages 分页硬上限：防御恶意/异常服务端用 nextLink 造成死循环。
 	maxPages = 100
 	// maxRetriesOn429 ARM 限流（HTTP 429）的最大重试次数。
@@ -105,7 +103,7 @@ func New(cfg Config) (*Discoverer, error) {
 		cfg.APIVersion = defaultAPIVersion
 	}
 	if cfg.MaxResponseBytes <= 0 {
-		cfg.MaxResponseBytes = defaultMaxResponseBytes
+		cfg.MaxResponseBytes = httpx.DefaultMaxResponseBytes
 	}
 	client := cfg.HTTPClient
 	if client == nil {

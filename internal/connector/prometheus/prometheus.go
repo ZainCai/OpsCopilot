@@ -28,9 +28,6 @@ import (
 	"opscopilot/pkg/readonly"
 )
 
-// defaultMaxResponseBytes 单次响应体读取上限，防止异常/恶意响应打爆内存。
-const defaultMaxResponseBytes = 32 << 20 // 32 MiB
-
 // maxQueryURLLen 单条 PromQL 编码后允许放进 URL 的最大长度。
 // 超过则自动改用 POST form，规避代理/服务端对 URL 长度的常见限制（约 2~8KB）。
 const maxQueryURLLen = 1800
@@ -120,7 +117,7 @@ func New(cfg Config) (*PrometheusConnector, error) {
 		cfg.QueryPath = "/api/v1/query"
 	}
 	if cfg.MaxResponseBytes <= 0 {
-		cfg.MaxResponseBytes = defaultMaxResponseBytes
+		cfg.MaxResponseBytes = httpx.DefaultMaxResponseBytes
 	}
 	// 查询配置在构造期校验：空 PromQL 属配置错误，早失败好过运行时静默跳过。
 	for i, q := range cfg.Queries {
