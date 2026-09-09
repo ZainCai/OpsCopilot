@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 
 	"opscopilot/internal/topology"
@@ -73,6 +74,12 @@ func (h *ChangeWebhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	// 拒绝尾部多余数据（P3）：decoder 只取第一个值，`{...}{...}` 这类
+	// 粘包若不检查会静默收一半——请求体必须是且仅是一个 JSON 对象。
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		http.Error(w, "unexpected trailing data after JSON object", http.StatusBadRequest)
 		return
 	}
 

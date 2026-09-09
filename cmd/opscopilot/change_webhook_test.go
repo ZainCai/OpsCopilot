@@ -195,3 +195,17 @@ func TestChangeWebhook_AssociationWindow(t *testing.T) {
 		t.Errorf("1h window hits = %d, want 2", len(hits))
 	}
 }
+
+func TestChangeWebhook_TrailingDataRejected(t *testing.T) {
+	// W3 审查 P3 回归：请求体必须是且仅是一个 JSON 对象，
+	// `{...}{...}` 粘包不能静默收一半。
+	h, _ := newTestWebhook(t)
+	rec := post(t, h, `{"id":"t1","node_key":"host:demo","type":"deploy"}{"id":"t2"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("trailing data: code = %d, want 400", rec.Code)
+	}
+	// 两个事件都不应入库
+	if n := h.store.Len(); n != 0 {
+		t.Errorf("store len = %d, want 0 (nothing committed)", n)
+	}
+}
