@@ -45,6 +45,10 @@ func NewTopologySink(b *topology.Builder, logger connector.Logger) (*TopologySin
 }
 
 // IngestDiscover 实现 connector.Sink：发现节点 → 拓扑节点。
+//
+// 持锁范围说明：Builder.AddDiscovery 会写共享的节点 map，而本 Sink 的
+// Graph()（供变更 webhook 的节点校验钩子等读方使用）读的是同一张图——
+// 写入必须与 Graph() 用同一把锁互斥，否则装配层会出现数据竞争。
 func (s *TopologySink) IngestDiscover(_ context.Context, r *connector.DiscoverResult) error {
 	if r == nil {
 		return nil
@@ -59,7 +63,10 @@ func (s *TopologySink) IngestDiscover(_ context.Context, r *connector.DiscoverRe
 			ObservedAt: n.ObservedAt,
 		})
 	}
-	if err := s.builder.AddDiscovery(inputs); err != nil {
+	s.mu.Lock()
+	err := s.builder.AddDiscovery(inputs)
+	s.mu.Unlock()
+	if err != nil {
 		return fmt.Errorf("topology sink: ingest discover: %w", err)
 	}
 	s.logf("discover ingested: %d nodes (tenant=%q)", len(inputs), r.TenantID)
@@ -88,6 +95,16 @@ func (s *TopologySink) Graph() *topology.Graph {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.builder.Build()
+}
+
+// HasNode 锁内判定节点是否存在（供变更 webhook 的严格节点校验钩子使用）。
+// 读操作发生在持锁区间内，与 IngestDiscover 的写入互斥——不要用
+// Graph().Nodes 在锁外做同样的事，那是无保护读。
+func (s *TopologySink) HasNode(key string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.builder.Build().Nodes[key]
+	return ok
 }
 
 // CoverageReport 覆盖率自检输出（W3 验收 1）：
