@@ -38,7 +38,16 @@ type NoiseEngine struct {
 	logger  connector.Logger
 	// total / converged 影子统计（启动以来累计）。
 	total, converged int
+	// tenant 租户标识（M1 单租户；落库记录与键空间前缀用）。
+	tenant string
+	// records 簇落库出口（W4-1.5，可选；nil = 只跑影子不落库）。
+	records noise.RecordSink
+	// saveFailures 落库失败累计（不中断告警链路，供运维观察）。
+	saveFailures int
 }
+
+// DefaultTenant M1 单租户缺省值（alert_cluster.tenant_id 对齐）。
+const DefaultTenant = "default"
 
 // NewNoiseEngine 按 env 构造。返回 nil 表示影子降噪关闭（envNoiseShadow=off），
 // 调用方须容忍 nil（挂载点与 ProcessAlerts 均做 nil 检查）。
@@ -61,7 +70,20 @@ func NewNoiseEngine(sink *TopologySink, logger connector.Logger) (*NoiseEngine, 
 		sink:    sink,
 		enabled: true,
 		logger:  logger,
+		tenant:  DefaultTenant,
 	}, nil
+}
+
+// SetRecordSink 挂载簇落库出口（W4-1.5 双写管道）。传 nil 卸载。
+// 必须在首条告警处理前挂好：落库语义是"批后全量幂等快照"，
+// 挂载前的状态变更不会补写。
+func (n *NoiseEngine) SetRecordSink(rs noise.RecordSink) {
+	if n == nil {
+		return
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.records = rs
 }
 
 type invalidNoiseWindowError struct {
@@ -111,6 +133,43 @@ func (n *NoiseEngine) ProcessAlerts(alerts []connector.Alert) {
 	}
 	n.logf("shadow verdict: %d alerts (new %d, dedup %d, merged %d) — cumulative converge %d/%d",
 		len(alerts), created, suppressed, merged, n.converged, n.total)
+	n.persistClusters()
+}
+
+// persistClusters 批后落库（W4-1.5）：全部簇做一次幂等快照 upsert。
+// 选全量而非增量：簇数量在百台规模是十位数量级，全量写免去脏标记的
+// 复杂度，且天然容忍丢写——下一批补齐；RecordSink 实现必须幂等
+// （同 key 覆盖写），重复投递无害。
+// 落库失败只计数+日志，不中断告警链路（影子判决本身仍在内存）。
+func (n *NoiseEngine) persistClusters() {
+	if n.records == nil {
+		return
+	}
+	clusters := n.shadow.Clusterer().Clusters()
+	failed := 0
+	for _, cl := range clusters {
+		if err := n.records.SaveCluster(cl.ToRecord(n.tenant)); err != nil {
+			failed++
+			n.saveFailures++
+		}
+	}
+	if failed > 0 {
+		n.logf("WARNING: cluster persist failed for %d/%d clusters (cumulative failures %d)",
+			failed, len(clusters), n.saveFailures)
+	}
+}
+
+// RestoreFrom 从落库记录重建内存簇状态（ADR-001：Redis 丢失后从真相源
+// 拉平的唯一入口）。重建后继续 Process，命中同一批 cluster_key——
+// 幂等链不断。失败返回错误且内存状态**不变**（半途而废的重建比不重建
+// 更危险）。
+func (n *NoiseEngine) RestoreFrom(records []noise.ClusterRecord) error {
+	if n == nil {
+		return nil
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.shadow.Clusterer().Restore(records)
 }
 
 // snapshotView 从当前拓扑图构建批次视图。

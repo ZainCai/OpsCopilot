@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"opscopilot/internal/config"
 	"opscopilot/internal/credential"
 )
@@ -58,6 +60,24 @@ func main() {
 	if err != nil {
 		logger.Printf("connector assembly failed: %v", err)
 		os.Exit(1)
+	}
+
+	// W4-1.5 簇状态落库：Redis 镜像（ADR-001 加速层）+ 启动期恢复。
+	// 真相源 alert_cluster 表的 upsert 随 W5 引入 pgx 后并列注入 RecordSink；
+	// Redis 不可达不阻塞启动——加速层冷启动为空，第一批告警照常处理。
+	if asm.Noise != nil {
+		rdb := redis.NewClient(&redis.Options{Addr: os.Getenv("REDIS_ALERT_ADDR")})
+		clusterSink := NewRedisClusterSink(rdb, DefaultTenant)
+		asm.Noise.SetRecordSink(clusterSink)
+		if recs, err := clusterSink.LoadClusters(context.Background()); err != nil {
+			logger.Printf("noise cluster restore skipped (redis unreachable): %v", err)
+		} else if len(recs) > 0 {
+			if err := asm.Noise.RestoreFrom(recs); err != nil {
+				logger.Printf("WARNING: noise cluster restore failed (starting empty): %v", err)
+			} else {
+				logger.Printf("noise clusters restored from redis mirror: %d", len(recs))
+			}
+		}
 	}
 
 	addr := os.Getenv("OPS_LISTEN_ADDR")
@@ -114,8 +134,8 @@ func main() {
 
 	// 启动可见性：明确当前 main 装配的 W 阶段，
 	// 避免运维把"骨架就绪"误读为"产品就绪"。
-	logger.Printf("=== M1 stage: W4-1.4 (topology + change webhook + connector host + shadow noise) ===")
-	logger.Printf("  wired:    topology builder + topology sink + change store + change webhook + credential store(sweep) + connector host + shadow noise engine")
+	logger.Printf("=== M1 stage: W4-1.5 (topology + change webhook + connector host + shadow noise + cluster persistence) ===")
+	logger.Printf("  wired:    topology builder + topology sink + change store + change webhook + credential store(sweep) + connector host + shadow noise + cluster mirror(redis)")
 	if len(registered) > 0 {
 		logger.Printf("  connectors: %v (interval 30s, conn timeout 30s)", registered)
 	} else {
