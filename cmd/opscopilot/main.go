@@ -65,9 +65,10 @@ func main() {
 	// W4-1.5 簇状态落库：Redis 镜像（ADR-001 加速层）+ 启动期恢复。
 	// 真相源 alert_cluster 表的 upsert 随 W5 引入 pgx 后并列注入 RecordSink；
 	// Redis 不可达不阻塞启动——加速层冷启动为空，第一批告警照常处理。
+	var noiseRDB *redis.Client
 	if asm.Noise != nil {
-		rdb := redis.NewClient(&redis.Options{Addr: os.Getenv("REDIS_ALERT_ADDR")})
-		clusterSink := NewRedisClusterSink(rdb, DefaultTenant)
+		noiseRDB = redis.NewClient(&redis.Options{Addr: os.Getenv("REDIS_ALERT_ADDR")})
+		clusterSink := NewRedisClusterSink(noiseRDB, DefaultTenant)
 		asm.Noise.SetRecordSink(clusterSink)
 		if recs, err := clusterSink.LoadClusters(context.Background()); err != nil {
 			logger.Printf("noise cluster restore skipped (redis unreachable): %v", err)
@@ -129,6 +130,9 @@ func main() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(ctx)
+		if noiseRDB != nil {
+			_ = noiseRDB.Close() // 第四轮扫描 F4：落库连接随停机关闭
+		}
 		close(done)
 	}()
 
@@ -146,7 +150,7 @@ func main() {
 	} else {
 		logger.Printf("  noise: shadow mode ON (alerts annotated, NOT suppressed; window %s)", noiseWindowForLog())
 	}
-	logger.Printf("  not wired (W4-1.5+): cluster persistence, gRPC SemanticModelServer, sessionstore, /metrics")
+	logger.Printf("  not wired (W5+): gRPC SemanticModelServer, REST 簇 API, sessionstore, /metrics, DB 真相源 upsert")
 	logger.Printf("POST %s (change events) | GET /healthz | listening on %s",
 		changeWebhookPath, addr)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -158,9 +162,10 @@ func main() {
 }
 
 // noiseWindowForLog 启动日志用：当前生效的降噪窗口。
+// 默认值取 defaultNoiseWindow 常量——别处改默认值这里不会说谎（F4）。
 func noiseWindowForLog() string {
 	if raw := os.Getenv("OPS_NOISE_WINDOW"); raw != "" {
 		return raw
 	}
-	return "10m0s"
+	return defaultNoiseWindow.String()
 }

@@ -96,6 +96,7 @@ func (c *Clusterer) Restore(records []ClusterRecord) error {
 		seen[rec.ClusterKey] = struct{}{}
 	}
 	clusters := make(map[string]*Cluster, len(records))
+	resolvedClusters := make(map[string]*Cluster)
 	byFingerprint := make(map[string]string)
 	byNode := make(map[string]string)
 	for _, rec := range records {
@@ -131,9 +132,14 @@ func (c *Clusterer) Restore(records []ClusterRecord) error {
 				byNode[k] = cl.Key
 			}
 		}
-		clusters[cl.Key] = cl
+		if cl.State == StateResolved {
+			resolvedClusters[cl.Key] = cl
+		} else {
+			clusters[cl.Key] = cl
+		}
 	}
-	c.clusters = clusters
+	c.active = clusters
+	c.resolved = resolvedClusters
 	c.byFingerprint = byFingerprint
 	c.byNode = byNode
 	return nil

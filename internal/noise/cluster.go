@@ -99,11 +99,16 @@ type Cluster struct {
 
 // Clusterer 内存聚类器（并发安全）。
 type Clusterer struct {
-	mu       sync.Mutex
-	window   time.Duration
-	domain   FaultDomainFunc
-	clusters map[string]*Cluster
-	// byFingerprint 指纹 → 活跃簇 Key（resolved 后解除索引）。
+	mu     sync.Mutex
+	window time.Duration
+	domain FaultDomainFunc
+	// active 未 resolve 的簇（聚类的唯一作用域）。
+	// 第四轮扫描 F2：active 与 resolved 分 map——sweep/域聚合只走 active，
+	// 否则随 resolved 无限累积，每次 Ingest 的成本线性上涨（O(n²)/批）。
+	active map[string]*Cluster
+	// resolved 历史簇（仅查询，不参与聚类）。
+	resolved map[string]*Cluster
+	// byFingerprint 指纹 → 活跃簇 Key（resolve 后解除索引）。
 	byFingerprint map[string]string
 	// byNode 节点 → 活跃簇 Key（同上；指纹命中优先于节点命中）。
 	byNode map[string]string
@@ -116,7 +121,8 @@ func NewClusterer(window time.Duration, domain FaultDomainFunc) *Clusterer {
 	return &Clusterer{
 		window:        window,
 		domain:        domain,
-		clusters:      make(map[string]*Cluster),
+		active:        make(map[string]*Cluster),
+		resolved:      make(map[string]*Cluster),
 		byFingerprint: make(map[string]string),
 		byNode:        make(map[string]string),
 	}
@@ -136,16 +142,14 @@ func (c *Clusterer) Ingest(e Event) (*Cluster, bool) {
 	c.sweepLocked(e.OccurredAt) // 先清场：过期簇 resolve 并解除索引
 
 	if ck, ok := c.byFingerprint[e.Fingerprint]; ok {
-		return c.absorbLocked(c.clusters[ck], e), false
+		return c.absorbLocked(c.active[ck], e), false
 	}
 	// 故障域命中：同节点或域函数判定连通。候选取 LastSeen 最新（见包注释决定性契约）。
-	// 只在活跃（未 resolve）簇中找——resolved 是历史，不能再吸收新告警。
+	// 只在活跃（未 resolve）簇中找——resolved 是历史，不能再吸收新告警
+	// （F2：resolved 已分离到独立 map，这里天然只扫活跃簇）。
 	var best *Cluster
 	if e.NodeKey != "" {
-		for _, cl := range c.clusters {
-			if cl.State == StateResolved {
-				continue
-			}
+		for _, cl := range c.active {
 			if !c.sameDomainLocked(cl, e.NodeKey) {
 				continue
 			}
@@ -220,7 +224,7 @@ func (c *Clusterer) newClusterLocked(e Event) *Cluster {
 		cl.NodeKeys[e.NodeKey] = struct{}{}
 		c.byNode[e.NodeKey] = ck
 	}
-	c.clusters[ck] = cl
+	c.active[ck] = cl
 	c.byFingerprint[e.Fingerprint] = ck
 	return cl
 }
@@ -239,8 +243,12 @@ func (c *Clusterer) SetDomain(f FaultDomainFunc) {
 func (c *Clusterer) Ack(clusterKey string) (ClusterState, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	cl, ok := c.clusters[clusterKey]
+	cl, ok := c.active[clusterKey]
 	if !ok {
+		// resolved 历史簇的 Ack 是显式 no-op（终态），不是 ErrUnknownCluster。
+		if _, wasResolved := c.resolved[clusterKey]; wasResolved {
+			return StateResolved, nil
+		}
 		return "", ErrUnknownCluster
 	}
 	if cl.State == StateOpen {
@@ -259,22 +267,23 @@ func (c *Clusterer) Sweep(now time.Time) int {
 
 func (c *Clusterer) sweepLocked(now time.Time) int {
 	n := 0
-	for ck, cl := range c.clusters {
-		if cl.State == StateResolved {
-			continue
-		}
+	for ck, cl := range c.active {
 		if !now.Before(cl.LastSeen.Add(c.window)) {
 			cl.State = StateResolved
 			c.unindexLocked(ck)
+			// F2：迁移到历史区。sweep 只需遍历 active map，
+			// resolved 簇的累积不再抬升每次 Ingest 的成本。
+			delete(c.active, ck)
+			c.resolved[ck] = cl
 			n++
 		}
 	}
 	return n
 }
 
-// unindexLocked 解除簇的全部二级索引（指纹 + 节点），保留簇本体供查询。
+// unindexLocked 解除簇的全部二级索引（指纹 + 节点）。
 func (c *Clusterer) unindexLocked(ck string) {
-	cl := c.clusters[ck]
+	cl := c.active[ck]
 	for fp := range cl.Fingerprints {
 		if k, ok := c.byFingerprint[fp]; ok && k == ck {
 			delete(c.byFingerprint, fp)
@@ -288,11 +297,14 @@ func (c *Clusterer) unindexLocked(ck string) {
 }
 
 // Get 按 Key 取簇快照（值拷贝，map 深拷贝——调用方改不动内部状态）。
-// 不存在返回 nil。
+// 不存在返回 nil。活跃与历史（resolved）簇均可查。
 func (c *Clusterer) Get(clusterKey string) *Cluster {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	cl, ok := c.clusters[clusterKey]
+	cl, ok := c.active[clusterKey]
+	if !ok {
+		cl, ok = c.resolved[clusterKey]
+	}
 	if !ok {
 		return nil
 	}
@@ -302,17 +314,30 @@ func (c *Clusterer) Get(clusterKey string) *Cluster {
 	return &cp
 }
 
-// Clusters 返回全部簇的快照，按 Key 字典序排列（决定性输出，
-// 供测试与影子标注比对）。
+// Clusters 返回全部簇（活跃 + 历史）的快照，按 Key 字典序排列
+// （决定性输出，供测试与影子标注比对）。
 func (c *Clusterer) Clusters() []Cluster {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	out := make([]Cluster, 0, len(c.clusters))
-	for _, cl := range c.clusters {
-		cp := *cl
-		cp.Fingerprints = copySet(cl.Fingerprints)
-		cp.NodeKeys = copySet(cl.NodeKeys)
-		out = append(out, cp)
+	out := make([]Cluster, 0, len(c.active)+len(c.resolved))
+	for _, cl := range c.active {
+		out = append(out, cloneCluster(cl))
+	}
+	for _, cl := range c.resolved {
+		out = append(out, cloneCluster(cl))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out
+}
+
+// ActiveClusters 返回未 resolve 簇的快照（落库管道的热路径优化：
+// resolved 簇状态不再变化，无需重复写入）。
+func (c *Clusterer) ActiveClusters() []Cluster {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]Cluster, 0, len(c.active))
+	for _, cl := range c.active {
+		out = append(out, cloneCluster(cl))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out
@@ -322,13 +347,21 @@ func (c *Clusterer) Clusters() []Cluster {
 func (c *Clusterer) ActiveCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	n := 0
-	for _, cl := range c.clusters {
-		if cl.State != StateResolved {
-			n++
-		}
-	}
-	return n
+	return len(c.active)
+}
+
+// ResolvedCount 历史簇数（内存水位观察点，F2 配套）。
+func (c *Clusterer) ResolvedCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.resolved)
+}
+
+func cloneCluster(cl *Cluster) Cluster {
+	cp := *cl
+	cp.Fingerprints = copySet(cl.Fingerprints)
+	cp.NodeKeys = copySet(cl.NodeKeys)
+	return cp
 }
 
 func copySet(m map[string]struct{}) map[string]struct{} {

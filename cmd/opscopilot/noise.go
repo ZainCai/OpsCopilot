@@ -7,6 +7,7 @@ package main
 
 import (
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -44,6 +45,11 @@ type NoiseEngine struct {
 	records noise.RecordSink
 	// saveFailures 落库失败累计（不中断告警链路，供运维观察）。
 	saveFailures int
+	// persistedSig 已落库签名：clusterKey → state|lastSeenUnixNano|alertCount。
+	// 第四轮扫描 F3：resolved 簇状态不再变化，全量重写会让 Redis 写放大
+	// 随历史线性增长——按签名去重，只有变化过的簇才写。Restore 后清空
+	// （重建自存储侧，签名必须重新建立）。
+	persistedSig map[string]string
 }
 
 // DefaultTenant M1 单租户缺省值（alert_cluster.tenant_id 对齐）。
@@ -66,11 +72,12 @@ func NewNoiseEngine(sink *TopologySink, logger connector.Logger) (*NoiseEngine, 
 		window = d
 	}
 	return &NoiseEngine{
-		shadow:  noise.NewShadow(window, nil), // 域函数按批经 SetDomain 注入
-		sink:    sink,
-		enabled: true,
-		logger:  logger,
-		tenant:  DefaultTenant,
+		shadow:       noise.NewShadow(window, nil), // 域函数按批经 SetDomain 注入
+		sink:         sink,
+		enabled:      true,
+		logger:       logger,
+		tenant:       DefaultTenant,
+		persistedSig: make(map[string]string),
 	}, nil
 }
 
@@ -91,7 +98,13 @@ type invalidNoiseWindowError struct {
 	err error
 }
 
+// Error 对 err == nil 容错（第四轮扫描 F1）：值非法（如 "0s"）与解析
+// 失败都会走到这里——前者没有底层 err，直接解引用会 panic，
+// 把配置错误变成进程崩溃而非干净的启动失败。
 func (e *invalidNoiseWindowError) Error() string {
+	if e.err == nil {
+		return "noise: invalid " + envNoiseWindow + " " + e.raw + ": must be a positive duration"
+	}
 	return "noise: invalid " + envNoiseWindow + " " + e.raw + ": " + e.err.Error()
 }
 
@@ -104,12 +117,15 @@ type batchView struct {
 // ProcessAlerts 处理一轮采集的全部告警（影子模式：不拦截，只标注）。
 // 每批开始时重建拓扑快照（CausalSubgraph），批内共用——一轮采集期间
 // 拓扑视为不变。
+//
+// 锁边界（第四轮扫描 F3）：mu 保护处理段（快照/判决/签名比对），
+// **不持有落库 IO**——慢存储不能拖住 Stats()；同时落库保持同步
+// （不 go 出去）：异步会让批 N+1 先写、批 N 后写，旧数据覆盖新数据。
 func (n *NoiseEngine) ProcessAlerts(alerts []connector.Alert) {
 	if n == nil || len(alerts) == 0 {
 		return
 	}
 	n.mu.Lock()
-	defer n.mu.Unlock()
 
 	view := n.snapshotView()
 	n.shadow.SetDomain(func(a, b string) bool { return reachable(view.adj, a, b) })
@@ -133,29 +149,57 @@ func (n *NoiseEngine) ProcessAlerts(alerts []connector.Alert) {
 	}
 	n.logf("shadow verdict: %d alerts (new %d, dedup %d, merged %d) — cumulative converge %d/%d",
 		len(alerts), created, suppressed, merged, n.converged, n.total)
-	n.persistClusters()
+
+	var dirty []noise.ClusterRecord
+	if n.records != nil {
+		dirty = n.collectDirtyClusters()
+	}
+	n.mu.Unlock()
+
+	if len(dirty) > 0 {
+		n.persistClusters(dirty)
+	}
 }
 
-// persistClusters 批后落库（W4-1.5）：全部簇做一次幂等快照 upsert。
-// 选全量而非增量：簇数量在百台规模是十位数量级，全量写免去脏标记的
-// 复杂度，且天然容忍丢写——下一批补齐；RecordSink 实现必须幂等
-// （同 key 覆盖写），重复投递无害。
-// 落库失败只计数+日志，不中断告警链路（影子判决本身仍在内存）。
-func (n *NoiseEngine) persistClusters() {
+// clusterSig 簇的落库签名：任何会影响存储行的字段变化都会改变签名。
+func clusterSig(cl noise.Cluster) string {
+	return string(cl.State) + "|" + strconv.FormatInt(cl.LastSeen.UnixNano(), 10) + "|" +
+		strconv.Itoa(cl.AlertCount)
+}
+
+// collectDirtyClusters 锁内挑选签名变化的簇。
+// 活跃簇 + 本批新 resolve 的簇（状态从 open/acked → resolved）都会入选；
+// 早已 resolved 且未变的簇不再重复写（F3 写放大修复）。
+func (n *NoiseEngine) collectDirtyClusters() []noise.ClusterRecord {
+	clusters := n.shadow.Clusterer().Clusters()
+	dirty := make([]noise.ClusterRecord, 0, len(clusters))
+	for _, cl := range clusters {
+		sig := clusterSig(cl)
+		if n.persistedSig[cl.Key] == sig {
+			continue
+		}
+		n.persistedSig[cl.Key] = sig
+		dirty = append(dirty, cl.ToRecord(n.tenant))
+	}
+	return dirty
+}
+
+// persistClusters 幂等写入脏簇。落库失败只计数+日志（签名已更新，
+// 丢失的写入由下一批的签名比对自动补齐——签名以内存为准）。
+func (n *NoiseEngine) persistClusters(dirty []noise.ClusterRecord) {
 	if n.records == nil {
 		return
 	}
-	clusters := n.shadow.Clusterer().Clusters()
 	failed := 0
-	for _, cl := range clusters {
-		if err := n.records.SaveCluster(cl.ToRecord(n.tenant)); err != nil {
+	for _, rec := range dirty {
+		if err := n.records.SaveCluster(rec); err != nil {
 			failed++
 			n.saveFailures++
 		}
 	}
 	if failed > 0 {
 		n.logf("WARNING: cluster persist failed for %d/%d clusters (cumulative failures %d)",
-			failed, len(clusters), n.saveFailures)
+			failed, len(dirty), n.saveFailures)
 	}
 }
 
@@ -169,7 +213,12 @@ func (n *NoiseEngine) RestoreFrom(records []noise.ClusterRecord) error {
 	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	return n.shadow.Clusterer().Restore(records)
+	if err := n.shadow.Clusterer().Restore(records); err != nil {
+		return err
+	}
+	// 重建自存储侧：旧签名作废，下一批全量重建签名基线。
+	n.persistedSig = make(map[string]string)
+	return nil
 }
 
 // snapshotView 从当前拓扑图构建批次视图。

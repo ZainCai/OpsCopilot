@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"opscopilot/internal/connector"
+	"opscopilot/internal/noise"
 	"opscopilot/internal/topology"
 )
 
@@ -181,4 +182,60 @@ func TestNilEngineTolerated(t *testing.T) {
 		t.Fatal("nil engine must not be enabled")
 	}
 	(*NoiseEngine)(nil).ProcessAlerts([]connector.Alert{{Fingerprint: "x"}}) // 不得 panic
+}
+
+// ---- 第四轮扫描修复回归 ----
+
+// TestInvalidWindowZeroNoPanic F1 回归：OPS_NOISE_WINDOW="0s"（解析成功
+// 但值非法）时 Error() 不得因 nil err 解引用而 panic。
+func TestInvalidWindowZeroNoPanic(t *testing.T) {
+	t.Setenv("OPS_NOISE_WINDOW", "0s")
+	ne, err := NewNoiseEngine(noiseTestSink(t), newQuietLogger())
+	if err == nil {
+		t.Fatal("zero window must be rejected")
+	}
+	if ne != nil {
+		t.Fatal("engine must be nil on config error")
+	}
+	_ = err.Error() // 触发格式化——修复前这里 panic
+}
+
+// countingSink 记录 SaveCluster 调用次数（F3 签名去重验证）。
+type countingSink struct {
+	calls int
+}
+
+func (c *countingSink) SaveCluster(noise.ClusterRecord) error { c.calls++; return nil }
+
+// TestPersistSignatureDedup F3 回归：状态未变的簇不重复落库；
+// 状态变化（新告警）后才再次落库。
+func TestPersistSignatureDedup(t *testing.T) {
+	t.Setenv("OPS_NOISE_WINDOW", "10m")
+	engine, _ := NewNoiseEngine(noiseTestSink(t), newQuietLogger())
+	cs := &countingSink{}
+	engine.SetRecordSink(cs)
+
+	now := time.Now()
+	engine.ProcessAlerts([]connector.Alert{
+		{Fingerprint: "fp1", Labels: map[string]string{"instance": "i1"}, StartsAt: now},
+	})
+	first := cs.calls
+	if first != 1 {
+		t.Fatalf("first batch saves = %d, want 1", first)
+	}
+	// 第二批：窗口内重复指纹（LastSeen/AlertCount 更新 → 签名变化 → 仍落一次）。
+	engine.ProcessAlerts([]connector.Alert{
+		{Fingerprint: "fp1", Labels: map[string]string{"instance": "i1"}, StartsAt: now.Add(time.Minute)},
+	})
+	if cs.calls != 2 {
+		t.Fatalf("second batch saves = %d, want 2 (AlertCount is a persisted field)", cs.calls)
+	}
+	// 第三批：无关告警（独立指纹+未知 instance 自成簇）——只落新簇，
+	// fp1 簇状态未变不重写（F3 写放大修复的核心断言）。
+	engine.ProcessAlerts([]connector.Alert{
+		{Fingerprint: "fp2", Labels: map[string]string{"instance": "ghost"}, StartsAt: now.Add(2 * time.Minute)},
+	})
+	if cs.calls != 3 {
+		t.Fatalf("unrelated batch must persist only the new cluster, saves = %d, want 3", cs.calls)
+	}
 }
