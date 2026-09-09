@@ -307,3 +307,42 @@ func TestHost_RunOnce_PartialCollectStillDelivered(t *testing.T) {
 		t.Error("connector must enter backoff after partial failure")
 	}
 }
+
+// hangingHealthConnector 健康检查会挂起 hang 时长，用于验证连接器级超时。
+type hangingHealthConnector struct {
+	fakeConnector
+	hang time.Duration
+}
+
+func (c *hangingHealthConnector) HealthCheck(ctx context.Context) (Health, error) {
+	select {
+	case <-time.After(c.hang):
+		return c.health, c.healthErr
+	case <-ctx.Done():
+		return Health{}, ctx.Err()
+	}
+}
+
+// TestHost_ConnTimeoutAbortsSlowConnector C3 回归：连接器级超时必须截断
+// 挂死的连接器——一个慢连接器不能拖慢整轮巡检。
+func TestHost_ConnTimeoutAbortsSlowConnector(t *testing.T) {
+	fake := newHealthyFake("slow")
+	hanging := &hangingHealthConnector{fakeConnector: *fake, hang: 2 * time.Second}
+	h := NewHost(WithLogger(discardLogger{}), WithConnTimeout(150*time.Millisecond))
+	if err := h.Register(hanging); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	err := h.RunOnce(context.Background(), &memSink{})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if elapsed > 800*time.Millisecond {
+		t.Errorf("RunOnce took %v — connector timeout not enforced (hung 2s health check)", elapsed)
+	}
+	// 超时按失败处理 → 进入退避，下一轮跳过
+	if !h.sched.shouldSkip("slow", time.Now()) {
+		t.Error("timed-out connector must enter backoff")
+	}
+}

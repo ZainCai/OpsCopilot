@@ -97,6 +97,9 @@ type Host struct {
 	logger     Logger
 	interval   time.Duration
 	maxBackoff time.Duration
+	// connTimeout 单连接器单轮操作的超时上限（0 = 不设限，沿用连接器
+	// 自身的 client timeout）。见 WithConnTimeout（全局审查 C3）。
+	connTimeout time.Duration
 
 	// sched 调度状态（退避），自带锁，见 scheduler 注释。
 	sched *scheduler
@@ -130,6 +133,17 @@ func WithMaxBackoff(d time.Duration) Option {
 	return func(h *Host) {
 		if d > 0 {
 			h.maxBackoff = d
+		}
+	}
+}
+
+// WithConnTimeout 设置单连接器单轮操作的超时上限（0 = 不设限，默认）。
+// 连接器自身的 HTTP client 超时是第一道防线；本超时是第二道——
+// 防止实现不良的连接器（无内部超时）拖慢整轮巡检（全局审查 C3）。
+func WithConnTimeout(d time.Duration) Option {
+	return func(h *Host) {
+		if d > 0 {
+			h.connTimeout = d
 		}
 	}
 }
@@ -239,53 +253,66 @@ func (h *Host) RunOnce(ctx context.Context, sink Sink) error {
 		if sched.shouldSkip(id, now) {
 			continue // 退避中，下一轮再试
 		}
-
-		health, herr := c.HealthCheck(ctx)
-		if herr != nil || health.Status == HealthDown {
-			sched.fail(id, h.maxBackoff)
-			// G4：herr 与 health.Detail 都要进日志——azure 风格的实现
-			// 返回 (Down, nil)，只打 herr 会得到 info量为零的 "<nil>"。
-			h.logf("connector %s health check failed: status=%s err=%v detail=%q",
-				id, health.Status, herr, health.Detail)
-			continue
-		}
-
-		col, cerr := c.Collect(ctx, CollectRequest{})
-		// 部分成功语义（全局审查 G3）：连接器契约允许"带结果 + 错误"
-		// （如 prometheus 部分查询失败但告警全部成功）。Host 的取舍：
-		// **先投递已成功的数据，再进退避**——告警的时效性不该为指标
-		// 查询的失败陪葬；退避照常生效，避免带病连接器被打爆。
-		if sink != nil && col != nil {
-			if err := sink.IngestCollect(ctx, col); err != nil {
-				sched.fail(id, h.maxBackoff)
-				h.logf("connector %s sink ingest failed: %v", id, err)
-				continue
-			}
-		}
-		if cerr != nil {
-			sched.fail(id, h.maxBackoff)
-			h.logf("connector %s collect failed (partial result delivered): %v", id, cerr)
-			continue
-		}
-
-		disc, derr := c.Discover(ctx)
-		if derr != nil {
-			sched.fail(id, h.maxBackoff)
-			h.logf("connector %s discover failed: %v", id, derr)
-			continue
-		}
-		if sink != nil && disc != nil {
-			if err := sink.IngestDiscover(ctx, disc); err != nil {
-				sched.fail(id, h.maxBackoff)
-				h.logf("connector %s sink discover failed: %v", id, err)
-				continue
-			}
-		}
-
-		// 成功：清除退避
-		sched.succeed(id)
+		h.runConnector(ctx, c, sink, sched, now)
 	}
 	return nil
+}
+
+// runConnector 执行单个连接器的一轮"健康→采集→发现→投递"。
+// connTimeout > 0 时为该连接器派生带超时的独立 ctx——一个挂死的连接器
+// 只损失自己的时间片，不拖慢整轮（全局审查 C3）。
+func (h *Host) runConnector(ctx context.Context, c Connector, sink Sink, sched *scheduler, now time.Time) {
+	id := c.ID()
+	if h.connTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, h.connTimeout)
+		defer cancel()
+	}
+
+	health, herr := c.HealthCheck(ctx)
+	if herr != nil || health.Status == HealthDown {
+		sched.fail(id, h.maxBackoff)
+		// G4：herr 与 health.Detail 都要进日志——azure 风格的实现
+		// 返回 (Down, nil)，只打 herr 会得到 info量为零的 "<nil>"。
+		h.logf("connector %s health check failed: status=%s err=%v detail=%q",
+			id, health.Status, herr, health.Detail)
+		return
+	}
+
+	col, cerr := c.Collect(ctx, CollectRequest{})
+	// 部分成功语义（全局审查 G3）：连接器契约允许"带结果 + 错误"
+	// （如 prometheus 部分查询失败但告警全部成功）。Host 的取舍：
+	// **先投递已成功的数据，再进退避**——告警的时效性不该为指标
+	// 查询的失败陪葬；退避照常生效，避免带病连接器被打爆。
+	if sink != nil && col != nil {
+		if err := sink.IngestCollect(ctx, col); err != nil {
+			sched.fail(id, h.maxBackoff)
+			h.logf("connector %s sink ingest failed: %v", id, err)
+			return
+		}
+	}
+	if cerr != nil {
+		sched.fail(id, h.maxBackoff)
+		h.logf("connector %s collect failed (partial result delivered): %v", id, cerr)
+		return
+	}
+
+	disc, derr := c.Discover(ctx)
+	if derr != nil {
+		sched.fail(id, h.maxBackoff)
+		h.logf("connector %s discover failed: %v", id, derr)
+		return
+	}
+	if sink != nil && disc != nil {
+		if err := sink.IngestDiscover(ctx, disc); err != nil {
+			sched.fail(id, h.maxBackoff)
+			h.logf("connector %s sink discover failed: %v", id, err)
+			return
+		}
+	}
+
+	// 成功：清除退避
+	sched.succeed(id)
 }
 
 // Run 启动调度循环，按 interval 周期性 RunOnce，直到 ctx 取消。
