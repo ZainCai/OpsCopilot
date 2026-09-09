@@ -88,3 +88,54 @@ func TestCredential_SharesReadOnlyContract(t *testing.T) {
 		t.Fatalf("Type = %q", c.Type)
 	}
 }
+
+// TestStore_CapacityObservation C9 回归：Len/Stats/SweepExpired 三条
+// 观察与清扫原语行为正确——过期条目占内存但被统计，Sweep 可回收。
+func TestStore_CapacityObservation(t *testing.T) {
+	s := NewStore()
+	now := time.Now()
+	// 有效条目：NewBearer 不带过期（零值 = 永不过期）
+	if err := s.Put(NewReadOnlyBearer("alive", "tok-a")); err != nil {
+		t.Fatal(err)
+	}
+	// 会过期的条目：Put 闸门只拒"入库时刻已过期"，未来过期可入库；
+	// 用参考时刻后移模拟"入库后随时间过期"的真实场景
+	exp := NewReadOnlyBearer("dead", "tok-b")
+	exp.ExpiresAt = now.Add(time.Hour)
+	if err := s.Put(exp); err != nil {
+		t.Fatal(err)
+	}
+	later := now.Add(2 * time.Hour) // 此时 dead 已过期
+
+	if s.Len() != 2 {
+		t.Errorf("Len = %d, want 2 (含过期)", s.Len())
+	}
+	st := s.Stats(later)
+	if st.Total != 2 || st.Expired != 1 {
+		t.Errorf("Stats = %+v, want Total=2 Expired=1", st)
+	}
+	// （Get 的过期语义由既有测试锁定：入库后随时间过期 → ErrExpired；
+	//   Get 用真实时钟不可注入，此处不做模拟断言）
+	// Sweep 回收过期条目
+	if n := s.SweepExpired(later); n != 1 {
+		t.Errorf("SweepExpired returned %d, want 1", n)
+	}
+	if s.Len() != 1 {
+		t.Errorf("Len after sweep = %d, want 1", s.Len())
+	}
+	if _, err := s.Get("dead"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Get(dead) after sweep = %v, want ErrNotFound", err)
+	}
+}
+
+// TestStore_StatsNoExpired 全部有效时 Expired 应为 0。
+func TestStore_StatsNoExpired(t *testing.T) {
+	s := NewStore()
+	if err := s.Put(NewReadOnlyBearer("a", "x")); err != nil {
+		t.Fatal(err)
+	}
+	st := s.Stats(time.Now().Add(-time.Hour)) // 参考时刻早于凭证过期
+	if st.Total != 1 || st.Expired != 0 {
+		t.Errorf("Stats = %+v, want Total=1 Expired=0", st)
+	}
+}

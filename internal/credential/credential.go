@@ -8,8 +8,16 @@
 // 使凭证库与连接器两侧是同一个类型——连接器可直接校验而不必跨模块 import
 // （internal 各模块间禁止互相 import，见 pkg/readonly 包注释）。
 //
-// 这是 W2 的基础版：仅做内存存储 + 只读闸门。后续可扩展为
-// 加密落盘（密钥不进库，见 .gitignore 约束）与凭证作用域 introspection。
+// 这是 W2 的基础版：仅做内存存储 + 只读闸门 + 容量观察点。
+//
+// 已知边界（全局审查 C9，勿当已完成特性）：
+//   - **Secret 明文在内存**，且本库不落盘、不打日志——密钥不会因此进入
+//     进程外；加密落盘前，请勿给本库加任何"导出/持久化"路径。
+//   - **过期条目不会自动回收**：Put 按 ID 覆盖、Delete 才移除；已过期条目
+//     在显式删除前仍占内存，长跑进程靠重复注册新 ID 会缓慢增长。
+//     已提供容量观察点（Len/Stats）与清扫原语（SweepExpired）——周期
+//     清扫的调度（时间轮/ticker）留到真正接线 credential 到 main 时做，
+//     现在不引入无人调用的后台 goroutine。
 package credential
 
 import (
@@ -87,6 +95,53 @@ func (s *Store) List() []string {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+// Len 返回库内全部条目数（含已过期未清理的——容量观察点，C9）。
+// 长跑进程若发现 Len 只增不减，说明存在持续注册新 ID 却从不删除的路径，
+// 排查后应周期调用 SweepExpired 回收。
+func (s *Store) Len() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.creds)
+}
+
+// Stats 容量观察点（C9）：区分"库内总数"与"已过期但仍占内存"，
+// 供周期任务/监控判断是否需要清扫。
+type Stats struct {
+	// Total 库内全部条目（含过期未清）。
+	Total int
+	// Expired 已过期但尚未删除的条目数（应触发 Sweep 的信号）。
+	Expired int
+}
+
+// Stats 统计当前容量状态（now 为判定过期的参考时刻）。
+func (s *Store) Stats(now time.Time) Stats {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	st := Stats{Total: len(s.creds)}
+	for _, c := range s.creds {
+		if c.Expired(now) {
+			st.Expired++
+		}
+	}
+	return st
+}
+
+// SweepExpired 删除全部已过期条目并返回删除条数。
+// 清扫原语已就绪；周期调度（ticker 等）留待 credential 接线 main 时挂载，
+// 避免现在引入无人调用的后台 goroutine（C9）。
+func (s *Store) SweepExpired(now time.Time) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for id, c := range s.creds {
+		if c.Expired(now) {
+			delete(s.creds, id)
+			n++
+		}
+	}
+	return n
 }
 
 // NewReadOnlyBearer 构造一条只读 Bearer 凭证（Prometheus 等常用）。
