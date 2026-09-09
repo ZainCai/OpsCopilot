@@ -131,19 +131,6 @@ func TestChangeWebhook_MissingFields(t *testing.T) {
 	}
 }
 
-func TestChangeWebhook_DuplicateConflict(t *testing.T) {
-	// G5：重复提交为幂等成功（200），不再返回 409。
-	// 详细断言见 TestChangeWebhook_DuplicateIdempotent。
-	h, _ := newTestWebhook(t)
-	body := `{"id":"dup","node_key":"host:demo","type":"deploy"}`
-	if rec := post(t, h, body); rec.Code != http.StatusOK {
-		t.Fatalf("first post: code = %d, want 200", rec.Code)
-	}
-	if rec := post(t, h, body); rec.Code != http.StatusOK {
-		t.Errorf("duplicate post: code = %d, want 200 (idempotent)", rec.Code)
-	}
-}
-
 func TestChangeWebhook_NodeNotFound422(t *testing.T) {
 	h, _ := newTestWebhook(t)
 	rec := post(t, h, `{"id":"ghost","node_key":"host:ghost","type":"deploy"}`)

@@ -14,6 +14,15 @@ import (
 //     Source 与 Labels 以**后加入者**为准（调用方应按观测时间递增喂入，
 //     Host 的调度轮次天然满足；仅非空值覆盖）；
 //   - 边同 (Src,Dst,Relation) 合并：Confidence 取高、ValidFrom 取最早。
+//
+// 并发契约（第三轮复审 R2，调用方必读）：
+//
+//	Builder 自身**无锁**。AddDiscovery/AddEdge/AddNode 与 Build() 返回的
+//	Graph 共享同一份可变状态——"写入方互斥 + 读操作全程持同一把锁"是
+//	调用方的责任。规范用法见 cmd/opscopilot/topology_sink.go：单把互斥锁
+//	覆盖 AddDiscovery 与所有 Build() 消费（HasNode/CoverageReport 等），
+//	**禁止持锁取 Build() 引用后锁外遍历**（那是无保护读，-race 未必当场
+//	暴露）。gRPC 服务（GetTopology/AsOf 路径）接线时同样必须锁内完成映射。
 type Builder struct {
 	g *Graph
 }
@@ -143,8 +152,16 @@ func (b *Builder) AddNode(n NodeInput) error {
 	return b.AddDiscovery([]NodeInput{n})
 }
 
-// Build 返回当前图（内部结构的浅拷贝快照：继续使用 Builder 不影响已返回的图，
-// 但修改返回图中的 Node/Edge 会影响 Builder——图是不可变约定，调用方不得修改）。
+// Build 返回当前图。
+//
+// ⚠️ 语义澄清（第三轮复审 R2，原注释"浅拷贝快照"系失真描述）：本方法
+// 返回的是**内部 Graph 的原指针，零拷贝**——
+//   - 继续使用 Builder（AddDiscovery 等）**会**改变已返回图的内容；
+//   - 修改返回图中的 Node/Edge 同样会影响 Builder；
+//   - Node/Edge 指针与图共享（AsOf/CausalSubgraph 的结果同此约定）。
+//
+// "图是不可变约定，调用方不得修改返回图"依然成立；并发读写互斥是
+// 调用方责任（见 Builder 类型级并发契约）。
 func (b *Builder) Build() *Graph {
 	return b.g
 }

@@ -20,6 +20,17 @@ import (
 // DialInProcess 建立进程内 gRPC 连接。
 // 用法：srv := grpc.NewServer(); pb.RegisterXxxServer(srv, impl); conn := DialInProcess(srv)
 // 返回的 ClientConn 与真实网络连接行为一致，业务代码零改动。
+//
+// 生命周期责任（第三轮复审 R6）：本函数会启动一个 Serve goroutine，其
+// 退出**只能**由 srv.Stop() 触发（G2：Close 解除 Accept 阻塞）——
+// 调用方必须保证最终调用 srv.Stop()，否则 goroutine 与管道永久泄漏。
+//
+// 迁移评估（R7，实测结论）：grpc.DialContext 自 v1.63 deprecated，但
+// **暂不迁移 grpc.NewClient**——NewClient 的懒连接 + 断线自动重拨语义
+// 与本函数"单管道一次性连接"模型冲突：重拨会再次调用 dialer 拿到已消费
+// 的 pipe 端，首轮 RPC 实测 DeadlineExceeded 挂死（transport 测试锁定）。
+// DialContext 在当前依赖 v1.66 可用；将来若迁移，需同步重设计监听器
+// （bufconn 或可多连接的 in-process listener）。
 func DialInProcess(ctx context.Context, srv *grpc.Server) (*grpc.ClientConn, error) {
 	serverLn, clientLn := net.Pipe()
 	go func() { _ = srv.Serve(&singleListener{ln: serverLn, closed: make(chan struct{})}) }()

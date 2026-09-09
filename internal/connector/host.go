@@ -54,7 +54,8 @@ func (s *scheduler) shouldSkip(id string, now time.Time) bool {
 }
 
 // fail 记录一次失败并指数退避（1s 起，翻倍，max > 0 时封顶）。
-func (s *scheduler) fail(id string, max time.Duration) {
+// now 由调用方注入，与 shouldSkip 的时刻语义保持一致（第三轮复审 R9）。
+func (s *scheduler) fail(id string, max time.Duration, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cur := s.backoff[id]
@@ -67,7 +68,7 @@ func (s *scheduler) fail(id string, max time.Duration) {
 		cur = max
 	}
 	s.backoff[id] = cur
-	s.retryAt[id] = time.Now().Add(cur)
+	s.retryAt[id] = now.Add(cur)
 }
 
 // succeed 成功后清除该连接器的退避状态。
@@ -215,7 +216,15 @@ func (h *Host) CheckAll(ctx context.Context) map[string]Health {
 
 	out := make(map[string]Health, len(cs))
 	for _, c := range cs {
-		health, err := c.HealthCheck(ctx)
+		// R3：与 RunOnce 一致，为每个连接器派生带超时的独立 ctx——
+		// 运维巡检入口不该被一个无内部超时的连接器拖死。
+		cctx := ctx
+		if h.connTimeout > 0 {
+			var cancel context.CancelFunc
+			cctx, cancel = context.WithTimeout(ctx, h.connTimeout)
+			defer cancel()
+		}
+		health, err := c.HealthCheck(cctx)
 		if err != nil {
 			out[c.ID()] = Health{Status: HealthDown, Detail: err.Error(), CheckedAt: time.Now()}
 			continue
@@ -253,7 +262,7 @@ func (h *Host) RunOnce(ctx context.Context, sink Sink) error {
 		if sched.shouldSkip(id, now) {
 			continue // 退避中，下一轮再试
 		}
-		h.runConnector(ctx, c, sink, sched, now)
+		h.runConnector(ctx, c, sink, sched)
 	}
 	return nil
 }
@@ -261,7 +270,7 @@ func (h *Host) RunOnce(ctx context.Context, sink Sink) error {
 // runConnector 执行单个连接器的一轮"健康→采集→发现→投递"。
 // connTimeout > 0 时为该连接器派生带超时的独立 ctx——一个挂死的连接器
 // 只损失自己的时间片，不拖慢整轮（全局审查 C3）。
-func (h *Host) runConnector(ctx context.Context, c Connector, sink Sink, sched *scheduler, now time.Time) {
+func (h *Host) runConnector(ctx context.Context, c Connector, sink Sink, sched *scheduler) {
 	id := c.ID()
 	if h.connTimeout > 0 {
 		var cancel context.CancelFunc
@@ -271,7 +280,7 @@ func (h *Host) runConnector(ctx context.Context, c Connector, sink Sink, sched *
 
 	health, herr := c.HealthCheck(ctx)
 	if herr != nil || health.Status == HealthDown {
-		sched.fail(id, h.maxBackoff)
+		sched.fail(id, h.maxBackoff, time.Now())
 		// G4：herr 与 health.Detail 都要进日志——azure 风格的实现
 		// 返回 (Down, nil)，只打 herr 会得到 info量为零的 "<nil>"。
 		h.logf("connector %s health check failed: status=%s err=%v detail=%q",
@@ -286,26 +295,28 @@ func (h *Host) runConnector(ctx context.Context, c Connector, sink Sink, sched *
 	// 查询的失败陪葬；退避照常生效，避免带病连接器被打爆。
 	if sink != nil && col != nil {
 		if err := sink.IngestCollect(ctx, col); err != nil {
-			sched.fail(id, h.maxBackoff)
-			h.logf("connector %s sink ingest failed: %v", id, err)
+			sched.fail(id, h.maxBackoff, time.Now())
+			// R5：合并输出 collect 的原始部分失败原因——只打 sink 错误
+			// 会丢一半现场（为什么这份数据本身就是"部分成功"）。
+			h.logf("connector %s sink ingest failed: %v (collect partial err: %v)", id, err, cerr)
 			return
 		}
 	}
 	if cerr != nil {
-		sched.fail(id, h.maxBackoff)
+		sched.fail(id, h.maxBackoff, time.Now())
 		h.logf("connector %s collect failed (partial result delivered): %v", id, cerr)
 		return
 	}
 
 	disc, derr := c.Discover(ctx)
 	if derr != nil {
-		sched.fail(id, h.maxBackoff)
+		sched.fail(id, h.maxBackoff, time.Now())
 		h.logf("connector %s discover failed: %v", id, derr)
 		return
 	}
 	if sink != nil && disc != nil {
 		if err := sink.IngestDiscover(ctx, disc); err != nil {
-			sched.fail(id, h.maxBackoff)
+			sched.fail(id, h.maxBackoff, time.Now())
 			h.logf("connector %s sink discover failed: %v", id, err)
 			return
 		}
