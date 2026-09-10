@@ -153,7 +153,7 @@ func main() {
 	} else {
 		logger.Printf("  noise: shadow mode ON (alerts annotated, NOT suppressed; window %s)", noiseWindowForLog())
 	}
-	logger.Printf("  not wired (W5+): gRPC SemanticModelServer, REST 簇 API, sessionstore, /metrics, DB 真相源 upsert")
+	logger.Printf("  not wired (W5+): 控制台视图, sessionstore, /metrics, DB 真相源 upsert")
 	logger.Printf("POST %s (change events) | GET /healthz | listening on %s",
 		changeWebhookPath, addr)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

@@ -35,6 +35,8 @@ type Assembly struct {
 	// 供 transport.DialInProcess 消费。生命周期归 main（Stop 必调，
 	// 否则 DialInProcess 的 Serve goroutine 泄漏，见其 R6 注释）。
 	GRPC *grpc.Server
+	// REST 只读查询网关（W5-2.2）。
+	REST *RESTGateway
 }
 
 // NewAssembly 组装 W3+W4+W5 组件并接线。
@@ -71,8 +73,13 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 
 	// W5-2.1：SemanticModel gRPC 服务（进程内形态，契约测试经
 	// transport.DialInProcess 回环验证；独立进程形态只换 Dial 实现）。
+	semantic := NewSemanticModelServer(sink, store)
 	grpcServer := grpc.NewServer()
-	pb.RegisterSemanticModelServer(grpcServer, NewSemanticModelServer(sink, store))
+	pb.RegisterSemanticModelServer(grpcServer, semantic)
+
+	// W5-2.2：REST 只读查询面（复用 SemanticModelServer 的校验与映射，
+	// gRPC/REST 一套语义不漂移）。
+	rest := NewRESTGateway(noiseEngine, semantic)
 
 	return &Assembly{
 		Sink:    sink,
@@ -80,12 +87,14 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 		Webhook: hook,
 		Noise:   noiseEngine,
 		GRPC:    grpcServer,
+		REST:    rest,
 	}, nil
 }
 
 // Handler 装配 HTTP 路由：
 //   - POST /api/v1/changes  提交变更事件（ChangeWebhook.ServeHTTP）
 //   - GET  /healthz         存活探针（进程活着即 200，不探测下游）
+//   - GET  /api/v1/*        REST 只读查询面（W5-2.2：簇/拓扑/变更）
 func (a *Assembly) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle(changeWebhookPath, a.Webhook)
@@ -94,5 +103,6 @@ func (a *Assembly) Handler() http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
+	a.REST.Register(mux)
 	return mux
 }
