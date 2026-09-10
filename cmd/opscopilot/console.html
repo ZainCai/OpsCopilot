@@ -413,8 +413,10 @@ function msg(el, kind, text) {
     ? `<div class="banner ${kind}"><span>${kind === "loading" ? '<span class="spin"></span>' : "⚠"}</span><span>${esc(text)}</span>${kind === "err" ? '<span class="x" onclick="this.parentElement.remove()">✕</span>' : ""}</div>`
     : "";
 }
-function emptyState(title, desc) {
-  return `<tr><td colspan="8"><div class="empty"><div class="e-t">${esc(title)}</div><div class="e-d">${esc(desc)}</div></div></td></tr>`;
+function emptyState(title, desc, colspan) {
+  // colspan 默认 8（簇表与事件表当前都是 8 列）；两表列数将来不再一致时，
+  // 调用方必须显式传入，否则空态单元格会撑不满整行。
+  return `<tr><td colspan="${colspan || 8}"><div class="empty"><div class="e-t">${esc(title)}</div><div class="e-d">${esc(desc)}</div></div></td></tr>`;
 }
 function timeAgo(iso) {
   if (!iso) return "—";
@@ -662,6 +664,7 @@ function switchView(v) {
   $("view-events").style.display = v === "events" ? "" : "none";
   document.querySelectorAll("#tbNav .tb-tab").forEach(b => b.classList.toggle("on", b.dataset.view === v));
   if (v === "events") { connectStream(); loadIncidents(); }
+  else { disconnectStream(); } // 离开事件页：长连接不该常驻（资源卫生）
 }
 
 // ---- W11 实时推送（SSE）：事件变更即推，替代 30s 轮询 ----
@@ -672,11 +675,16 @@ let evtSource = null, sseReloadTimer = null, sseLive = false;
 function setStreamChip(state) {
   const chip = $("streamChip"), txt = $("streamText");
   if (!chip || !txt) return;
-  chip.className = "env-chip " + (state === "live" ? "ok" : state === "poll" ? "warn" : "bad");
-  txt.textContent = state === "live" ? "实时推送" : state === "poll" ? "轮询降级" : "重连中";
-  chip.title = state === "live" ? "SSE 实时推送已连接——事件变更即时显示"
-    : state === "poll" ? "实时推送不可用，已降级为 30s 轮询"
-    : "实时推送断开，正在自动重连…";
+  const states = {
+    live:  ["ok",   "实时推送", "SSE 实时推送已连接——事件变更即时显示"],
+    poll:  ["warn", "轮询降级", "实时推送不可用，已降级为 30s 轮询"],
+    off:   ["warn", "未连接",   "当前视图未订阅实时推送"],
+    reconnect: ["bad", "重连中", "实时推送断开，正在自动重连…"],
+  };
+  const s = states[state] || states.reconnect;
+  chip.className = "env-chip " + s[0];
+  txt.textContent = s[1];
+  chip.title = s[2];
 }
 
 // 合并突发：一次变更后 300ms 内到达的事件折成一次刷新（避免刷屏）。
@@ -694,6 +702,13 @@ function connectStream() {
   evtSource.addEventListener("incident", () => { sseLive = true; setStreamChip("live"); scheduleIncidentReload(); });
   // EventSource 断线自动重连；重连期间降级轮询兜底，避免"卡死不更新"。
   evtSource.onerror = () => { sseLive = false; setStreamChip("poll"); };
+}
+
+// 断开实时推送（离开事件页时调用）——SSE 是长连接，不该在不用的页面常驻。
+function disconnectStream() {
+  if (evtSource) { evtSource.close(); evtSource = null; }
+  sseLive = false;
+  setStreamChip("off");
 }
 
 async function loadIncidents() {

@@ -17,8 +17,11 @@ import (
 type AuditAction string
 
 const (
-	AuditCreate                  AuditAction = "create"
-	AuditTransition              AuditAction = "transition"
+	AuditCreate     AuditAction = "create"
+	AuditTransition AuditAction = "transition"
+	// AuditAttachCluster 预留：生产代码尚无调用 AttachCluster 的路径
+	// （簇→事件关联是 F-02 的预留读侧/写侧），故本动作当前不会被写入。
+	// 保留它与 incident_audit.action 的 CHECK 约束对齐，接线时无需迁移。
 	AuditAttachCluster           AuditAction = "attach_cluster"
 	AuditMerge                   AuditAction = "merge"
 	AuditExternalRecoveryIgnored AuditAction = "external_recovery_ignored"
@@ -60,16 +63,32 @@ func (l *MemAuditLog) Append(e AuditEntry) {
 }
 
 // List 按事件过滤（倒序）。
+//
+// 返回**深拷贝**：AuditEntry.Detail 是 map（引用类型），浅拷贝会让调用方的
+// 改动写回库内状态，也与并发读构成竞争。
 func (l *MemAuditLog) List(incidentID string) []AuditEntry {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	out := []AuditEntry{}
 	for i := len(l.entries) - 1; i >= 0; i-- {
 		if incidentID == "" || l.entries[i].IncidentID == incidentID {
-			out = append(out, l.entries[i])
+			out = append(out, cloneAuditEntry(l.entries[i]))
 		}
 	}
 	return out
+}
+
+// cloneAuditEntry 深拷贝一条审计（只 Detail 是引用类型）。
+func cloneAuditEntry(e AuditEntry) AuditEntry {
+	if e.Detail == nil {
+		return e
+	}
+	d := make(map[string]any, len(e.Detail))
+	for k, v := range e.Detail {
+		d[k] = v
+	}
+	e.Detail = d
+	return e
 }
 
 // PGAuditLog TimescaleDB 审计（持久化）。写入失败只记日志——审计失败

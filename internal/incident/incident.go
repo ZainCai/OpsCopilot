@@ -145,8 +145,14 @@ func NewMemStore() *MemStore {
 // Persistence 内存态标识（R6-4）。
 func (s *MemStore) Persistence() string { return "memory" }
 
-// SetClock 注入时钟（测试；生产勿调）。
-func (s *MemStore) SetClock(f func() time.Time) { s.now = f }
+// SetClock 注入时钟（测试用）。**只能在构造后、并发读写开始前调用**：
+// s.now 在锁内被读，这里加锁是为了不与锁内读构成竞争——但运行中热替换时钟
+// 仍会改变业务时间语义，生产禁止。
+func (s *MemStore) SetClock(f func() time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.now = f
+}
 
 // Create 新建事件。ID 必填且唯一；初始状态恒为 open（不信任外部状态）。
 func (s *MemStore) Create(id, title, severity, createdBy string) (*Incident, error) {
