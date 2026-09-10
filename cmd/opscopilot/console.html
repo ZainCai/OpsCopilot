@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpsCopilot 控制台</title>
+<style>
+  :root {
+    --bg: #f8fafc; --panel: #ffffff; --border: #e2e8f0;
+    --text: #0f172a; --muted: #64748b;
+    --high: #16a34a; --medium: #d97706; --low: #9ca3af;
+    --sev-critical: #dc2626; --sev-warning: #d97706; --sev-info: #2563eb;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--text); }
+  header { padding: 12px 20px; background: var(--panel); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; }
+  header .meta { color: var(--muted); font-size: 12px; }
+  main { padding: 16px 20px; display: grid; gap: 16px; max-width: 1400px; margin: 0 auto; }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; }
+  section h2 { font-size: 14px; margin: 0 0 8px; display: flex; gap: 8px; align-items: center; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; }
+  tr.clickable:hover { background: #f1f5f9; cursor: pointer; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; color: #fff; }
+  .pill.critical { background: var(--sev-critical); }
+  .pill.warning { background: var(--sev-warning); }
+  .pill.info { background: var(--sev-info); }
+  .pill.open { background: #334155; }
+  .pill.acked { background: #7c3aed; }
+  .pill.resolved { background: #94a3b8; }
+  .pill.high { background: var(--high); }
+  .pill.medium { background: var(--medium); }
+  .pill.low { background: var(--low); }
+  .err { color: var(--sev-critical); font-size: 12px; }
+  .muted { color: var(--muted); }
+  svg text { font-size: 10px; fill: var(--text); }
+  .legend { display: flex; gap: 12px; font-size: 11px; color: var(--muted); margin: 4px 0 8px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+  .detail { font-size: 12px; background: #f8fafc; border: 1px solid var(--border); border-radius: 6px; padding: 10px; margin-top: 8px; white-space: pre-wrap; }
+  button, select { font-size: 12px; padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px; background: #fff; cursor: pointer; }
+  button:hover { background: #f1f5f9; }
+  .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+</style>
+</head>
+<body>
+<header>
+  <h1>OpsCopilot 控制台</h1>
+  <span class="meta" id="meta">M1 · W5</span>
+  <div class="toolbar">
+    <select id="clusterState">
+      <option value="active">活跃簇</option>
+      <option value="resolved">已解决</option>
+      <option value="all">全部</option>
+    </select>
+    <label class="meta"><input type="checkbox" id="autoRefresh" checked> 30s 自动刷新</label>
+    <button onclick="refreshAll()">刷新</button>
+  </div>
+</header>
+<main>
+  <section>
+    <h2>告警簇 <span class="meta" id="clusterCount"></span></h2>
+    <div id="clusterErr" class="err"></div>
+    <table>
+      <thead><tr>
+        <th>cluster_key</th><th>状态</th><th>严重级</th><th>告警数</th><th>摘要</th><th>指纹数</th><th>节点数</th><th>最近告警</th>
+      </tr></thead>
+      <tbody id="clusterRows"></tbody>
+    </table>
+    <div id="clusterDetail" class="detail" style="display:none"></div>
+  </section>
+  <section>
+    <h2>拓扑图 <span class="meta" id="topoMeta"></span></h2>
+    <div class="legend">
+      <span><i style="background:var(--high)"></i>high（观测事实）</span>
+      <span><i style="background:var(--medium)"></i>medium（聚合/声明）</span>
+      <span><i style="background:var(--low)"></i>low（不进因果推理，ADR-007）</span>
+    </div>
+    <div id="topoErr" class="err"></div>
+    <div id="topoView"></div>
+    <div id="nodeDetail" class="detail" style="display:none"></div>
+  </section>
+</main>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const sevPill = (s) => `<span class="pill ${esc(s||"info")}">${esc(s||"-")}</span>`;
+const statePill = (s) => `<span class="pill ${esc(s)}">${esc(s)}</span>`;
+
+// P2-1 千节点聚合阈值：超过则不画 SVG（千圆点不可读），按 type 分桶列表。
+const AGG_THRESHOLD = 300;
+
+async function fetchJSON(url) {
+  const resp = await fetch(url);
+  const body = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(body.error || (resp.status + " " + resp.statusText));
+  return body;
+}
+
+// ---- 簇列表 ----
+async function loadClusters() {
+  $("clusterErr").textContent = "";
+  try {
+    const state = $("clusterState").value;
+    const data = await fetchJSON("/api/v1/clusters?state=" + state);
+    $("clusterCount").textContent = `(${data.count})`;
+    $("clusterRows").innerHTML = (data.clusters || []).map(c => `
+      <tr class="clickable" data-key="${esc(c.cluster_key)}">
+        <td>${esc(c.cluster_key)}</td>
+        <td>${statePill(c.state)}</td>
+        <td>${sevPill(c.severity)}</td>
+        <td>${c.alert_count}</td>
+        <td>${esc(c.summary || "-")}</td>
+        <td>${(c.fingerprints||[]).length}</td>
+        <td>${(c.node_keys||[]).length}</td>
+        <td class="muted">${esc((c.last_seen_at||"").replace("T"," ").slice(0,19))}</td>
+      </tr>`).join("") ||
+      `<tr><td colspan="8" class="muted">无簇——影子降噪跑着但还没有告警进管道</td></tr>`;
+    $("clusterRows").querySelectorAll("tr.clickable").forEach(tr => {
+      tr.onclick = () => showClusterDetail(tr.dataset.key);
+    });
+  } catch (e) {
+    $("clusterErr").textContent = "加载失败：" + e.message;
+    $("clusterRows").innerHTML = "";
+  }
+}
+
+async function showClusterDetail(key) {
+  const box = $("clusterDetail");
+  try {
+    const c = await fetchJSON("/api/v1/clusters/" + encodeURIComponent(key));
+    box.style.display = "block";
+    box.textContent = JSON.stringify(c, null, 2);
+  } catch (e) { box.style.display = "block"; box.textContent = "加载失败：" + e.message; }
+}
+
+// ---- 拓扑 ----
+// 环形布局：角度均分，半径固定——M1 够用；力导向是 W6+ 的事。
+async function loadTopology() {
+  $("topoErr").textContent = "";
+  try {
+    const data = await fetchJSON("/api/v1/topology");
+    const nodes = data.nodes || [], edges = data.edges || [];
+    $("topoMeta").textContent = `(${nodes.length} 节点 / ${edges.length} 边)`;
+    const view = $("topoView");
+    if (nodes.length === 0) { view.innerHTML = `<p class="muted">拓扑为空——等第一轮发现进图</p>`; return; }
+    if (nodes.length > AGG_THRESHOLD) { renderAggregate(nodes, edges); return; }
+    renderGraph(nodes, edges);
+  } catch (e) {
+    $("topoErr").textContent = "加载失败：" + e.message;
+  }
+}
+
+function renderAggregate(nodes, edges) {
+  // P2-1 聚合渲染：按 node_type 分桶，统计置信度分布。
+  const byType = {};
+  for (const n of nodes) {
+    const t = n.node_type || "unknown";
+    byType[t] = byType[t] || { count: 0, high: 0, medium: 0, low: 0 };
+    byType[t].count++;
+    byType[t][n.confidence || "low"] = (byType[t][n.confidence || "low"] || 0) + 1;
+  }
+  let html = `<p class="muted">节点数 ${nodes.length} 超过渲染阈值 ${AGG_THRESHOLD}——聚合视图（点击类型暂不展开，W6 补钻取）：</p><table>
+    <thead><tr><th>type</th><th>节点数</th><th>high</th><th>medium</th><th>low</th></tr></thead><tbody>`;
+  for (const [t, v] of Object.entries(byType).sort()) {
+    html += `<tr><td>${esc(t)}</td><td>${v.count}</td><td>${v.high||0}</td><td>${v.medium||0}</td><td>${v.low||0}</td></tr>`;
+  }
+  html += `</tbody></table>`;
+  $("topoView").innerHTML = html;
+}
+
+function renderGraph(nodes, edges) {
+  const W = 1100, H = 560, R = Math.min(230, 60 + nodes.length * 4);
+  const pos = {};
+  nodes.forEach((n, i) => {
+    const a = (2 * Math.PI * i) / nodes.length - Math.PI / 2;
+    pos[n.node_key] = { x: W/2 + R * Math.cos(a), y: H/2 + R * Math.sin(a) };
+  });
+  const color = { high: "var(--high)", medium: "var(--medium)", low: "var(--low)" };
+  let svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;background:#fff;border:1px solid var(--border);border-radius:6px">`;
+  for (const e of edges) {
+    const s = pos[e.src_key], d = pos[e.dst_key];
+    if (!s || !d) continue;
+    svg += `<line x1="${s.x}" y1="${s.y}" x2="${d.x}" y2="${d.y}" stroke="#cbd5e1" stroke-width="1"/>`;
+  }
+  for (const n of nodes) {
+    const p = pos[n.node_key];
+    const c = color[n.confidence || "low"] || color.low;
+    const r = n.confidence === "high" ? 6 : 4;
+    svg += `<circle cx="${p.x}" cy="${p.y}" r="${r}" fill="${c}" data-key="${esc(n.node_key)}" style="cursor:pointer"><title>${esc(n.node_key)} (${esc(n.node_type)}, ${esc(n.confidence)})</title></circle>`;
+  }
+  // 标签只给前 40 个节点——全画会糊成一片。
+  nodes.slice(0, 40).forEach((n, i) => {
+    const p = pos[n.node_key];
+    svg += `<text x="${p.x + 9}" y="${p.y + 3}">${esc(n.node_key.length > 28 ? n.node_key.slice(0, 27) + "…" : n.node_key)}</text>`;
+  });
+  svg += `</svg>`;
+  $("topoView").innerHTML = svg;
+  $("topoView").querySelectorAll("circle").forEach(c => {
+    c.onclick = () => showNodeDetail(c.dataset.key);
+  });
+}
+
+async function showNodeDetail(key) {
+  const box = $("nodeDetail");
+  try {
+    const [topo, changes] = await Promise.all([
+      fetchJSON("/api/v1/topology?node_key=" + encodeURIComponent(key) + "&depth=1"),
+      fetchJSON("/api/v1/changes?node_key=" + encodeURIComponent(key) +
+        "&window_start=" + new Date(Date.now() - 24*3600*1000).toISOString()),
+    ]);
+    box.style.display = "block";
+    box.textContent =
+      `节点: ${key}\n` +
+      `邻居数: ${(topo.nodes||[]).length - 1} / 边数: ${(topo.edges||[]).length}\n` +
+      `24h 内变更: ${(changes.changes||[]).length}\n` +
+      (changes.changes||[]).map(c => `  [${c.change_type}] ${c.occurred_at} ${c.actor || c.source || ""} ${c.summary || ""}`).join("\n");
+  } catch (e) { box.style.display = "block"; box.textContent = "加载失败：" + e.message; }
+}
+
+function refreshAll() { loadClusters(); loadTopology(); }
+
+let timer = null;
+$("autoRefresh").onchange = () => {
+  if (timer) { clearInterval(timer); timer = null; }
+  if ($("autoRefresh").checked) timer = setInterval(refreshAll, 30000);
+};
+$("clusterState").onchange = loadClusters;
+if ($("autoRefresh").checked) timer = setInterval(refreshAll, 30000);
+refreshAll();
+</script>
+</body>
+</html>

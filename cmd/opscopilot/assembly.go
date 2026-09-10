@@ -95,6 +95,7 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 //   - POST /api/v1/changes  提交变更事件（ChangeWebhook.ServeHTTP）
 //   - GET  /healthz         存活探针（进程活着即 200，不探测下游）
 //   - GET  /api/v1/*        REST 只读查询面（W5-2.2：簇/拓扑/变更）
+//   - GET  /console（/ 跳转）控制台最小视图（W5-2.3）
 func (a *Assembly) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle(changeWebhookPath, a.Webhook)
@@ -104,5 +105,6 @@ func (a *Assembly) Handler() http.Handler {
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 	a.REST.Register(mux)
+	registerConsole(mux)
 	return mux
 }
