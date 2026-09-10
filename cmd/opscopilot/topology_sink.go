@@ -142,6 +142,20 @@ func (s *TopologySink) graphSnapshot() *topology.Graph {
 	return s.builder.Build()
 }
 
+// CausalSnapshot 返回**因果子图的拷贝**（裁剪在锁内完成）。
+//
+// 为什么不能写 `graphSnapshot().CausalSubgraph()`：graphSnapshot 只保证
+// "取指针"那一瞬受锁，随后的 CausalSubgraph 要遍历 g.Nodes/g.Edges——
+// 那是**锁外读共享 map**，与并发 IngestDiscover 的写构成数据竞争
+// （本文件 TopologyAsOf 的 R2 注释正是为此立的规矩）。
+// 本方法把裁剪收进锁内，返回的是 CausalSubgraph 新造的副本，
+// 调用方可在锁外安全使用。
+func (s *TopologySink) CausalSnapshot() *topology.Graph {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.builder.Build().CausalSubgraph()
+}
+
 // TopologyAsOf 时点拓扑查询（W5-2.1 gRPC GetTopology 的数据出口）。
 //
 // R2 契约：Build() 返回内部指针（零拷贝、无自身锁），AsOf/Neighborhood/

@@ -34,7 +34,7 @@ const defaultNoiseWindow = 10 * time.Minute
 type NoiseEngine struct {
 	mu      sync.Mutex
 	shadow  *noise.Shadow
-	sink    *TopologySink // 取拓扑快照构建域函数（同包访问 graphSnapshot）
+	sink    *TopologySink // 取因果子图快照（锁内裁剪，见 CausalSnapshot）
 	enabled bool
 	logger  connector.Logger
 	// total / converged 影子统计（启动以来累计）。
@@ -268,8 +268,11 @@ func (n *NoiseEngine) RestoreFrom(records []noise.ClusterRecord) error {
 // snapshotView 从当前拓扑图构建批次视图。
 // ADR-007 low 门禁天然生效：CausalSubgraph 已剔除 low 节点/边，
 // 它们进不了故障域判定。
+//
+// 走 Sink.CausalSnapshot（锁内裁剪 + 返回拷贝）：不能用
+// graphSnapshot().CausalSubgraph()——那是在锁外遍历共享图，属无保护读。
 func (n *NoiseEngine) snapshotView() batchView {
-	g := n.sink.graphSnapshot().CausalSubgraph()
+	g := n.sink.CausalSnapshot()
 	view := batchView{
 		adj:      make(map[string][]string, len(g.Nodes)),
 		byInsEnv: make(map[string]string, len(g.Nodes)),
