@@ -51,18 +51,26 @@ message GetRecentChangesRequest {
   string window_end = 4;
 }
 
-// ChangeRecord 变更记录（对外契约，全局审查 C5）。
-//
-// 注意：字段落后于内存模型 ChangeEvent（internal/topology）——缺 id
-// （幂等键/去重）、source/ref/revision/summary（RCA 证据）、confidence、
-// tenant_id。接线 GetRecentChanges 前必须先扩字段（版本化演进、向后兼容），
-// 再实现映射；勿为单次接线改小契约导致证据不可用。改动请同步 proto + pb
-// 生成代码 + internal/topology/change.go 顶部注释。
+// ChangeRecord 变更记录（对外契约，全局审查 C5 三步走于 W5-2.1 完成）：
+// ① proto 补字段（本版，版本化演进——新增字段全部使用新编号，向后兼容）；
+// ② ChangeEvent → pb.ChangeRecord 映射在 cmd/opscopilot/semantic_model.go
+//    实现（R2 契约：拓扑侧映射必须锁内完成，本消息字段来自 ChangeStore
+//    值拷贝，映射在锁外安全）；
+// ③ 类型映射统一走 ChangeType 字符串化（string(ev.Type)，封闭集合由
+//    topology.ParseChangeType 保证）。
 message ChangeRecord {
   string node_key = 1;
   string change_type = 2;
   string occurred_at = 3;
   string actor = 4;
+  // ---- W5-2.1 扩展（C5：证据字段对齐内存模型 ChangeEvent）----
+  string id = 5;              // 幂等键（重复提交返回原记录的依据）
+  string source = 6;          // 变更来源：git / jenkins / manual
+  string ref = 7;             // 分支名 / 流水线名
+  string revision = 8;        // commit sha / build number
+  string summary = 9;         // 一句话说明改了什么
+  string confidence = 10;     // 事件置信度：high / medium / low（ADR-007）
+  string tenant_id = 11;      // 租户隔离（M1 单租户常为空）
 }
 
 message GetRecentChangesResponse {

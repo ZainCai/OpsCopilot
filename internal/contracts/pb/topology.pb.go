@@ -378,12 +378,30 @@ func (x *GetRecentChangesRequest) GetWindowEnd() string {
 	return ""
 }
 
+// ChangeRecord 变更记录（对外契约，全局审查 C5 三步走于 W5-2.1 完成）：
+// ① proto 补字段（本版，版本化演进——新增字段全部使用新编号，向后兼容）；
+// ② ChangeEvent → pb.ChangeRecord 映射在 cmd/opscopilot/semantic_model.go
+//
+//	实现（R2 契约：拓扑侧映射必须锁内完成，本消息字段来自 ChangeStore
+//	值拷贝，映射在锁外安全）；
+//
+// ③ 类型映射统一走 ChangeType 字符串化（string(ev.Type)，封闭集合由
+//
+//	topology.ParseChangeType 保证）。
 type ChangeRecord struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	NodeKey       string                 `protobuf:"bytes,1,opt,name=node_key,json=nodeKey,proto3" json:"node_key,omitempty"`
-	ChangeType    string                 `protobuf:"bytes,2,opt,name=change_type,json=changeType,proto3" json:"change_type,omitempty"`
-	OccurredAt    string                 `protobuf:"bytes,3,opt,name=occurred_at,json=occurredAt,proto3" json:"occurred_at,omitempty"`
-	Actor         string                 `protobuf:"bytes,4,opt,name=actor,proto3" json:"actor,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	NodeKey    string                 `protobuf:"bytes,1,opt,name=node_key,json=nodeKey,proto3" json:"node_key,omitempty"`
+	ChangeType string                 `protobuf:"bytes,2,opt,name=change_type,json=changeType,proto3" json:"change_type,omitempty"`
+	OccurredAt string                 `protobuf:"bytes,3,opt,name=occurred_at,json=occurredAt,proto3" json:"occurred_at,omitempty"`
+	Actor      string                 `protobuf:"bytes,4,opt,name=actor,proto3" json:"actor,omitempty"`
+	// ---- W5-2.1 扩展（C5：证据字段对齐内存模型 ChangeEvent）----
+	Id            string `protobuf:"bytes,5,opt,name=id,proto3" json:"id,omitempty"`                              // 幂等键（重复提交返回原记录的依据）
+	Source        string `protobuf:"bytes,6,opt,name=source,proto3" json:"source,omitempty"`                      // 变更来源：git / jenkins / manual
+	Ref           string `protobuf:"bytes,7,opt,name=ref,proto3" json:"ref,omitempty"`                            // 分支名 / 流水线名
+	Revision      string `protobuf:"bytes,8,opt,name=revision,proto3" json:"revision,omitempty"`                  // commit sha / build number
+	Summary       string `protobuf:"bytes,9,opt,name=summary,proto3" json:"summary,omitempty"`                    // 一句话说明改了什么
+	Confidence    string `protobuf:"bytes,10,opt,name=confidence,proto3" json:"confidence,omitempty"`             // 事件置信度：high / medium / low（ADR-007）
+	TenantId      string `protobuf:"bytes,11,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"` // 租户隔离（M1 单租户常为空）
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -442,6 +460,55 @@ func (x *ChangeRecord) GetOccurredAt() string {
 func (x *ChangeRecord) GetActor() string {
 	if x != nil {
 		return x.Actor
+	}
+	return ""
+}
+
+func (x *ChangeRecord) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *ChangeRecord) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
+}
+
+func (x *ChangeRecord) GetRef() string {
+	if x != nil {
+		return x.Ref
+	}
+	return ""
+}
+
+func (x *ChangeRecord) GetRevision() string {
+	if x != nil {
+		return x.Revision
+	}
+	return ""
+}
+
+func (x *ChangeRecord) GetSummary() string {
+	if x != nil {
+		return x.Summary
+	}
+	return ""
+}
+
+func (x *ChangeRecord) GetConfidence() string {
+	if x != nil {
+		return x.Confidence
+	}
+	return ""
+}
+
+func (x *ChangeRecord) GetTenantId() string {
+	if x != nil {
+		return x.TenantId
 	}
 	return ""
 }
@@ -527,14 +594,24 @@ const file_topology_proto_rawDesc = "" +
 	"\bnode_key\x18\x02 \x01(\tR\anodeKey\x12!\n" +
 	"\fwindow_start\x18\x03 \x01(\tR\vwindowStart\x12\x1d\n" +
 	"\n" +
-	"window_end\x18\x04 \x01(\tR\twindowEnd\"\x81\x01\n" +
+	"window_end\x18\x04 \x01(\tR\twindowEnd\"\xae\x02\n" +
 	"\fChangeRecord\x12\x19\n" +
 	"\bnode_key\x18\x01 \x01(\tR\anodeKey\x12\x1f\n" +
 	"\vchange_type\x18\x02 \x01(\tR\n" +
 	"changeType\x12\x1f\n" +
 	"\voccurred_at\x18\x03 \x01(\tR\n" +
 	"occurredAt\x12\x14\n" +
-	"\x05actor\x18\x04 \x01(\tR\x05actor\"[\n" +
+	"\x05actor\x18\x04 \x01(\tR\x05actor\x12\x0e\n" +
+	"\x02id\x18\x05 \x01(\tR\x02id\x12\x16\n" +
+	"\x06source\x18\x06 \x01(\tR\x06source\x12\x10\n" +
+	"\x03ref\x18\a \x01(\tR\x03ref\x12\x1a\n" +
+	"\brevision\x18\b \x01(\tR\brevision\x12\x18\n" +
+	"\asummary\x18\t \x01(\tR\asummary\x12\x1e\n" +
+	"\n" +
+	"confidence\x18\n" +
+	" \x01(\tR\n" +
+	"confidence\x12\x1b\n" +
+	"\ttenant_id\x18\v \x01(\tR\btenantId\"[\n" +
 	"\x18GetRecentChangesResponse\x12?\n" +
 	"\achanges\x18\x01 \x03(\v2%.opscopilot.contracts.v1.ChangeRecordR\achanges2\xf2\x01\n" +
 	"\rSemanticModel\x12h\n" +

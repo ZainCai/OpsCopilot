@@ -130,6 +130,9 @@ func main() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(ctx)
+		if asm.GRPC != nil {
+			asm.GRPC.Stop() // R6：DialInProcess 的 Serve goroutine 只能靠 Stop 退出
+		}
 		if noiseRDB != nil {
 			_ = noiseRDB.Close() // 第四轮扫描 F4：落库连接随停机关闭
 		}

@@ -14,23 +14,30 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"google.golang.org/grpc"
+
 	"opscopilot/internal/connector"
+	pb "opscopilot/internal/contracts/pb"
 	"opscopilot/internal/topology"
 )
 
 // changeWebhookPath 变更事件提交路由（手动 curl / Git/Jenkins webhook 共用）。
 const changeWebhookPath = "/api/v1/changes"
 
-// Assembly W4 装配产物：各组件的持有者，供 main 做生命周期管理与测试断言。
+// Assembly W5 装配产物：各组件的持有者，供 main 做生命周期管理与测试断言。
 type Assembly struct {
 	Sink    *TopologySink
 	Changes *topology.ChangeStore
 	Webhook *ChangeWebhook
 	// Noise 影子降噪引擎（W4-1.4）；nil = envNoiseShadow=off 已关闭。
 	Noise *NoiseEngine
+	// GRPC 进程内 gRPC server（W5-2.1）：承载 SemanticModel 服务，
+	// 供 transport.DialInProcess 消费。生命周期归 main（Stop 必调，
+	// 否则 DialInProcess 的 Serve goroutine 泄漏，见其 R6 注释）。
+	GRPC *grpc.Server
 }
 
-// NewAssembly 组装 W3+W4 组件并接线。
+// NewAssembly 组装 W3+W4+W5 组件并接线。
 //
 // webhookToken：变更 webhook 的共享密钥；非空时 POST /api/v1/changes
 // 必须携带匹配的 X-OpsCopilot-Token 头（S1 写路径准入）。传空表示
@@ -62,7 +69,18 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 	}
 	sink.AttachNoise(noiseEngine)
 
-	return &Assembly{Sink: sink, Changes: store, Webhook: hook, Noise: noiseEngine}, nil
+	// W5-2.1：SemanticModel gRPC 服务（进程内形态，契约测试经
+	// transport.DialInProcess 回环验证；独立进程形态只换 Dial 实现）。
+	grpcServer := grpc.NewServer()
+	pb.RegisterSemanticModelServer(grpcServer, NewSemanticModelServer(sink, store))
+
+	return &Assembly{
+		Sink:    sink,
+		Changes: store,
+		Webhook: hook,
+		Noise:   noiseEngine,
+		GRPC:    grpcServer,
+	}, nil
 }
 
 // Handler 装配 HTTP 路由：

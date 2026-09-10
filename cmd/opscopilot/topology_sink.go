@@ -12,8 +12,10 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"opscopilot/internal/connector"
+	pb "opscopilot/internal/contracts/pb"
 	"opscopilot/internal/topology"
 )
 
@@ -106,11 +108,32 @@ func (s *TopologySink) IngestCollect(_ context.Context, r *connector.CollectResu
 
 // graphSnapshot 返回当前拓扑图（W3 审查 P3：从公开 API 收窄为包内私有——
 // 返回的是共享底层 map 的指针，对外暴露易被误用为无保护读；包外的
-// 读需求走 HasNode / CoverageReport 这类锁内方法，包内仅测试使用）。
+// 读需求走 HasNode / CoverageReport / TopologyAsOf 这类锁内方法，
+// 包内仅测试使用）。
 func (s *TopologySink) graphSnapshot() *topology.Graph {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.builder.Build()
+}
+
+// TopologyAsOf 时点拓扑查询（W5-2.1 gRPC GetTopology 的数据出口）。
+//
+// R2 契约：Build() 返回内部指针（零拷贝、无自身锁），AsOf/Neighborhood/
+// ToProtoAsOf 全部读取共享 map——**整个读取+裁剪+映射必须发生在
+// 持锁区间内**，锁外读图是无保护读（并发 IngestDiscover 会写同一 map）。
+// root 非空时做邻域裁剪（root 不存在返回 ok=false，gRPC 层映射
+// NotFound）；depth <= 0 且 root 非空 = 仅 root 单节点图（0 跳约定）。
+func (s *TopologySink) TopologyAsOf(asOf time.Time, root string, depth int) (resp *pb.GetTopologyResponse, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	g := s.builder.Build().AsOf(asOf)
+	if root != "" {
+		g, ok = g.Neighborhood(root, depth)
+		if !ok {
+			return nil, false
+		}
+	}
+	return g.ToProtoAsOf(asOf), true
 }
 
 // HasNode 锁内判定节点是否存在（供变更 webhook 的严格节点校验钩子使用）。
