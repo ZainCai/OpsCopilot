@@ -146,6 +146,25 @@ func main() {
 		go asm.Poller.Run(runCtx)
 	}
 
+	// D8 决策 C：事件保留策略 —— resolved 满 N 天归档到 incident_archive
+	// （事件本体 + 簇 + 审计 打包成 JSONB，不丢任何上下文）。默认 90d，
+	// OPS_INCIDENT_RETENTION=off 可关闭；配置非法直接启动失败（fail-fast）。
+	retention, on, err := ParseRetention(os.Getenv("OPS_INCIDENT_RETENTION"))
+	if err != nil {
+		logger.Printf("FATAL: %v", err)
+		os.Exit(1)
+	}
+	if on {
+		if asm.pool == nil {
+			logger.Printf("  retention: configured but no DB (set OPS_DB_DSN) — disabled")
+		} else {
+			logger.Printf("  retention: ON (archive resolved incidents older than %s)", retention)
+			go NewRetentionSweeper(asm.pool, DefaultTenant, retention, logger.Printf).Run(runCtx)
+		}
+	} else {
+		logger.Printf("  retention: OFF (set OPS_INCIDENT_RETENTION, e.g. 90d, to enable)")
+	}
+
 	// credential 周期清扫（C9 收尾）：过期条目不再是"删除前一直占内存"。
 	// 周期 10 分钟——清扫是幂等原语，频率只需远小于凭证最小有效期。
 	go func() {
