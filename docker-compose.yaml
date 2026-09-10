@@ -66,7 +66,9 @@ services:
     environment:
       REDIS_ALERT_ADDR: redis-alert:6379
       REDIS_CACHE_ADDR: redis-cache:6379
-      DB_DSN: postgres://opscopilot:${DB_PASSWORD:-opscopilot}@timescaledb:5432/opscopilot?sslmode=disable
+      # 应用读的是 OPS_DB_DSN（早期误写成 DB_DSN，会让容器内 DB 能力静默降级内存）
+      # DB_PASSWORD 仅供上面的 timescaledb 服务建库使用。
+      OPS_DB_DSN: postgres://opscopilot:${DB_PASSWORD:-opscopilot}@timescaledb:5432/opscopilot?sslmode=disable
       # X2：容器内必须绑全接口（0.0.0.0），否则宿主端口映射不可达；
       # 进程默认 127.0.0.1 是给裸机/本地运行的安全默认（S1），两者不冲突
       OPS_LISTEN_ADDR: 0.0.0.0:8080

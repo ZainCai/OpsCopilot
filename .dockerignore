@@ -1,0 +1,31 @@
+# 构建上下文排除：Dockerfile 是 `COPY . .`，不排除会把密钥与产物灌进镜像层
+# 与构建上下文（.env 是真凭证；.demo/ 下还有 30MB 级二进制）。
+
+# 版本控制与 CI
+.git
+.github
+
+# 本地配置与密钥（架构要求：凭证绝不入库/入镜像）
+.env
+*.local.yaml
+credentials.yaml
+
+# 构建产物与运行时输出
+bin/
+*.exe
+*.exe~
+*.test
+*.out
+*.log
+.demo/
+*.pids
+
+# 文档与评审报告（不参与编译）
+docs/
+*.md
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
