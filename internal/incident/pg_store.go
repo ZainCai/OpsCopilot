@@ -75,12 +75,14 @@ func (s *PGStore) Create(id, title, severity string) (*Incident, error) {
 	defer cancel()
 	var inc Incident
 	err := s.pool.QueryRow(ctx, `
-INSERT INTO incident (tenant_id, incident_id, title, severity, state)
-VALUES ($1, $2, $3, NULLIF($4,''), 'open')
-RETURNING incident_id, title, severity, state, created_at, updated_at, resolved_at`,
+INSERT INTO incident (tenant_id, incident_id, title, severity, state, origin, auto_close_policy)
+VALUES ($1, $2, $3, NULLIF($4,''), 'open', 'manual', 'manual_only')
+RETURNING incident_id, title, severity, state, created_at, updated_at, resolved_at,
+          origin, source_ref, source_meta, created_by, merged_into, auto_close_policy`,
 		s.tenantID, id, title, severity).Scan(
 		&inc.ID, &inc.Title, &inc.Severity, &inc.State, &inc.CreatedAt, &inc.UpdatedAt,
-		&nullTime{t: &inc.ResolvedAt})
+		&nullTime{t: &inc.ResolvedAt}, &inc.Origin, &inc.SourceRef, &inc.SourceMeta,
+		&inc.CreatedBy, &inc.MergedInto, &inc.AutoClosePolicy)
 	if err != nil {
 		if strings.Contains(err.Error(), "duplicate key") {
 			return nil, fmt.Errorf("incident: duplicate id %q", id)
@@ -129,12 +131,15 @@ SELECT state FROM incident WHERE tenant_id=$1 AND incident_id=$2 FOR UPDATE`,
 	err = tx.QueryRow(ctx, `
 UPDATE incident SET state=$3, updated_at=now(),
   resolved_at = CASE WHEN $3='resolved' THEN now() ELSE resolved_at END,
-  ack_by = CASE WHEN $3='resolved' AND $4<>'' THEN $4 ELSE ack_by END
+  ack_by = CASE WHEN $3='resolved' AND $4<>'' THEN $4 ELSE ack_by END,
+  auto_close_policy = CASE WHEN $3='acked' THEN 'manual_only' ELSE auto_close_policy END
 WHERE tenant_id=$1 AND incident_id=$2
-RETURNING incident_id, title, severity, state, created_at, updated_at, resolved_at`,
+RETURNING incident_id, title, severity, state, created_at, updated_at, resolved_at,
+          origin, source_ref, source_meta, created_by, merged_into, auto_close_policy`,
 		s.tenantID, id, to, actor).Scan(
 		&inc.ID, &inc.Title, &inc.Severity, &inc.State, &inc.CreatedAt, &inc.UpdatedAt,
-		&nullTime{t: &inc.ResolvedAt})
+		&nullTime{t: &inc.ResolvedAt}, &inc.Origin, &inc.SourceRef, &inc.SourceMeta,
+		&inc.CreatedBy, &inc.MergedInto, &inc.AutoClosePolicy)
 	if err != nil {
 		return Incident{}, fmt.Errorf("incident pg: update state: %w", err)
 	}
@@ -203,7 +208,8 @@ func (s *PGStore) List(state State) []Incident {
 		where = "state = '" + string(state) + "'" // 白名单枚举内插（调用方经 REST 已限枚举）
 	}
 	rows, err := s.pool.Query(ctx, `
-SELECT incident_id, title, severity, state, created_at, updated_at, resolved_at
+SELECT incident_id, title, severity, state, created_at, updated_at, resolved_at,
+       origin, source_ref, source_meta, created_by, merged_into, auto_close_policy
 FROM incident WHERE tenant_id=$1 AND `+where+` ORDER BY created_at`, s.tenantID)
 	if err != nil {
 		return nil
@@ -213,7 +219,9 @@ FROM incident WHERE tenant_id=$1 AND `+where+` ORDER BY created_at`, s.tenantID)
 	for rows.Next() {
 		var inc Incident
 		if err := rows.Scan(&inc.ID, &inc.Title, &inc.Severity, &inc.State,
-			&inc.CreatedAt, &inc.UpdatedAt, &inc.ResolvedAt); err != nil {
+			&inc.CreatedAt, &inc.UpdatedAt, &nullTime{t: &inc.ResolvedAt},
+			&inc.Origin, &inc.SourceRef, &inc.SourceMeta, &inc.CreatedBy,
+			&inc.MergedInto, &inc.AutoClosePolicy); err != nil {
 			return out
 		}
 		out = append(out, inc)
@@ -240,11 +248,13 @@ incident_id = (SELECT i.incident_id FROM incident_cluster ic
 // queryOne 按 where 片段查单事件 + 簇关联。
 func (s *PGStore) queryOne(ctx context.Context, where string, args ...any) (Incident, error) {
 	var inc Incident
-	full := `SELECT incident_id, title, severity, state, created_at, updated_at, resolved_at
+	full := `SELECT incident_id, title, severity, state, created_at, updated_at, resolved_at,
+       origin, source_ref, source_meta, created_by, merged_into, auto_close_policy
 FROM incident WHERE tenant_id=$2 AND ` + where
 	err := s.pool.QueryRow(ctx, full, args...).Scan(
 		&inc.ID, &inc.Title, &inc.Severity, &inc.State, &inc.CreatedAt, &inc.UpdatedAt,
-		&nullTime{t: &inc.ResolvedAt})
+		&nullTime{t: &inc.ResolvedAt}, &inc.Origin, &inc.SourceRef, &inc.SourceMeta,
+		&inc.CreatedBy, &inc.MergedInto, &inc.AutoClosePolicy)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Incident{}, ErrNotFound
 	}
@@ -293,4 +303,102 @@ WHERE i.tenant_id=$1 AND i.incident_id=$2 ORDER BY cluster_key`,
 		rows.Close()
 		list[i].ClusterKeys = keys
 	}
+}
+
+// UpsertExternal 外部链路幂等写入（链路 A，L0 幂等）：
+// ON CONFLICT (tenant_id, origin, source_ref) DO UPDATE —— 重推只更新不新建。
+// incident_id 用 origin:sourceRef 合成，保证 ID 唯一且可反查来源。
+func (s *PGStore) UpsertExternal(origin Origin, sourceRef, title, severity, createdBy, meta string) (*Incident, bool, error) {
+	if !ValidOrigin(origin) {
+		return nil, false, errors.New("incident: invalid origin " + string(origin))
+	}
+	if strings.TrimSpace(sourceRef) == "" {
+		return nil, false, errors.New("incident: source_ref is required for external upsert")
+	}
+	if strings.TrimSpace(title) == "" {
+		return nil, false, errors.New("incident: title is required")
+	}
+	if meta == "" {
+		meta = "{}"
+	}
+	if err := s.ensureTenant(context.Background()); err != nil {
+		return nil, false, err
+	}
+	ctx, cancel := s.ctx()
+	defer cancel()
+	var inc Incident
+	var xmax string // 用系统列判断是插入还是更新（更新时 xmax<>0）
+	err := s.pool.QueryRow(ctx, `
+INSERT INTO incident (tenant_id, incident_id, title, severity, state, origin, source_ref, source_meta, created_by, auto_close_policy)
+VALUES ($1, $2, $3, NULLIF($4,''), 'open', $5, $6, $7::jsonb, $8, 'auto')
+ON CONFLICT (tenant_id, origin, source_ref) WHERE source_ref <> '' DO UPDATE SET
+  title       = EXCLUDED.title,
+  severity    = EXCLUDED.severity,
+  source_meta = EXCLUDED.source_meta,
+  updated_at  = now()
+RETURNING incident_id, title, severity, state, created_at, updated_at, resolved_at,
+          origin, source_ref, source_meta, created_by, merged_into, auto_close_policy, xmax::text`,
+		s.tenantID, string(origin)+":"+sourceRef, title, severity, origin, sourceRef, meta, createdBy,
+	).Scan(&inc.ID, &inc.Title, &inc.Severity, &inc.State, &inc.CreatedAt, &inc.UpdatedAt,
+		&nullTime{t: &inc.ResolvedAt}, &inc.Origin, &inc.SourceRef, &inc.SourceMeta,
+		&inc.CreatedBy, &inc.MergedInto, &inc.AutoClosePolicy, &xmax)
+	if err != nil {
+		return nil, false, fmt.Errorf("incident pg: upsert external: %w", err)
+	}
+	return &inc, xmax == "0", nil
+}
+
+// MergeInto 人工合并：事务内把被合并单置 resolved + merged_into，
+// 簇关联转移给主单（一簇一事件唯一索引约束下用 ON CONFLICT 忽略冲突）。
+func (s *PGStore) MergeInto(id, targetID string) error {
+	if id == targetID {
+		return errors.New("incident: cannot merge into itself")
+	}
+	ctx, cancel := s.ctx()
+	defer cancel()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("incident pg: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var srcRow, tgtRow int64
+	var srcMerged string
+	var srcState State
+	if err := tx.QueryRow(ctx, `
+SELECT id, merged_into, state FROM incident WHERE tenant_id=$1 AND incident_id=$2`,
+		s.tenantID, id).Scan(&srcRow, &srcMerged, &srcState); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("incident pg: select src: %w", err)
+	}
+	if err := tx.QueryRow(ctx, `
+SELECT id FROM incident WHERE tenant_id=$1 AND incident_id=$2`,
+		s.tenantID, targetID).Scan(&tgtRow); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("incident pg: select tgt: %w", err)
+	}
+	if srcMerged == targetID && srcState == StateResolved {
+		return nil // 幂等
+	}
+	// 簇关联转移：目标已占用该簇则跳过（一簇一事件约束）。
+	if _, err := tx.Exec(ctx, `
+UPDATE incident_cluster SET incident_row_id=$2
+WHERE incident_row_id=$1 AND cluster_key NOT IN (
+  SELECT cluster_key FROM incident_cluster WHERE incident_row_id=$2)`, srcRow, tgtRow); err != nil {
+		return fmt.Errorf("incident pg: move clusters: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+UPDATE incident SET merged_into=$3, state='resolved', resolved_at=now(), updated_at=now()
+WHERE id=$1 AND tenant_id=$2`, srcRow, s.tenantID, targetID); err != nil {
+		return fmt.Errorf("incident pg: close src: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+UPDATE incident SET updated_at=now() WHERE id=$1`, tgtRow); err != nil {
+		return fmt.Errorf("incident pg: touch tgt: %w", err)
+	}
+	return tx.Commit(ctx)
 }

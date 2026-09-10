@@ -18,6 +18,29 @@ import (
 	"time"
 )
 
+// Origin 事件来源（双链路：外部自动导入 ∥ 人工建单）。
+type Origin string
+
+const (
+	OriginManual       Origin = "manual"       // 人工建单（链路 B）
+	OriginWebhook      Origin = "webhook"      // 通用 webhook（链路 A）
+	OriginAlertmanager Origin = "alertmanager" // Alertmanager（链路 A，一期）
+	OriginPrometheus   Origin = "prometheus"   // 预留
+	OriginAzure        Origin = "azure"        // 预留
+	OriginPull         Origin = "pull"         // 预留（定时拉取）
+	OriginAPI          Origin = "api"          // 预留（内部 API）
+)
+
+// ValidOrigin 校验来源枚举。
+func ValidOrigin(o Origin) bool {
+	switch o {
+	case OriginManual, OriginWebhook, OriginAlertmanager,
+		OriginPrometheus, OriginAzure, OriginPull, OriginAPI:
+		return true
+	}
+	return false
+}
+
 // State 事件状态机（原型 incident 页口径：open→acked→mitigated→resolved）。
 type State string
 
@@ -58,15 +81,26 @@ func (e ErrInvalidTransition) Error() string {
 
 // Incident 事件实体。
 type Incident struct {
-	ID          string // 幂等键（调用方生成，如 INC-2401 风格）
-	Title       string
-	Severity    string // critical / warning / info（沿用告警严重级口径）
-	State       State
-	ClusterKeys []string // 关联的降噪簇（F-02：簇→事件关联，字符串引用）
-	AckBy       string   // 确认人（M2 骨架：转 resolved 时记录）
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
-	ResolvedAt  time.Time // 零值 = 未解决（KPI 统计口径）
+	ID          string    `json:"id"`
+	Title       string    `json:"title"`
+	Severity    string    `json:"severity"`
+	State       State     `json:"state"`
+	ClusterKeys []string  `json:"cluster_keys"`
+	AckBy       string    `json:"ack_by"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	ResolvedAt  time.Time `json:"resolved_at"`
+
+	// ---- 双链路来源字段（迁移 000005）----
+	Origin     Origin `json:"origin"`
+	SourceRef  string `json:"source_ref"`
+	SourceMeta string `json:"source_meta"`
+	DedupKey   string `json:"dedup_key"`
+	CreatedBy  string `json:"created_by"`
+	MergedInto string `json:"merged_into"`
+	// AutoClosePolicy 外部恢复能否自动关单：auto / manual_only（人工
+	// 干预过的单置 manual_only——R2：防止外部恢复吞掉人工处置）。
+	AutoClosePolicy string `json:"auto_close_policy"`
 }
 
 // Store 事件存储接口（W9：内存与 TimescaleDB 双实现）。
@@ -78,6 +112,12 @@ type Store interface {
 	AttachCluster(id, clusterKey string) error
 	List(state State) []Incident
 	IncidentForCluster(clusterKey string) (Incident, bool)
+	// UpsertExternal 外部链路幂等写入（链路 A）：同 (origin, sourceRef)
+	// 已存在则更新（刷新标题/严重级/载荷/时间），不新建；返回是否新建。
+	UpsertExternal(origin Origin, sourceRef, title, severity, createdBy, meta string) (*Incident, bool, error)
+	// MergeInto 人工合并（L2 只提示不自动，合并动作由人触发）：被合并单
+	// 置 resolved 并记录 merged_into，簇关联转移给主单。
+	MergeInto(id, targetID string) error
 	// Persistence 声明落库形态（"memory" | "timescaledb"）——REST 响应
 	// 据此提示调用方（R6-4：内存态重启即丢，必须让消费者知道）。
 	Persistence() string
@@ -123,7 +163,8 @@ func (s *MemStore) Create(id, title, severity string) (*Incident, error) {
 	}
 	now := s.now()
 	inc := &Incident{ID: id, Title: title, Severity: severity,
-		State: StateOpen, CreatedAt: now, UpdatedAt: now}
+		State: StateOpen, CreatedAt: now, UpdatedAt: now,
+		Origin: OriginManual, AutoClosePolicy: "manual_only"}
 	s.byID[id] = inc
 	s.order = append(s.order, id)
 	return clone(inc), nil
@@ -153,6 +194,10 @@ func (s *MemStore) Transition(id string, to State, actor string) (Incident, erro
 	}
 	inc.State = to
 	inc.UpdatedAt = s.now()
+	if to == StateAcked {
+		// R2：人工确认过的单，外部恢复不得自动关闭（防吞掉人工处置）。
+		inc.AutoClosePolicy = "manual_only"
+	}
 	if to == StateResolved {
 		inc.ResolvedAt = inc.UpdatedAt
 		if strings.TrimSpace(actor) != "" {
@@ -212,6 +257,70 @@ func (s *MemStore) IncidentForCluster(clusterKey string) (Incident, bool) {
 		return Incident{}, false
 	}
 	return *clone(s.byID[id]), true
+}
+
+// UpsertExternal 外部链路幂等写入：同 (origin, sourceRef) 已存在 → 更新
+// 标题/严重级/载荷/时间，不新建（L0 幂等，抗重放）。
+func (s *MemStore) UpsertExternal(origin Origin, sourceRef, title, severity, createdBy, meta string) (*Incident, bool, error) {
+	if !ValidOrigin(origin) {
+		return nil, false, errors.New("incident: invalid origin " + string(origin))
+	}
+	if strings.TrimSpace(sourceRef) == "" {
+		return nil, false, errors.New("incident: source_ref is required for external upsert")
+	}
+	if strings.TrimSpace(title) == "" {
+		return nil, false, errors.New("incident: title is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id := string(origin) + ":" + sourceRef
+	if inc, ok := s.byID[id]; ok {
+		inc.Title = title
+		inc.Severity = severity
+		inc.SourceMeta = meta
+		inc.UpdatedAt = s.now()
+		return clone(inc), false, nil
+	}
+	now := s.now()
+	inc := &Incident{ID: id, Title: title, Severity: severity, State: StateOpen,
+		Origin: origin, SourceRef: sourceRef, SourceMeta: meta, CreatedBy: createdBy,
+		AutoClosePolicy: "auto", CreatedAt: now, UpdatedAt: now}
+	s.byID[id] = inc
+	s.order = append(s.order, id)
+	return clone(inc), true, nil
+}
+
+// MergeInto 人工合并：被合并单置 resolved + 记录 merged_into，簇关联转移
+// 给主单（主单不存在报错；重复合并幂等）。
+func (s *MemStore) MergeInto(id, targetID string) error {
+	if id == targetID {
+		return errors.New("incident: cannot merge into itself")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	src, ok := s.byID[id]
+	if !ok {
+		return ErrNotFound
+	}
+	tgt, ok := s.byID[targetID]
+	if !ok {
+		return ErrNotFound
+	}
+	if src.MergedInto == targetID && src.State == StateResolved {
+		return nil // 幂等
+	}
+	for _, k := range src.ClusterKeys {
+		if _, taken := s.byCluster[k]; !taken {
+			s.byCluster[k] = targetID
+			tgt.ClusterKeys = append(tgt.ClusterKeys, k)
+		}
+	}
+	src.MergedInto = targetID
+	src.State = StateResolved
+	src.ResolvedAt = s.now()
+	src.UpdatedAt = src.ResolvedAt
+	tgt.UpdatedAt = src.ResolvedAt
+	return nil
 }
 
 // clone 深拷贝切片字段（锁外返回值不共享底层数组）。

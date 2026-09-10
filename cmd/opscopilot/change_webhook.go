@@ -138,3 +138,13 @@ func (h *ChangeWebhook) writeEvent(w http.ResponseWriter, body map[string]any) {
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(body)
 }
+
+// authorized 共享密钥校验（写路径统一鉴权件，R6）：
+// Token 为空 = 未启用鉴权（仅限本机联调）；非空则必须常量时间匹配，
+// 防止计时侧信道。供变更 webhook、Alertmanager 接收、人工建单端点共用。
+func authorized(got, want string) bool {
+	if want == "" {
+		return true
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}

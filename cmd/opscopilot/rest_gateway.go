@@ -4,17 +4,21 @@
 //   - 直接方法调用而非绕 gRPC 回环：SemanticModelServer 的校验与映射
 //     逻辑同进程复用，错误统一经 gRPC status → HTTP 映射——一套语义
 //     两个门面，不会漂移；
-//   - 只读 GET、无写路径：S1 写路径准入（webhook Token）不适用于本
-//     文件；默认 bind loopback-only（S1）下无鉴权可接受，非回环暴露
+//   - 读路径（GET）默认无鉴权：S1 下 bind loopback-only，非回环暴露
 //     必须前置鉴权反代（main 启动警告已覆盖）；
+//   - 写路径仅 POST /api/v1/incidents（人工建单，W9 双链路链路 B），
+//     必须携带共享密钥（复用 ChangeWebhook 的 authorized 件）；
 //   - Go 1.22+ ServeMux 增强路由：method + {key} 路径参数 + PathValue。
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -24,6 +28,9 @@ import (
 	"opscopilot/internal/noise"
 )
 
+// incidentBodyLimit 人工建单请求体上限（建单是几行 JSON，1MiB 足够）。
+const incidentBodyLimit = 1 << 20
+
 // RESTGateway 只读查询面。
 // noise 可为 nil（影子降噪关闭 → 簇端点 503，其余端点照常）。
 // incidents 可为 nil（M2 主干未接线时事件端点 503）。
@@ -31,11 +38,13 @@ type RESTGateway struct {
 	noise     *NoiseEngine
 	sem       *SemanticModelServer
 	incidents incident.Store
+	// token 写路径共享密钥（人工建单端点鉴权，R6）。
+	token string
 }
 
 // NewRESTGateway 构造。
-func NewRESTGateway(noise *NoiseEngine, sem *SemanticModelServer, incidents incident.Store) *RESTGateway {
-	return &RESTGateway{noise: noise, sem: sem, incidents: incidents}
+func NewRESTGateway(noise *NoiseEngine, sem *SemanticModelServer, incidents incident.Store, token string) *RESTGateway {
+	return &RESTGateway{noise: noise, sem: sem, incidents: incidents, token: token}
 }
 
 // Register 把全部路由挂到 mux（装配层调用）。
@@ -56,6 +65,7 @@ func (g *RESTGateway) Register(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/changes", h)
 	mux.Handle("GET /api/v1/incidents", h)
 	mux.Handle("GET /api/v1/incidents/{id}", h)
+	mux.HandleFunc("POST /api/v1/incidents", g.handleCreateIncident)
 }
 
 // route 按 path 分发（CORS 包装层之下）。
@@ -68,6 +78,10 @@ func (g *RESTGateway) route(w http.ResponseWriter, r *http.Request) {
 	case "/api/v1/changes":
 		g.handleChanges(w, r)
 	case "/api/v1/incidents":
+		if r.Method == http.MethodPost {
+			g.handleCreateIncident(w, r)
+			return
+		}
 		g.handleIncidents(w, r)
 	default:
 		// /api/v1/clusters/{key} 与 /api/v1/incidents/{id}：路径参数经 PathValue 取。
@@ -210,6 +224,57 @@ func (g *RESTGateway) handleTopology(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleCreateIncident POST /api/v1/incidents —— 链路 B：人工建单。
+// 写路径：必须携带共享密钥（复用 ChangeWebhook 的鉴权件，R6 应对），
+// 且 origin 恒为 manual、auto_close_policy 恒为 manual_only（R2：人工单
+// 不允许外部恢复自动关闭）。
+func (g *RESTGateway) handleCreateIncident(w http.ResponseWriter, r *http.Request) {
+	if !authorized(r.Header.Get(AuthHeader), g.token) {
+		writeErr(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if g.incidents == nil {
+		writeErr(w, http.StatusServiceUnavailable, "incident store not wired")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, incidentBodyLimit)
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeErr(w, http.StatusRequestEntityTooLarge, "body too large")
+		return
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var in struct {
+		ID        string `json:"id"`
+		Title     string `json:"title"`
+		Severity  string `json:"severity"`
+		CreatedBy string `json:"created_by"`
+	}
+	if err := dec.Decode(&in); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid body: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(in.Title) == "" {
+		writeErr(w, http.StatusBadRequest, "title is required")
+		return
+	}
+	if strings.TrimSpace(in.CreatedBy) == "" {
+		writeErr(w, http.StatusBadRequest, "created_by is required (audit)")
+		return
+	}
+	id := strings.TrimSpace(in.ID)
+	if id == "" {
+		id = "INC-" + time.Now().Format("20060102-150405.000")
+	}
+	inc, err := g.incidents.Create(id, in.Title, in.Severity)
+	if err != nil {
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, inc)
 }
 
 // handleIncidents GET /api/v1/incidents?state=open|acked|mitigated|resolved
