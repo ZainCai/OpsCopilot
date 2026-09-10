@@ -230,6 +230,19 @@ func TestZeroWindowEveryAlertOwnCluster(t *testing.T) {
 	}
 }
 
+// TestSubSecondWindowNoDivideByZero 回归：0 < window < 1s 时
+// int64(window/time.Second) 为 0，曾在 newClusterLocked 里除零 panic
+// （OPS_NOISE_WINDOW=500ms 会在**每条告警**的摄取热路径上炸进程）。
+// 子秒窗口应退化到纳秒路径（每条告警自成簇），且不 panic。
+func TestSubSecondWindowNoDivideByZero(t *testing.T) {
+	c := NewClusterer(500*time.Millisecond, nil)
+	c1, _ := c.Ingest(Event{Fingerprint: "fp1", NodeKey: "n1", OccurredAt: base})
+	c2, created := c.Ingest(Event{Fingerprint: "fp1", NodeKey: "n1", OccurredAt: base.Add(time.Second)})
+	if !created || c1.Key == c2.Key {
+		t.Fatalf("sub-second window should not cluster: c1=%s c2=%s", c1.Key, c2.Key)
+	}
+}
+
 func TestGetSnapshotIsolation(t *testing.T) {
 	c := NewClusterer(10*time.Minute, nil)
 	cl, _ := c.Ingest(Event{Fingerprint: "fp1", NodeKey: "n1", OccurredAt: base})

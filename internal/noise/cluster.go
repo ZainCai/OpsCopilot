@@ -204,9 +204,12 @@ func (c *Clusterer) absorbLocked(cl *Cluster, e Event) *Cluster {
 func (c *Clusterer) newClusterLocked(e Event) *Cluster {
 	// 窗口桶号：window <= 0（不聚类）时退化为纳秒时间戳——既避免除零，
 	// 又保证每条告警自成簇时 key 唯一；同序重放输入相同，key 仍可复现。
+	// 注意 **0 < window < 1s**：`window/time.Second` 整除为 0 会除零 panic；
+	// 子秒窗口语义上等同于"不聚类"，故同样退化到纳秒路径（见下）。
+	// 窗口 >= 1s 时公式与历史一致 → 已持久化的簇键不会被改写。
 	bucket := e.OccurredAt.UnixNano()
-	if c.window > 0 {
-		bucket = e.OccurredAt.Unix() / int64(c.window/time.Second)
+	if secs := int64(c.window / time.Second); secs > 0 {
+		bucket = e.OccurredAt.Unix() / secs
 	}
 	ck := "c:" + e.Fingerprint + "@" + strconv.FormatInt(bucket, 10)
 	cl := &Cluster{

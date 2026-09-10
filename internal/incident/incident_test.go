@@ -103,3 +103,21 @@ func TestAttachClusterAndLookup(t *testing.T) {
 		t.Fatalf("open list = %d, want 2", got)
 	}
 }
+
+// TestDedupKeyForSubSecondWindowNoDivideByZero 回归：window < 1s 时
+// int64(window.Seconds()) 为 0 → 除零 panic。子秒窗口应退化为秒级桶。
+func TestDedupKeyForSubSecondWindowNoDivideByZero(t *testing.T) {
+	at := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	// 不 panic 即通过一半；再断言同一秒内两个时刻同键（退化到秒级分桶）。
+	k1 := DedupKeyFor([]string{"n1"}, "fp1", at, 500*time.Millisecond)
+	k2 := DedupKeyFor([]string{"n1"}, "fp1", at.Add(300*time.Millisecond), 500*time.Millisecond)
+	if k1 != k2 {
+		t.Fatalf("sub-second window should fall back to second bucket: %s vs %s", k1, k2)
+	}
+	// window >= 1s 行为保持：跨窗口应分属不同键。
+	kw1 := DedupKeyFor([]string{"n1"}, "fp1", at, time.Minute)
+	kw2 := DedupKeyFor([]string{"n1"}, "fp1", at.Add(2*time.Minute), time.Minute)
+	if kw1 == kw2 {
+		t.Fatal("distinct windows must produce distinct dedup keys")
+	}
+}

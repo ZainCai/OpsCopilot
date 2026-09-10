@@ -394,12 +394,16 @@ func SimilarCandidates(target Incident, others []Incident, window time.Duration)
 
 // DedupKeyFor 生成归一化去重键（L1/L2 共用）：节点集合 + 指纹 + 时间窗。
 // 调用方（装配层）负责在事件创建时填充 Incident.DedupKey。
+//
+// window < 1s 时 `int64(window.Seconds())` 为 0 → 除零 panic；子秒窗口在
+// 语义上等同"不按窗前分桶"，故退化为秒级桶（见下）。window >= 1s 时
+// 结果与历史一致。
 func DedupKeyFor(nodeKeys []string, fingerprint string, at time.Time, window time.Duration) string {
 	keys := append([]string(nil), nodeKeys...)
 	sort.Strings(keys)
 	bucket := at.Unix()
-	if window > 0 {
-		bucket = at.Unix() / int64(window.Seconds())
+	if secs := int64(window / time.Second); secs > 0 {
+		bucket = at.Unix() / secs
 	}
 	return strings.Join(keys, ",") + "|" + fingerprint + "|" + strconv.FormatInt(bucket, 10)
 }
