@@ -370,9 +370,22 @@ ORDER BY i.incident_id, ic.cluster_key`, s.tenantID, ids)
 	}
 }
 
-// UpsertExternal 外部链路幂等写入（链路 A，L0 幂等）：
-// ON CONFLICT (tenant_id, origin, source_ref) DO UPDATE —— 重推只更新不新建。
-// incident_id 用 origin:sourceRef 合成，保证 ID 唯一且可反查来源。
+// externalGenRetries 分配新代时的重试上限：并发 worker 同号插入会撞唯一索引，
+// 撞了就重读当前代再试下一代（有界，防止异常数据下打转）。
+// externalIncidentID 见 incident.go（与 MemStore 同一规则，必须一致）。
+const externalGenRetries = 8
+
+// UpsertExternal 外部链路写入（链路 A）。幂等语义（M9：复发即新建）：
+//
+//   - 命中未解决（open/acked/mitigated）的当前代 → 刷新（重推不新建）；
+//   - 命中已解决的当前代 → 视为告警复发，**新开一代**（generation+1，
+//     incident_id 追加 #N）。否则新故障只会去刷新一条已关闭的旧单，
+//     运维看不见——这正是 M9 要修的。
+//   - 第 1 代 incident_id 保持裸 origin:sourceRef（兼容历史数据与反查习惯）。
+//
+// 幂等键：migrations/000008 把唯一索引从 (tenant,origin,source_ref) 换成
+// (…, generation)。并发 worker 同号插入会撞索引，此处以"重读当前代 →
+// 重试下一代"收敛（有界）。
 func (s *PGStore) UpsertExternal(origin Origin, sourceRef, title, severity, createdBy, meta string) (*Incident, bool, error) {
 	if !ValidOrigin(origin) {
 		return nil, false, errors.New("incident: invalid origin " + string(origin))
@@ -391,26 +404,113 @@ func (s *PGStore) UpsertExternal(origin Origin, sourceRef, title, severity, crea
 	}
 	ctx, cancel := s.ctx()
 	defer cancel()
-	var inc Incident
-	var xmax string // 用系统列判断是插入还是更新（更新时 xmax<>0）
+	base := string(origin) + ":" + sourceRef
+
+	// 当前代 = 该 (origin, source_ref) 下 generation 最大的那一行。
+	var cur Incident
+	var curGen int
 	err := s.pool.QueryRow(ctx, `
-INSERT INTO incident (tenant_id, incident_id, title, severity, state, origin, source_ref, source_meta, created_by, auto_close_policy)
-VALUES ($1, $2, $3, NULLIF($4,''), 'open', $5, $6, $7::jsonb, $8, 'auto')
-ON CONFLICT (tenant_id, origin, source_ref) WHERE source_ref <> '' DO UPDATE SET
-  title       = EXCLUDED.title,
-  severity    = EXCLUDED.severity,
-  source_meta = EXCLUDED.source_meta,
-  updated_at  = now()
-RETURNING incident_id, title, severity, state, created_at, updated_at, resolved_at,
-          origin, source_ref, source_meta, created_by, merged_into, auto_close_policy, xmax::text`,
-		s.tenantID, string(origin)+":"+sourceRef, title, severity, origin, sourceRef, meta, createdBy,
-	).Scan(&inc.ID, &inc.Title, &inc.Severity, &inc.State, &inc.CreatedAt, &inc.UpdatedAt,
-		&nullTime{t: &inc.ResolvedAt}, &inc.Origin, &inc.SourceRef, &inc.SourceMeta,
-		&inc.CreatedBy, &inc.MergedInto, &inc.AutoClosePolicy, &xmax)
-	if err != nil {
-		return nil, false, fmt.Errorf("incident pg: upsert external: %w", err)
+SELECT incident_id, title, severity, state, created_at, updated_at, resolved_at,
+       origin, source_ref, source_meta, created_by, merged_into, auto_close_policy, generation
+FROM incident
+WHERE tenant_id=$1 AND origin=$2 AND source_ref=$3
+ORDER BY generation DESC LIMIT 1`,
+		s.tenantID, string(origin), sourceRef).Scan(
+		&cur.ID, &cur.Title, &cur.Severity, &cur.State, &cur.CreatedAt, &cur.UpdatedAt,
+		&nullTime{t: &cur.ResolvedAt}, &cur.Origin, &cur.SourceRef, &cur.SourceMeta,
+		&cur.CreatedBy, &cur.MergedInto, &cur.AutoClosePolicy, &curGen)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		inc, ierr := s.insertExternalGen(ctx, origin, sourceRef, 1, title, severity, createdBy, meta)
+		if ierr != nil {
+			return nil, false, ierr
+		}
+		return inc, true, nil
+	case err != nil:
+		return nil, false, fmt.Errorf("incident pg: upsert external lookup: %w", err)
 	}
-	return &inc, xmax == "0", nil
+
+	if cur.State != StateResolved {
+		// 未解决：就地刷新当前代（重推不新建，与历史行为一致）。
+		var inc Incident
+		err := s.pool.QueryRow(ctx, `
+UPDATE incident SET title=$3, severity=$4, source_meta=$5::jsonb, updated_at=now()
+WHERE tenant_id=$1 AND incident_id=$2
+RETURNING incident_id, title, severity, state, created_at, updated_at, resolved_at,
+          origin, source_ref, source_meta, created_by, merged_into, auto_close_policy`,
+			s.tenantID, cur.ID, title, severity, meta).Scan(
+			&inc.ID, &inc.Title, &inc.Severity, &inc.State, &inc.CreatedAt, &inc.UpdatedAt,
+			&nullTime{t: &inc.ResolvedAt}, &inc.Origin, &inc.SourceRef, &inc.SourceMeta,
+			&inc.CreatedBy, &inc.MergedInto, &inc.AutoClosePolicy)
+		if err != nil {
+			return nil, false, fmt.Errorf("incident pg: upsert external refresh: %w", err)
+		}
+		return &inc, false, nil
+	}
+
+	// 已解决：复发，新开一代。
+	for gen := curGen + 1; gen <= curGen+externalGenRetries; gen++ {
+		inc, ierr := s.insertExternalGen(ctx, origin, sourceRef, gen, title, severity, createdBy, meta)
+		if ierr == nil {
+			return inc, true, nil
+		}
+		if !isUniqueViolation(ierr) {
+			return nil, false, ierr
+		}
+		// 撞号：另一 worker 抢先建了这一代。重读它——未解决就按"刷新"返回。
+		var winner Incident
+		e := s.pool.QueryRow(ctx, `
+SELECT incident_id, title, severity, state, created_at, updated_at, resolved_at,
+       origin, source_ref, source_meta, created_by, merged_into, auto_close_policy
+FROM incident WHERE tenant_id=$1 AND incident_id=$2`,
+			s.tenantID, externalIncidentID(base, gen)).Scan(
+			&winner.ID, &winner.Title, &winner.Severity, &winner.State, &winner.CreatedAt,
+			&winner.UpdatedAt, &nullTime{t: &winner.ResolvedAt}, &winner.Origin,
+			&winner.SourceRef, &winner.SourceMeta, &winner.CreatedBy, &winner.MergedInto,
+			&winner.AutoClosePolicy)
+		if e != nil {
+			continue // 读不到（异常）→ 试下一代
+		}
+		if winner.State != StateResolved {
+			return &winner, false, nil
+		}
+		// 抢到的这代也已经解决了 → 继续下一代
+	}
+	return nil, false, fmt.Errorf("incident pg: upsert external: cannot allocate generation for %q", base)
+}
+
+// insertExternalGen 写入外部事件的第 gen 代。
+func (s *PGStore) insertExternalGen(ctx context.Context, origin Origin, sourceRef string, gen int, title, severity, createdBy, meta string) (*Incident, error) {
+	var inc Incident
+	id := externalIncidentID(string(origin)+":"+sourceRef, gen)
+	err := s.pool.QueryRow(ctx, `
+INSERT INTO incident (tenant_id, incident_id, title, severity, state, origin, source_ref, source_meta, created_by, auto_close_policy, generation)
+VALUES ($1, $2, $3, NULLIF($4,''), 'open', $5, $6, $7::jsonb, $8, 'auto', $9)
+RETURNING incident_id, title, severity, state, created_at, updated_at, resolved_at,
+          origin, source_ref, source_meta, created_by, merged_into, auto_close_policy`,
+		s.tenantID, id, title, severity, origin, sourceRef, meta, createdBy, gen).Scan(
+		&inc.ID, &inc.Title, &inc.Severity, &inc.State, &inc.CreatedAt, &inc.UpdatedAt,
+		&nullTime{t: &inc.ResolvedAt}, &inc.Origin, &inc.SourceRef, &inc.SourceMeta,
+		&inc.CreatedBy, &inc.MergedInto, &inc.AutoClosePolicy)
+	if err != nil {
+		return nil, fmt.Errorf("incident pg: insert external gen %d: %w", gen, err)
+	}
+	return &inc, nil
+}
+
+// ExternalActive 报告该 (origin, source_ref) 是否存在未解决的事件。
+func (s *PGStore) ExternalActive(origin Origin, sourceRef string) (bool, error) {
+	ctx, cancel := s.ctx()
+	defer cancel()
+	var active bool
+	err := s.pool.QueryRow(ctx, `
+SELECT EXISTS(SELECT 1 FROM incident
+  WHERE tenant_id=$1 AND origin=$2 AND source_ref=$3 AND state <> 'resolved')`,
+		s.tenantID, string(origin), sourceRef).Scan(&active)
+	if err != nil {
+		return false, fmt.Errorf("incident pg: external active: %w", err)
+	}
+	return active, nil
 }
 
 // MergeInto 人工合并：事务内把被合并单置 resolved + merged_into，

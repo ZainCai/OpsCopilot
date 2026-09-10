@@ -210,3 +210,53 @@ func TestPGStoreListStateFilterSemantics(t *testing.T) {
 		t.Fatal("index idx_incident_tenant_created missing — run migrations (000007)")
 	}
 }
+
+// TestPGStoreUpsertExternalRecurrence M9（PG 门控）：复发新开一代，
+// 与 MemStore 同语义（双实现一致性——H1 的教训）。
+func TestPGStoreUpsertExternalRecurrence(t *testing.T) {
+	s := pgStoreForTest(t)
+	ctx := context.Background()
+	ref := "m9-" + time.Now().Format("150405.000000")
+	t.Cleanup(func() {
+		s.pool.Exec(ctx, `DELETE FROM incident WHERE tenant_id=$1 AND source_ref=$2`, s.tenantID, ref)
+	})
+
+	up := func(title string) (Incident, bool) {
+		inc, isNew, err := s.UpsertExternal(OriginAlertmanager, ref, title, "critical", "system:alertmanager", "{}")
+		if err != nil {
+			t.Fatalf("upsert: %v", err)
+		}
+		return *inc, isNew
+	}
+	inc1, isNew := up("m9 v1")
+	if !isNew || inc1.ID != "alertmanager:"+ref {
+		t.Fatalf("gen1: id=%s isNew=%v", inc1.ID, isNew)
+	}
+	if inc2, isNew := up("m9 v1 again"); isNew || inc2.ID != inc1.ID {
+		t.Fatalf("refresh gen1: id=%s isNew=%v", inc2.ID, isNew)
+	}
+	if _, err := s.Transition(inc1.ID, StateResolved, "ops"); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	inc3, isNew := up("m9 v2")
+	if !isNew || inc3.ID != "alertmanager:"+ref+"#2" || inc3.State != StateOpen {
+		t.Fatalf("gen2: id=%s isNew=%v state=%s", inc3.ID, isNew, inc3.State)
+	}
+	old, err := s.Get(inc1.ID)
+	if err != nil {
+		t.Fatalf("get gen1: %v", err)
+	}
+	if old.State != StateResolved || old.Title != "m9 v1 again" {
+		t.Fatalf("gen1 must stay untouched: %+v", old)
+	}
+	// ExternalActive 与 MemStore 同语义。
+	if active, err := s.ExternalActive(OriginAlertmanager, ref); err != nil || !active {
+		t.Fatalf("gen2 open → active=%v err=%v", active, err)
+	}
+	if _, err := s.Transition(inc3.ID, StateResolved, "ops"); err != nil {
+		t.Fatalf("resolve gen2: %v", err)
+	}
+	if active, err := s.ExternalActive(OriginAlertmanager, ref); err != nil || active {
+		t.Fatalf("all resolved → active=%v err=%v", active, err)
+	}
+}

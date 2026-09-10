@@ -271,11 +271,16 @@ func (w *IngestWorker) processAlertmanager(it Item) error {
 	origin := it.Origin
 	actor := "system:" + string(origin)
 
-	// 先判"这是新建还是刷新"：外部事件在两种实现下都以 `origin:sourceRef`
-	// 作为 incident_id，故 Get 一击即可（未命中 = 尚未建过单 = 本次会新建）。
-	// 刷新不占建单额度，避免重复推送的老告警吃光额度、把新告警误折叠。
-	_, gerr := w.store.Get(string(origin) + ":" + strings.TrimSpace(it.SourceRef))
-	willCreate := errors.Is(gerr, incident.ErrNotFound)
+	// 先判"这会新建一单，还是刷新既有单"：刷新不占建单额度，避免重复推送的
+	// 老告警吃光额度、把新告警误折叠。M9 之后同一 (origin, source_ref) 会按代
+	// 演进（复发改建），所以判据是"有没有**未解决**的单"而不是"有没有单"——
+	// 已解决的旧单不代表没有，复发会新开一代。
+	active, aerr := w.store.ExternalActive(origin, strings.TrimSpace(it.SourceRef))
+	willCreate := aerr != nil || !active
+	if aerr != nil {
+		// 查询失败按"会新建"处理：宁可多计额度，也不让风暴防护失效。
+		w.logf("WARNING: ingest external-active check (%s): %v — assume new", it.SourceRef, aerr)
+	}
 
 	// R1 建单风暴：窗口内新建超限 → 不新建，更新聚合单（保留可回放）。
 	ref, burst := w.applyRateLimit(it.SourceRef, willCreate)

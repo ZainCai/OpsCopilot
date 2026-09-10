@@ -121,3 +121,74 @@ func TestDedupKeyForSubSecondWindowNoDivideByZero(t *testing.T) {
 		t.Fatal("distinct windows must produce distinct dedup keys")
 	}
 }
+
+// TestUpsertExternalRecurrenceNewGeneration M9：同一外部告警恢复后再次触发，
+// 应**新建一代**（incident_id 追加 #N），而不是去刷新那条已 resolved 的旧单
+// ——否则新故障对运维完全不可见。
+func TestUpsertExternalRecurrenceNewGeneration(t *testing.T) {
+	s := NewMemStore()
+	up := func(title string) (*Incident, bool) {
+		inc, isNew, err := s.UpsertExternal(OriginAlertmanager, "fp-1", title, "critical", "system:alertmanager", "{}")
+		if err != nil {
+			t.Fatalf("upsert: %v", err)
+		}
+		return inc, isNew
+	}
+	inc1, isNew := up("磁盘 96%")
+	if !isNew || inc1.ID != "alertmanager:fp-1" {
+		t.Fatalf("gen1: id=%s isNew=%v", inc1.ID, isNew)
+	}
+	// 未解决期间重推 → 刷新，不新建（历史行为保持）。
+	inc1b, isNew := up("磁盘 97%")
+	if isNew || inc1b.ID != inc1.ID || inc1b.Title != "磁盘 97%" {
+		t.Fatalf("refresh gen1: %+v isNew=%v", inc1b, isNew)
+	}
+	// 解决后再次触发 → 新开一代。
+	if _, err := s.Transition(inc1.ID, StateResolved, "ops"); err != nil {
+		t.Fatalf("resolve gen1: %v", err)
+	}
+	inc2, isNew := up("磁盘 98%")
+	if !isNew || inc2.ID != "alertmanager:fp-1#2" || inc2.State != StateOpen {
+		t.Fatalf("gen2: id=%s isNew=%v state=%s", inc2.ID, isNew, inc2.State)
+	}
+	// 旧单保持 resolved、标题不被刷掉（复发绝不能动历史单）。
+	old, err := s.Get(inc1.ID)
+	if err != nil {
+		t.Fatalf("get gen1: %v", err)
+	}
+	if old.State != StateResolved || old.Title != "磁盘 97%" {
+		t.Fatalf("gen1 must stay untouched: %+v", old)
+	}
+	// gen2 未解决期间重推 → 刷新 gen2。
+	if inc2b, isNew := up("磁盘 99%"); isNew || inc2b.ID != inc2.ID {
+		t.Fatalf("refresh gen2: %+v isNew=%v", inc2b, isNew)
+	}
+	// 再解决再触发 → #3。
+	if _, err := s.Transition(inc2.ID, StateResolved, "ops"); err != nil {
+		t.Fatalf("resolve gen2: %v", err)
+	}
+	if inc3, isNew := up("磁盘 100%"); !isNew || inc3.ID != "alertmanager:fp-1#3" {
+		t.Fatalf("gen3: id=%s isNew=%v", inc3.ID, isNew)
+	}
+}
+
+// TestExternalActive M9 配套判据："有没有**未解决**的单"，而不是"有没有单"。
+// 建单限流靠它区分"刷新"与"会新建"。
+func TestExternalActive(t *testing.T) {
+	s := NewMemStore()
+	if active, err := s.ExternalActive(OriginAlertmanager, "fp-2"); err != nil || active {
+		t.Fatalf("before create: active=%v err=%v", active, err)
+	}
+	if _, _, err := s.UpsertExternal(OriginAlertmanager, "fp-2", "t", "critical", "system", "{}"); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if active, _ := s.ExternalActive(OriginAlertmanager, "fp-2"); !active {
+		t.Fatal("open incident must be active")
+	}
+	if _, err := s.Transition("alertmanager:fp-2", StateResolved, "ops"); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if active, _ := s.ExternalActive(OriginAlertmanager, "fp-2"); active {
+		t.Fatal("resolved incident must not be active (recurrence opens a new generation)")
+	}
+}

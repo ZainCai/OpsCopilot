@@ -156,3 +156,64 @@ VALUES ($1,'bogus',$2,'{}'::jsonb)`, DefaultTenant, ref); err != nil {
 		t.Fatalf("dead-lettered row must not be claimed again, claimed %d", n)
 	}
 }
+
+// TestAssemblyExternalRecurrence M9 端到端（PG 门控，走**真实装配**）：
+// 同一外部告警 入队 → worker 建单 → 人工解决 → 再次入队 → worker 应
+// **新开一代**（#2），而不是去刷新那条已 resolved 的旧单。
+// 这条测试同时覆盖 队列 → worker → Store 整条链路，等价于一次 curl 演示
+// 且可重复执行。
+func TestAssemblyExternalRecurrence(t *testing.T) {
+	dsn := os.Getenv("OPS_TEST_PG_DSN")
+	if dsn == "" {
+		t.Skip("OPS_TEST_PG_DSN not set — recurrence e2e skipped")
+	}
+	t.Setenv("OPS_DB_DSN", dsn)
+	t.Setenv("OPS_INCIDENT_AUTOCREATE", "on")
+	asm, err := NewAssembly(newQuietLogger(), "tk")
+	if err != nil {
+		t.Fatalf("assembly: %v", err)
+	}
+	defer asm.Close()
+
+	ref := "m9e2e-" + time.Now().Format("150405.000000")
+	payload := `{"labels":{"alertname":"M9Demo","severity":"critical"},"fingerprint":"` + ref + `"}`
+	t.Cleanup(func() {
+		asm.pool.Exec(context.Background(),
+			`DELETE FROM incident WHERE tenant_id=$1 AND source_ref=$2`, DefaultTenant, ref)
+	})
+	enqueue := func() {
+		if _, err := asm.Queue.Enqueue(incident.OriginAlertmanager, ref, payload); err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+		asm.Worker.drain()
+	}
+	idsByRef := func() (ids, open []string) {
+		for _, inc := range asm.Incidents.List("") {
+			if inc.SourceRef == ref {
+				ids = append(ids, inc.ID)
+				if inc.State == incident.StateOpen {
+					open = append(open, inc.ID)
+				}
+			}
+		}
+		return ids, open
+	}
+
+	enqueue() // 第 1 代
+	ids, open := idsByRef()
+	if len(ids) != 1 || ids[0] != "alertmanager:"+ref || len(open) != 1 {
+		t.Fatalf("gen1: ids=%v open=%v", ids, open)
+	}
+	if _, err := asm.Incidents.Transition(ids[0], incident.StateResolved, "ops"); err != nil {
+		t.Fatalf("resolve gen1: %v", err)
+	}
+
+	enqueue() // 复发：应新开一代，而不是刷新已解决的 gen1
+	ids, open = idsByRef()
+	if len(ids) != 2 {
+		t.Fatalf("after recurrence want 2 incidents (old resolved + new gen), got %v", ids)
+	}
+	if len(open) != 1 || open[0] != "alertmanager:"+ref+"#2" {
+		t.Fatalf("recurrence must open gen2 %q, got open=%v", "alertmanager:"+ref+"#2", open)
+	}
+}

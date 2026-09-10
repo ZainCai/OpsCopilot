@@ -113,9 +113,16 @@ type Store interface {
 	AttachCluster(id, clusterKey string) error
 	List(state State) []Incident
 	IncidentForCluster(clusterKey string) (Incident, bool)
-	// UpsertExternal 外部链路幂等写入（链路 A）：同 (origin, sourceRef)
-	// 已存在则更新（刷新标题/严重级/载荷/时间），不新建；返回是否新建。
+	// UpsertExternal 外部链路写入（链路 A）。幂等语义（M9：复发即新建）：
+	//   - 命中未解决（open/acked/mitigated）的当前代 → 刷新（重推不新建）；
+	//   - 命中已解决的当前代 → 视为告警复发，新开一代（incident_id 追加 #N）。
+	//     否则新故障只会去刷新一条已关闭的旧单，运维看不见。
+	// 返回是否"新建了一单"（复发新建也算 true）。
 	UpsertExternal(origin Origin, sourceRef, title, severity, createdBy, meta string) (*Incident, bool, error)
+	// ExternalActive 报告该 (origin, source_ref) 当前是否存在**未解决**的事件。
+	// M9 之后"存在已解决的单"不代表"没有"——复发会新开一代。消费者（建单
+	// 限流）据此区分"刷新既有单"与"会新建单"。
+	ExternalActive(origin Origin, sourceRef string) (bool, error)
 	// MergeInto 人工合并（L2 只提示不自动，合并动作由人触发）：被合并单
 	// 置 resolved 并记录 merged_into，簇关联转移给主单。
 	MergeInto(id, targetID string) error
@@ -126,19 +133,21 @@ type Store interface {
 
 // MemStore 内存事件存储（默认；重启即丢，见 Persistence）。
 type MemStore struct {
-	mu        sync.Mutex
-	byID      map[string]*Incident
-	byCluster map[string]string // cluster_key → incident_id（一簇最多挂一事件）
-	order     []string          // 创建序（List 稳定输出）
-	now       func() time.Time  // 可注入时钟（测试用）
+	mu         sync.Mutex
+	byID       map[string]*Incident
+	byCluster  map[string]string // cluster_key → incident_id（一簇最多挂一事件）
+	byExternal map[string]string // (origin, source_ref) → 当前代 incident_id
+	order      []string          // 创建序（List 稳定输出）
+	now        func() time.Time  // 可注入时钟（测试用）
 }
 
 // NewMemStore 构造。
 func NewMemStore() *MemStore {
 	return &MemStore{
-		byID:      map[string]*Incident{},
-		byCluster: map[string]string{},
-		now:       time.Now,
+		byID:       map[string]*Incident{},
+		byCluster:  map[string]string{},
+		byExternal: map[string]string{},
+		now:        time.Now,
 	}
 }
 
@@ -280,13 +289,27 @@ func (s *MemStore) UpsertExternal(origin Origin, sourceRef, title, severity, cre
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	id := string(origin) + ":" + sourceRef
-	if inc, ok := s.byID[id]; ok {
-		inc.Title = title
-		inc.Severity = severity
-		inc.SourceMeta = meta
-		inc.UpdatedAt = s.now()
-		return clone(inc), false, nil
+	base := string(origin) + ":" + sourceRef
+	key := externalKey(origin, sourceRef)
+
+	// 沿代链走到当前代：逐代**精确**查找（不用前缀通配——sourceRef 本身可能
+	// 含 '#'，通配会把别的告警的代串进来）。在第一个空缺代新建；遇到未解决
+	// 的当前代就地刷新。
+	gen, id := 1, base
+	for {
+		inc, ok := s.byID[id]
+		if !ok {
+			break // 此代空缺 → 在这一代新建
+		}
+		if inc.State != StateResolved {
+			inc.Title = title
+			inc.Severity = severity
+			inc.SourceMeta = meta
+			inc.UpdatedAt = s.now()
+			return clone(inc), false, nil
+		}
+		gen++ // 已解决 → 复发，看下一代
+		id = externalIncidentID(base, gen)
 	}
 	now := s.now()
 	inc := &Incident{ID: id, Title: title, Severity: severity, State: StateOpen,
@@ -294,7 +317,39 @@ func (s *MemStore) UpsertExternal(origin Origin, sourceRef, title, severity, cre
 		AutoClosePolicy: "auto", CreatedAt: now, UpdatedAt: now}
 	s.byID[id] = inc
 	s.order = append(s.order, id)
+	s.byExternal[key] = id
 	return clone(inc), true, nil
+}
+
+// ExternalActive 报告该 (origin, source_ref) 是否存在未解决的事件（O(1)，
+// 走进程内索引）。
+func (s *MemStore) ExternalActive(origin Origin, sourceRef string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id, ok := s.byExternal[externalKey(origin, sourceRef)]
+	if !ok {
+		return false, nil
+	}
+	inc, ok := s.byID[id]
+	if !ok { // 索引与主表不一致（不应发生）：按"不存在"处理
+		return false, nil
+	}
+	return inc.State != StateResolved, nil
+}
+
+// externalKey (origin, source_ref) 的进程内索引键。用 \x00 分隔——两者都可能
+// 含任意字符（含 ':' 与 '#'），不能用 ':' 拼接。
+func externalKey(origin Origin, sourceRef string) string {
+	return string(origin) + "\x00" + sourceRef
+}
+
+// externalIncidentID 外部事件第 gen 代的 incident_id。
+// 第 1 代用裸 base（兼容历史数据与反查习惯），复发代追加 #N。
+func externalIncidentID(base string, gen int) string {
+	if gen <= 1 {
+		return base
+	}
+	return base + "#" + strconv.Itoa(gen)
 }
 
 // MergeInto 人工合并：被合并单置 resolved + 记录 merged_into，簇关联转移
