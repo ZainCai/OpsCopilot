@@ -123,7 +123,7 @@ curl -X POST http://127.0.0.1:8080/api/v1/changes \
 ## 已知限制
 
 - 跨模块 gRPC 契约已生成：`internal/contracts/proto/topology.proto` + 生成的 `pb/topology.pb.go` / `pb/topology_grpc.pb.go`；更多服务契约随 W1 主体开发补充；
-- 尚无真实 Redis 集成测试（sessionstore 单测只覆盖构造期角色守卫，读写路径待 O10，计划 W5 用 miniredis/testcontainers 补齐）；
+- Redis 侧集成测试已就位（W5-2.4，O10 关闭）：sessionstore 读写路径经 miniredis 真实协议锁定（TTL 刷新/过期/销毁/键前缀隔离）；ClusterRecord 镜像同机制。sessionstore 接线 main 留待首个会话消费方（控制台登录等）出现时做——不做无人调用的接线；TimescaleDB 侧集成测试待 W5 pgx 引入后补。
 - `alert_event` 已通过 `migrations/000003` 转为 TimescaleDB hypertable（1 天 chunk，7 天后压缩按 `tenant_id,fingerprint` 分段，30 天后自动保留删除）；W4 接 alert ingest 之前完成，避免生产数据量起来后转 hypertable 的写入停摆窗口；
 - `change_record` 通过 `migrations/000002` 与内存 `ChangeEvent` 对齐：`event_id TEXT` 承载幂等键（DB 层 UNIQUE 防重复）+ `change_type` CHECK 与 `ChangeType` 封闭集合一致；W4 接 DB 时按 `change.go` 文件头注释实现列映射；
 - CI 已随 `git push` 在 GitHub Actions 运行：`build-and-check`（build/test/边界检查）+ `goplugin-smoke-windows` + `goplugin-smoke-linux`（T2 双平台冒烟）；
