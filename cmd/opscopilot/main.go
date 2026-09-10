@@ -53,6 +53,15 @@ func main() {
 			changeWebhookPath)
 	}
 
+	// W6-0 评估环境：静态拓扑边挂起队列（故障域聚合的因果链声明）。
+	// 端点节点经发现进图后自动落边（见 AttachStaticEdges）。
+	edgeInputs, err := parseStaticEdges(os.Getenv("OPS_TOPOLOGY_EDGES"))
+	if err != nil {
+		logger.Printf("assembly failed: %v", err)
+		os.Exit(1)
+	}
+	asm.Sink.AttachStaticEdges(edgeInputs)
+
 	// W4-1.1 接线：凭证库 + 连接器宿主。连接器按 env 按需注册（见 connectors.go），
 	// 未配置任何数据源时 Host 空转，topology + webhook 仍照常服务。
 	creds := credential.NewStore()

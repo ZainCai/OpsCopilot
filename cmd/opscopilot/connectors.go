@@ -13,12 +13,14 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"opscopilot/internal/connector"
 	"opscopilot/internal/connector/azure"
 	"opscopilot/internal/connector/prometheus"
 	"opscopilot/internal/credential"
+	"opscopilot/internal/topology"
 )
 
 // 连接器装配相关环境变量。
@@ -31,6 +33,14 @@ const (
 	envAzureSub = "OPS_AZURE_SUBSCRIPTION_ID"
 	// envAzureToken ARM 访问令牌（Secret，绝不打日志）。
 	envAzureToken = "OPS_AZURE_TOKEN"
+	// envTopologyEdges 静态拓扑边（W6-0 评估环境）：如
+	// "n1->n2,n2->n3"。不含 "://" 的短名自动补 "prometheus://nodes/" 前缀
+	// （与注入器 targets 的 scrapePool 归一化一致）；完整 Key 原样使用。
+	// 置信度 medium（外部声明非直接观测，ADR-007）。真实环境的边来自
+	// 云 API 发现，属后续连接器增强；评估环境用静态声明是合理最小实现。
+	envTopologyEdges = "OPS_TOPOLOGY_EDGES"
+	// nodeKeyPrefix 短名补全前缀。
+	nodeKeyPrefix = "prometheus://nodes/"
 )
 
 // newConnectorHost 构造 Host 并注册环境变量声明的连接器。
@@ -105,4 +115,34 @@ func newConnectorHost(logger connector.Logger, creds *credential.Store) (*connec
 	}
 
 	return host, registered, nil
+}
+
+// parseStaticEdges 解析 OPS_TOPOLOGY_EDGES 为边输入（不落库）。
+// 端点不存在不在此报错：发现数据稍后进图（首轮采集告警先于发现），
+// 由 TopologySink 的挂起补边机制在节点进图后落边。
+func parseStaticEdges(spec string) ([]topology.EdgeInput, error) {
+	if spec == "" {
+		return nil, nil
+	}
+	var inputs []topology.EdgeInput
+	now := time.Now()
+	for _, pair := range strings.Split(spec, ",") {
+		parts := strings.SplitN(strings.TrimSpace(pair), "->", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return nil, fmt.Errorf("invalid OPS_TOPOLOGY_EDGES segment %q (want src->dst)", pair)
+		}
+		resolve := func(k string) string {
+			if strings.Contains(k, "://") {
+				return k
+			}
+			return nodeKeyPrefix + k
+		}
+		inputs = append(inputs, topology.EdgeInput{
+			SrcKey:     resolve(strings.TrimSpace(parts[0])),
+			DstKey:     resolve(strings.TrimSpace(parts[1])),
+			Relation:   "depends_on",
+			ObservedAt: now, Confidence: topology.ConfidenceMedium,
+		})
+	}
+	return inputs, nil
 }

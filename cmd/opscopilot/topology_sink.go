@@ -36,6 +36,19 @@ type TopologySink struct {
 	logger connector.Logger
 	// noise W4-1.4 影子降噪引擎（可选，nil = 只计数不处理）。
 	noise *NoiseEngine
+	// pendingEdges W6-0 静态拓扑边挂起队列：每次发现入图后锁内重试
+	// 落边，成功即出队（Builder.AddEdge 端点必须在图的纪律不变——
+	// 静态边只能等节点先进图）。
+	pendingEdges []topology.EdgeInput
+}
+
+// AttachStaticEdges 挂载静态拓扑边（W6-0 评估环境，OPS_TOPOLOGY_EDGES）。
+// 边不会立即落图——等端点节点经发现进图后，由 IngestDiscover 的
+// 挂起补边机制落图。必须在首轮发现前调用（装配期）。
+func (s *TopologySink) AttachStaticEdges(inputs []topology.EdgeInput) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pendingEdges = append(s.pendingEdges, inputs...)
 }
 
 // AttachNoise 挂载影子降噪引擎（W4-1.4）。传 nil 等价于卸载。
@@ -77,6 +90,19 @@ func (s *TopologySink) IngestDiscover(_ context.Context, r *connector.DiscoverRe
 	}
 	s.mu.Lock()
 	err := s.builder.AddDiscovery(inputs)
+	// W6-0 挂起补边：节点进图后逐条尝试落静态边，成功即出队。
+	// 锁内执行——AddEdge 写共享边集合，与 Graph() 读方互斥。
+	if err == nil && len(s.pendingEdges) > 0 {
+		remaining := s.pendingEdges[:0]
+		for _, e := range s.pendingEdges {
+			if aerr := s.builder.AddEdge(e); aerr != nil {
+				remaining = append(remaining, e) // 端点还没进图，下轮再试
+			} else {
+				s.logf("static topology edge registered: %s -> %s", e.SrcKey, e.DstKey)
+			}
+		}
+		s.pendingEdges = remaining
+	}
 	s.mu.Unlock()
 	if err != nil {
 		return fmt.Errorf("topology sink: ingest discover: %w", err)
