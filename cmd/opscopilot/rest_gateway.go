@@ -67,7 +67,9 @@ func grpcToHTTP(err error) (int, string) {
 	}
 }
 
-// handleClusters GET /api/v1/clusters?state=active|resolved|all（默认 active）。
+// handleClusters GET /api/v1/clusters?state=active|resolved|all（默认 active）
+// &limit=N（第五轮审核 G3：默认 200 上限 1000——7 天影子期 resolved
+// 簇持续累积，无上限的列表响应会随历史膨胀）。
 func (g *RESTGateway) handleClusters(w http.ResponseWriter, r *http.Request) {
 	if g.noise == nil {
 		writeErr(w, http.StatusServiceUnavailable, "noise engine disabled (OPS_NOISE_SHADOW=off)")
@@ -79,6 +81,18 @@ func (g *RESTGateway) handleClusters(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeErr(w, http.StatusBadRequest, "state must be one of: active, resolved, all")
 		return
+	}
+	limit := 200
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			writeErr(w, http.StatusBadRequest, "limit must be a positive integer")
+			return
+		}
+		if n > 1000 {
+			n = 1000
+		}
+		limit = n
 	}
 	var clusters []noise.Cluster
 	if state == "active" {
@@ -102,7 +116,15 @@ func (g *RESTGateway) handleClusters(w http.ResponseWriter, r *http.Request) {
 	for _, cl := range clusters {
 		recs = append(recs, cl.ToRecord(g.noise.tenant))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"clusters": recs, "count": len(recs)})
+	// Clusters() 按 key 有序 → 截断是确定性的（key 字典序前 limit 个）。
+	truncated := false
+	if len(recs) > limit {
+		recs = recs[:limit]
+		truncated = true
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"clusters": recs, "count": len(recs), "truncated": truncated,
+	})
 }
 
 // handleClusterDetail GET /api/v1/clusters/{key}。

@@ -184,8 +184,11 @@ func (n *NoiseEngine) collectDirtyClusters() []noise.ClusterRecord {
 	return dirty
 }
 
-// persistClusters 幂等写入脏簇。落库失败只计数+日志（签名已更新，
-// 丢失的写入由下一批的签名比对自动补齐——签名以内存为准）。
+// persistClusters 幂等写入脏簇。
+// 第五轮审核 G1：签名在锁内 collectDirtyClusters 已更新，若 Save 失败
+// 不回滚，下一批签名比对会说"无变化"——**丢失的写入永不补齐**（对
+// resolved 簇是永久丢失），原注释"自动补齐"不成立。失败即回滚该 key
+// 的签名，下一批重写。失败只计数+日志，不中断告警链路。
 func (n *NoiseEngine) persistClusters(dirty []noise.ClusterRecord) {
 	if n.records == nil {
 		return
@@ -195,10 +198,13 @@ func (n *NoiseEngine) persistClusters(dirty []noise.ClusterRecord) {
 		if err := n.records.SaveCluster(rec); err != nil {
 			failed++
 			n.saveFailures++
+			n.mu.Lock()
+			delete(n.persistedSig, rec.ClusterKey)
+			n.mu.Unlock()
 		}
 	}
 	if failed > 0 {
-		n.logf("WARNING: cluster persist failed for %d/%d clusters (cumulative failures %d)",
+		n.logf("WARNING: cluster persist failed for %d/%d clusters (rolled back signatures, cumulative failures %d)",
 			failed, len(dirty), n.saveFailures)
 	}
 }
@@ -248,15 +254,23 @@ func (n *NoiseEngine) snapshotView() batchView {
 // Fingerprint：上游为空时用 noise.Fingerprint(labels) 兜底（规范化哈希）。
 // NodeKey：经 instance→Key 索引反查；反查不到置空——无法定位的告警
 // 不参与域聚合，只能靠指纹命中簇。
+// OccurredAt：上游 startsAt 缺失/格式坏时 parseTime 返回零值
+// （第五轮审核 G2）——零值会掉进 1970 年窗口桶且被去重器判为窗口内
+// 重复而吞掉，兜底为当前观察时刻。noise 保持纯语义（调用方给确定时间），
+// 时间修补责任在装配层。
 func (n *NoiseEngine) toEvent(a connector.Alert, view batchView) noise.Event {
 	fp := a.Fingerprint
 	if fp == "" {
 		fp = noise.Fingerprint(a.Labels)
 	}
+	at := a.StartsAt
+	if at.IsZero() {
+		at = time.Now()
+	}
 	e := noise.Event{
 		Fingerprint: fp,
 		Severity:    a.Severity,
-		OccurredAt:  a.StartsAt,
+		OccurredAt:  at,
 		NodeKey:     view.byInsEnv[a.Labels["instance"]],
 	}
 	if name := a.Labels["alertname"]; name != "" {

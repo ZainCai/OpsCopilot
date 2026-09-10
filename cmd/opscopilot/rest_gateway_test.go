@@ -188,3 +188,29 @@ func TestRESTClustersDisabledWhenNoiseOff(t *testing.T) {
 		t.Fatalf("topology with noise off: code = %d, want 200", code)
 	}
 }
+
+// TestRESTClustersLimit G3 回归：limit 参数与截断标记。
+func TestRESTClustersLimit(t *testing.T) {
+	asm, h := restTest(t)
+	now := time.Now()
+	// 造 3 个独立簇（不同 instance，i1/i2 相连会并簇——用孤立组合）。
+	// i1-i2 相连 → 用 i3 + 两个 ghost（无 NodeKey 靠不同指纹独立成簇）。
+	asm.Noise.ProcessAlerts([]connector.Alert{
+		{Fingerprint: "fa", Labels: map[string]string{"instance": "i3"}, StartsAt: now},
+		{Fingerprint: "fb", StartsAt: now.Add(time.Second)},
+		{Fingerprint: "fc", StartsAt: now.Add(2 * time.Second)},
+	})
+	// limit=2 → 只回 2 条 + truncated=true。
+	code, body := getJSON(t, h, "/api/v1/clusters?state=all&limit=2")
+	if code != http.StatusOK {
+		t.Fatalf("limit=2: code = %d", code)
+	}
+	if body["count"].(float64) != 2 || body["truncated"] != true {
+		t.Fatalf("limit=2: count=%v truncated=%v, want 2/true", body["count"], body["truncated"])
+	}
+	// 非法 limit → 400。
+	code, _ = getJSON(t, h, "/api/v1/clusters?limit=-1")
+	if code != http.StatusBadRequest {
+		t.Fatalf("limit=-1: code = %d, want 400", code)
+	}
+}

@@ -239,3 +239,69 @@ func TestPersistSignatureDedup(t *testing.T) {
 		t.Fatalf("unrelated batch must persist only the new cluster, saves = %d, want 3", cs.calls)
 	}
 }
+
+// ---- 第五轮审核修复回归 ----
+
+// TestPersistFailureRollsBackSignature G1 回归：Save 失败回滚签名，
+// 下一批必须重试补写（修复前签名已标记成功，失败写入永不补齐）。
+func TestPersistFailureRollsBackSignature(t *testing.T) {
+	t.Setenv("OPS_NOISE_WINDOW", "10m")
+	engine, _ := NewNoiseEngine(noiseTestSink(t), newQuietLogger())
+
+	// 先让一批失败：签名应被回滚。
+	flaky := &flakySink{fail: true}
+	engine.SetRecordSink(flaky)
+	now := time.Now()
+	engine.ProcessAlerts([]connector.Alert{
+		{Fingerprint: "fpR", Labels: map[string]string{"instance": "i1"}, StartsAt: now},
+	})
+	if flaky.calls != 1 {
+		t.Fatalf("failing sink calls = %d, want 1", flaky.calls)
+	}
+
+	// 恢复成功：下一批（无新告警也要触发）必须补写。
+	flaky.fail = false
+	engine.ProcessAlerts([]connector.Alert{
+		{Fingerprint: "fpR2", Labels: map[string]string{"instance": "i3"}, StartsAt: now.Add(time.Second)},
+	})
+	// fpR 簇补写 + fpR2 新簇 = 2 次成功调用。
+	if flaky.okCalls != 2 {
+		t.Fatalf("after recovery okCalls = %d, want 2 (failed write must be retried)", flaky.okCalls)
+	}
+}
+
+type flakySink struct {
+	fail    bool
+	calls   int // 总调用次数
+	okCalls int // 成功次数
+}
+
+func (f *flakySink) SaveCluster(rec noise.ClusterRecord) error {
+	f.calls++
+	if f.fail {
+		return errPersistFailed
+	}
+	f.okCalls++
+	return nil
+}
+
+// TestZeroStartsAtFallback G2 回归：startsAt 缺失（零值）的告警兜底为
+// 当前时刻——不进 1970 桶、不被去重吞掉。
+func TestZeroStartsAtFallback(t *testing.T) {
+	t.Setenv("OPS_NOISE_WINDOW", "10m")
+	engine, _ := NewNoiseEngine(noiseTestSink(t), newQuietLogger())
+
+	// 两条同指纹、均零值 StartsAt 的告警：若不兜底，第二条会被判窗口内重复。
+	engine.ProcessAlerts([]connector.Alert{
+		{Fingerprint: "fpZ", Labels: map[string]string{"instance": "i1"}, StartsAt: time.Time{}},
+	})
+	// 零值兜底后 anchor=各批的 now，两批间隔 <窗口仍会 dedup——这里断言
+	// 簇的 LastSeen 是真实当前时间（不是 0001 年），即兜底生效。
+	clusters := engine.shadow.Clusterer().ActiveClusters()
+	if len(clusters) != 1 {
+		t.Fatalf("clusters = %d, want 1", len(clusters))
+	}
+	if age := time.Since(clusters[0].LastSeen); age > time.Minute {
+		t.Fatalf("zero StartsAt leaked into cluster time: LastSeen age = %v", age)
+	}
+}
