@@ -1,6 +1,8 @@
 # 多阶段构建：编译期与运行期分离，镜像只留二进制
-# builder 版本必须 >= go.mod 声明的 go 版本（X1：原 1.22 在 go mod download 即失败）
-FROM golang:1.23 AS builder
+# builder 版本必须 >= go.mod 声明的 go 版本，否则 `go mod download` 会尝试
+# 联网下载对应 toolchain（受限网络/离线 CI 直接失败）。此处与 go.mod 的
+# `go 1.25.0` 对齐；**改 go.mod 版本时必须同步改这里**。
+FROM golang:1.25 AS builder
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
