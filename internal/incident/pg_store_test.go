@@ -112,3 +112,46 @@ func TestPGStoreClusterOwnership(t *testing.T) {
 		t.Fatalf("ownership: err = %v, want already-attached", err)
 	}
 }
+
+// TestPGStoreListFillClustersBatched List 的簇关联批量填充必须"分桶正确"：
+// 每个事件只带自己的 cluster_keys（批量 ANY 查询 + 按 incident_id 回填的
+// 主要风险就是串桶）。回归自：fillClusters 从逐事件一查（N+1）改为单次
+// 批量查询。
+func TestPGStoreListFillClustersBatched(t *testing.T) {
+	s := pgStoreForTest(t)
+	ctx := context.Background()
+	stamp := time.Now().Format("150405.000000")
+	idA, idB := "INC-BATCHA-"+stamp, "INC-BATCHB-"+stamp
+	ckA, ckB := "c:batchA@"+stamp, "c:batchB@"+stamp
+	cleanup := func() {
+		s.pool.Exec(ctx, `DELETE FROM incident_cluster WHERE incident_row_id IN
+			(SELECT id FROM incident WHERE incident_id LIKE 'INC-BATCH%')`)
+		s.pool.Exec(ctx, `DELETE FROM incident WHERE incident_id LIKE 'INC-BATCH%'`)
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+
+	if _, err := s.Create(idA, "batch a", "critical", "ops"); err != nil {
+		t.Fatalf("create a: %v", err)
+	}
+	if _, err := s.Create(idB, "batch b", "warning", "ops"); err != nil {
+		t.Fatalf("create b: %v", err)
+	}
+	if err := s.AttachCluster(idA, ckA); err != nil {
+		t.Fatalf("attach a: %v", err)
+	}
+	if err := s.AttachCluster(idB, ckB); err != nil {
+		t.Fatalf("attach b: %v", err)
+	}
+
+	byID := map[string][]string{}
+	for _, inc := range s.List("") {
+		byID[inc.ID] = inc.ClusterKeys
+	}
+	if got := byID[idA]; len(got) != 1 || got[0] != ckA {
+		t.Fatalf("A clusters = %v, want [%s]", got, ckA)
+	}
+	if got := byID[idB]; len(got) != 1 || got[0] != ckB {
+		t.Fatalf("B clusters = %v, want [%s]", got, ckB)
+	}
+}
