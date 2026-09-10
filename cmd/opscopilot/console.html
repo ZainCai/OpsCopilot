@@ -5,140 +5,237 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>OpsCopilot 控制台</title>
 <style>
-  /* ---- 主题变量：浅色默认 + 跟随系统深色 ---- */
+/* ===== OpsCopilot 控制台 · EagleOps 原型设计规范适配版 =====
+   设计令牌与组件形态对齐 console_source_sample（暗色默认 + 浅色跟随系统），
+   功能契约不变：簇列表/详情、拓扑图、节点变更查询、自动刷新。 */
+
+/* ---------- 设计令牌（对齐原型 styles.css） ---------- */
+:root {
+  --font-sans: "IBM Plex Sans", "Noto Sans SC", -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", "SF Mono", Consolas, "Courier New", monospace;
+
+  /* 暗色（默认，与原型一致） */
+  --bg: #0f172a;
+  --bg-soft: #131b30;
+  --panel: #1e293b;
+  --panel-2: #233046;
+  --raised: #2a3a52;
+  --line: #334155;
+  --line-soft: #2b3a4f;
+  --text: #f1f5f9;
+  --text-2: #94a3b8;
+  --text-3: #64748b;
+  --brand: #6366f1;
+  --brand-ink: #ffffff;
+  --ok: #22c55e;
+  --warn: #f59e0b;
+  --crit: #ef4444;
+  --info: #3b82f6;
+  --radius: 10px;
+  --row-h: 44px;
+  --pad: 18px;
+  --shadow: 0 12px 34px rgba(2, 6, 18, 0.5);
+}
+@media (prefers-color-scheme: light) {
   :root {
-    --bg: #f4f6fa; --panel: #ffffff; --border: #e3e8ef; --border-strong: #cbd5e1;
-    --text: #101828; --muted: #667085; --faint: #98a2b3;
-    --accent: #2563eb; --accent-soft: #eff6ff;
-    --high: #16a34a; --medium: #d97706; --low: #98a2b3;
-    --crit: #dc2626; --warn: #d97706; --info: #2563eb;
-    --err-bg: #fef3f2; --err-tx: #b42318; --err-bd: #fecdca;
-    --warn-bg: #fffaeb; --warn-tx: #b54708;
-    --shadow: 0 1px 3px rgba(16,24,40,.07), 0 1px 2px rgba(16,24,40,.04);
-    --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    --bg: #eef2f7; --bg-soft: #f4f7fb; --panel: #ffffff; --panel-2: #f6f8fc;
+    --raised: #ffffff; --line: #dbe3ee; --line-soft: #e6ecf4;
+    --text: #0f172a; --text-2: #475569; --text-3: #94a3b8;
+    --brand: #4f46e5; --ok: #16a34a; --warn: #d97706; --crit: #dc2626; --info: #2563eb;
+    --shadow: 0 8px 26px rgba(30, 42, 60, 0.14);
   }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #0d1117; --panel: #161b22; --border: #2d333b; --border-strong: #444c56;
-      --text: #e6edf3; --muted: #8b949e; --faint: #656d76;
-      --accent: #58a6ff; --accent-soft: #12233f;
-      --err-bg: #2d1517; --err-tx: #f87171; --err-bd: #7f1d1d;
-      --warn-bg: #2b2111; --warn-tx: #fbbf24;
-      --shadow: 0 1px 3px rgba(0,0,0,.4);
-    }
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
-         background: var(--bg); color: var(--text); font-size: 13px; line-height: 1.5; }
+}
 
-  /* ---- 顶栏：粘性、含连接状态与刷新时间 ---- */
-  header { position: sticky; top: 0; z-index: 10; background: var(--panel);
-           border-bottom: 1px solid var(--border); padding: 10px 20px;
-           display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
-  header h1 { font-size: 15px; margin: 0; font-weight: 650; letter-spacing: .2px;
-              display: flex; align-items: center; gap: 8px; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
-  .dot.ok { background: var(--high); }
-  .dot.bad { background: var(--crit); }
-  .meta { color: var(--muted); font-size: 12px; }
-  .spacer { flex: 1; }
-  .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-  button, select { font-size: 12.5px; padding: 5px 12px; border: 1px solid var(--border-strong);
-                   border-radius: 6px; background: var(--panel); color: var(--text); cursor: pointer; }
-  button:hover { border-color: var(--accent); color: var(--accent); }
-  button:disabled { opacity: .55; cursor: default; }
-  button.busy::after { content: "⋯"; margin-left: 4px; }
-  label.toggle { display: flex; gap: 5px; align-items: center; font-size: 12px; color: var(--muted); cursor: pointer; }
+/* ---------- 基础 ---------- */
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body { font-family: var(--font-sans); background: var(--bg); color: var(--text);
+       font-size: 13px; line-height: 1.55; -webkit-font-smoothing: antialiased; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--line); border-radius: 6px; border: 2px solid var(--bg); }
+::-webkit-scrollbar-track { background: transparent; }
+:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; border-radius: 4px; }
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.muted { color: var(--text-2); }
+.faint { color: var(--text-3); }
 
-  /* ---- 布局：自适应容器 + 统计卡行 ---- */
-  main { max-width: 1280px; margin: 0 auto; padding: 16px 20px 40px; display: grid; gap: 14px; }
-  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
-  .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
-          padding: 10px 14px; box-shadow: var(--shadow); }
-  .stat .k { font-size: 11px; color: var(--muted); }
-  .stat .v { font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; }
-  .stat .v small { font-size: 11px; color: var(--muted); font-weight: 400; }
+/* ---------- 顶部工具栏（原型 topbar 形态） ---------- */
+.topbar { min-height: 54px; display: flex; align-items: center; flex-wrap: wrap; row-gap: 8px;
+          gap: 12px; padding: 0 20px; background: var(--bg-soft);
+          border-bottom: 1px solid var(--line-soft); position: sticky; top: 0; z-index: 30; }
+.brand { display: flex; align-items: center; gap: 10px; }
+.brand-glyph { width: 26px; height: 26px; border-radius: 8px; background: color-mix(in srgb, var(--brand) 18%, transparent);
+               color: var(--brand); display: flex; align-items: center; justify-content: center;
+               font-size: 13px; font-weight: 700; flex: none; }
+.brand-name { font-weight: 600; font-size: 14px; letter-spacing: .2px; }
+.brand-sub { font-size: 10.5px; color: var(--text-3); letter-spacing: 1.5px; }
+.tb-spacer { flex: 1; }
+.env-chip { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px;
+            border-radius: 7px; font-size: 12px; font-family: var(--font-mono); }
+.env-chip.ok { background: color-mix(in srgb, var(--ok) 12%, transparent); color: var(--ok); }
+.env-chip.bad { background: color-mix(in srgb, var(--crit) 14%, transparent); color: var(--crit); }
+.env-chip .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
+.tb-meta { font-size: 11.5px; color: var(--text-3); font-family: var(--font-mono); }
+.select { height: 30px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
+          padding: 0 8px; font-size: 12px; cursor: pointer; color: var(--text); }
+.btn { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 13px;
+       border-radius: 8px; border: 1px solid var(--line); background: var(--panel);
+       color: var(--text); font-size: 12.5px; cursor: pointer; transition: background .15s, border-color .15s; white-space: nowrap; }
+.btn:hover { background: var(--panel-2); border-color: var(--text-3); }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+.btn--acc { background: var(--brand); border-color: var(--brand); color: var(--brand-ink); font-weight: 600; }
+.btn--acc:hover { background: color-mix(in srgb, var(--brand) 85%, #ffffff); border-color: transparent; color: var(--brand-ink); }
+.btn--sm { height: 26px; padding: 0 10px; font-size: 12px; border-radius: 7px; }
+.btn.busy::after { content: "⋯"; }
+label.toggle { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; color: var(--text-2); cursor: pointer; }
 
-  section { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
-            padding: 14px 16px; box-shadow: var(--shadow); min-width: 0; }
-  section h2 { font-size: 13.5px; margin: 0 0 10px; display: flex; gap: 8px; align-items: baseline; }
-  section h2 .count { color: var(--muted); font-weight: 400; font-size: 12px; }
+/* seg 分段控件（原型 Seg 形态：状态过滤） */
+.seg { display: inline-flex; background: var(--panel-2); border: 1px solid var(--line); border-radius: 9px; padding: 2px; }
+.seg-i { height: 26px; padding: 0 11px; border-radius: 7px; font-size: 12px; color: var(--text-2);
+         background: none; border: none; cursor: pointer; white-space: nowrap; }
+.seg-i:hover { color: var(--text); }
+.seg-i.on { background: var(--panel); color: var(--text); box-shadow: inset 0 0 0 1px var(--line); }
+.seg-i.on.acc { color: var(--brand); }
 
-  /* ---- 表格：数字右对齐、时间等宽、小屏横滚 ---- */
-  .tablewrap { overflow-x: auto; }
-  table { width: 100%; border-collapse: collapse; font-size: 12.5px; min-width: 640px; }
-  th, td { padding: 7px 10px; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
-  th { color: var(--muted); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: .4px; }
-  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
-  td.mono { font-family: var(--mono); font-size: 11.5px; }
-  td.time { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
-  tr.clickable:hover { background: var(--accent-soft); cursor: pointer; }
-  tr.sel { background: var(--accent-soft); }
+/* ---------- 布局 ---------- */
+.content { max-width: 1600px; margin: 0 auto; padding: 18px 24px 56px; display: grid; gap: 14px; }
+.page-head { display: flex; align-items: flex-end; gap: 14px; flex-wrap: wrap; }
+.page-title { font-size: 19px; font-weight: 600; letter-spacing: .2px; }
+.page-desc { font-size: 12.5px; color: var(--text-2); margin-top: 3px; }
+.kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px; }
 
-  .pill { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: 11px;
-          font-weight: 600; color: #fff; letter-spacing: .3px; }
-  .pill.critical { background: var(--crit); }
-  .pill.warning  { background: var(--warn); }
-  .pill.info     { background: var(--info); }
-  .pill.open     { background: #475467; }
-  .pill.acked    { background: #7c3aed; }
-  .pill.resolved { background: var(--faint); }
-  .pill.high     { background: var(--high); }
-  .pill.medium   { background: var(--medium); }
-  .pill.low      { background: var(--low); }
+/* ---------- KPI 卡（原型 stat 形态：label / 25px mono 大数 / 单位 / 副文本） ---------- */
+.stat { background: var(--panel); border: 1px solid var(--line-soft); border-radius: var(--radius);
+        padding: 13px 15px; min-width: 0; }
+.stat-l { font-size: 11.5px; color: var(--text-2); }
+.stat-v { display: flex; align-items: baseline; gap: 5px; margin-top: 6px; }
+.stat-n { font-family: var(--font-mono); font-size: 25px; font-weight: 600; line-height: 1.05; letter-spacing: -.5px; }
+.stat-u { font-size: 12px; color: var(--text-3); }
+.stat-s { font-size: 11.5px; margin-top: 5px; color: var(--text-3); }
 
-  /* ---- 错误横幅 / 空状态 / 加载态 ---- */
-  .banner { display: flex; gap: 8px; align-items: flex-start; border-radius: 6px;
-            padding: 8px 12px; margin-bottom: 10px; font-size: 12.5px; }
-  .banner.err  { background: var(--err-bg); color: var(--err-tx); border: 1px solid var(--err-bd); }
-  .banner.warn { background: var(--warn-bg); color: var(--warn-tx); }
-  .banner .x { margin-left: auto; cursor: pointer; opacity: .7; }
-  .banner .x:hover { opacity: 1; }
-  .empty { text-align: center; color: var(--muted); padding: 26px 10px; }
-  .empty .ico { font-size: 22px; display: block; margin-bottom: 6px; }
-  .spin { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--border-strong);
-          border-top-color: var(--accent); border-radius: 50%; animation: r .8s linear infinite;
-          vertical-align: -2px; margin-right: 6px; }
-  @keyframes r { to { transform: rotate(360deg); } }
+/* ---------- 面板（原型 panel：标题栏 + flush 表格体） ---------- */
+.panel { background: var(--panel); border: 1px solid var(--line-soft); border-radius: var(--radius); min-width: 0; }
+.panel-h { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 var(--pad);
+           border-bottom: 1px solid var(--line-soft); flex-wrap: wrap; row-gap: 4px; }
+.panel-t { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.panel-sub { font-size: 11.5px; color: var(--text-3); }
+.panel-x { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.panel-b { padding: var(--pad); }
+.panel-b--flush { padding: 0; }
 
-  .detail { font-size: 12px; background: var(--bg); border: 1px solid var(--border);
-            border-radius: 6px; padding: 10px 12px; margin-top: 10px;
-            max-height: 320px; overflow: auto; }
-  .detail .dt { font-weight: 600; margin-bottom: 6px; }
+/* ---------- 表格（原型 tbl：44px 行高、hover brand 6%） ---------- */
+.tbl-wrap { overflow-x: auto; }
+.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; min-width: 720px; }
+.tbl th { text-align: left; font-weight: 500; font-size: 11.5px; color: var(--text-3);
+          padding: 0 12px; height: 36px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.tbl th.num, .tbl td.num { text-align: right; }
+.tbl td { padding: 0 12px; height: var(--row-h); border-bottom: 1px solid var(--line-soft);
+          white-space: nowrap; vertical-align: middle; }
+.tbl tbody tr:last-child td { border-bottom: none; }
+.tbl tbody tr.rowlink { cursor: pointer; }
+.tbl tbody tr:hover { background: color-mix(in srgb, var(--brand) 6%, transparent); }
+.tbl tbody tr.sel { background: color-mix(in srgb, var(--brand) 10%, transparent); }
+.tbl .time { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-3); }
 
-  .legend { display: flex; gap: 14px; font-size: 11.5px; color: var(--muted); margin: 2px 0 10px; flex-wrap: wrap; }
-  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
-  svg text { font-size: 10px; fill: var(--text); }
+/* ---------- 徽标（原型 SevBadge/StChip 形态：底纹+同色文字，非实色块） ---------- */
+.sev { display: inline-flex; align-items: center; height: 20px; padding: 0 7px; border-radius: 6px;
+       font-family: var(--font-mono); font-size: 11px; font-weight: 600; letter-spacing: .5px; }
+.sev--critical { background: color-mix(in srgb, var(--crit) 16%, transparent); color: var(--crit); }
+.sev--warning  { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+.sev--info     { background: color-mix(in srgb, var(--info) 16%, transparent); color: var(--info); }
+.chip { display: inline-flex; align-items: center; height: 22px; padding: 0 9px; border-radius: 7px;
+        border: 1px solid var(--line); background: var(--panel-2); font-size: 11.5px; color: var(--text-2); }
+.chip--open     { color: var(--brand); border-color: color-mix(in srgb, var(--brand) 40%, transparent); background: color-mix(in srgb, var(--brand) 10%, transparent); }
+.chip--acked    { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 35%, transparent); background: color-mix(in srgb, var(--warn) 8%, transparent); }
+.chip--resolved { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 35%, transparent); background: color-mix(in srgb, var(--ok) 8%, transparent); }
+
+/* ---------- 横幅 / 空状态 / 加载 ---------- */
+.banner { display: flex; gap: 8px; align-items: flex-start; border-radius: 8px;
+          padding: 10px 13px; margin: var(--pad); font-size: 12.5px; }
+.panel-b--flush .banner { margin: 12px var(--pad); }
+.banner.err  { background: color-mix(in srgb, var(--crit) 10%, transparent);
+               color: var(--crit); border: 1px solid color-mix(in srgb, var(--crit) 35%, transparent); }
+.banner.warn { background: color-mix(in srgb, var(--warn) 10%, transparent);
+               color: var(--warn); border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent); }
+.banner .x { margin-left: auto; cursor: pointer; opacity: .7; }
+.banner .x:hover { opacity: 1; }
+.empty { text-align: center; padding: 34px 12px; }
+.empty .e-t { font-size: 13px; font-weight: 600; margin-bottom: 5px; }
+.empty .e-d { font-size: 12px; color: var(--text-3); max-width: 460px; margin: 0 auto; line-height: 1.6; }
+.spin { display: inline-block; width: 13px; height: 13px; border: 2px solid var(--line);
+        border-top-color: var(--brand); border-radius: 50%; animation: r .8s linear infinite;
+        vertical-align: -2px; margin-right: 7px; }
+@keyframes r { to { transform: rotate(360deg); } }
+
+/* ---------- 详情 / 图例 / 拓扑 ---------- */
+.detail { background: var(--panel-2); border: 1px solid var(--line-soft); border-radius: 8px;
+          padding: 12px 14px; margin: 12px var(--pad); max-height: 320px; overflow: auto; font-size: 12px; }
+.detail .dt { font-weight: 600; margin-bottom: 6px; }
+.kv { display: grid; grid-template-columns: 84px 1fr; gap: 4px 10px; }
+.kv .k { color: var(--text-3); }
+.kv .v { font-family: var(--font-mono); font-size: 11.5px; overflow-wrap: anywhere; }
+.legend { display: flex; gap: 14px; font-size: 11.5px; color: var(--text-2); flex-wrap: wrap; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+.topo-wrap { background: var(--panel-2); border-radius: 8px; overflow: hidden; }
+svg text { fill: var(--text); font-family: var(--font-mono); font-size: 11px; }
 </style>
 </head>
 <body>
-<header>
-  <h1><span class="dot" id="connDot"></span>OpsCopilot 控制台</h1>
-  <span class="meta" id="lastRefresh">未刷新</span>
-  <div class="spacer"></div>
-  <div class="toolbar">
-    <select id="clusterState" title="簇状态过滤">
-      <option value="active">活跃簇</option>
-      <option value="resolved">已解决</option>
-      <option value="all">全部</option>
-    </select>
-    <label class="toggle"><input type="checkbox" id="autoRefresh" checked> 30s 自动刷新</label>
-    <button id="btnRefresh" onclick="refreshAll()">刷新</button>
+
+<div class="topbar">
+  <div class="brand">
+    <div class="brand-glyph">OC</div>
+    <div>
+      <div class="brand-name">OpsCopilot</div>
+      <div class="brand-sub">SHADOW CONSOLE</div>
+    </div>
   </div>
-</header>
-<main>
-  <div class="stats">
-    <div class="stat"><div class="k">活跃簇</div><div class="v" id="statActive">—</div></div>
-    <div class="stat"><div class="k">已解决</div><div class="v" id="statResolved">—</div></div>
-    <div class="stat"><div class="k">拓扑节点</div><div class="v" id="statNodes">—</div></div>
-    <div class="stat"><div class="k">拓扑边</div><div class="v" id="statEdges">—</div></div>
+  <div class="tb-spacer"></div>
+  <span class="env-chip" id="connChip"><span class="dot"></span><span id="connText">连接中</span></span>
+  <span class="tb-meta" id="lastRefresh">未刷新</span>
+  <label class="toggle"><input type="checkbox" id="autoRefresh" checked> 30s 自动刷新</label>
+  <button class="btn" id="btnRefresh" onclick="refreshAll()">刷新</button>
+</div>
+
+<div class="content">
+  <div class="page-head">
+    <div>
+      <div class="page-title">降噪总览</div>
+      <div class="page-desc">影子模式判决 · 只标注不拦截 · 点击簇行查看详情</div>
+    </div>
+    <div style="margin-left:auto">
+      <div class="seg" id="stateSeg">
+        <button class="seg-i on acc" data-v="active">活跃</button>
+        <button class="seg-i" data-v="resolved">已解决</button>
+        <button class="seg-i" data-v="all">全部</button>
+      </div>
+    </div>
   </div>
 
-  <section>
-    <h2>告警簇 <span class="count" id="clusterCount"></span></h2>
+  <div class="kpi-grid">
+    <div class="stat"><div class="stat-l">活跃簇</div>
+      <div class="stat-v"><span class="stat-n" id="statActive" style="color:var(--brand)">—</span><span class="stat-u">簇</span></div>
+      <div class="stat-s" id="statActiveSub">未刷新</div></div>
+    <div class="stat"><div class="stat-l">已解决</div>
+      <div class="stat-v"><span class="stat-n" id="statResolved" style="color:var(--ok)">—</span><span class="stat-u">簇</span></div>
+      <div class="stat-s" id="statResolvedSub">静默期自动收敛</div></div>
+    <div class="stat"><div class="stat-l">告警总量</div>
+      <div class="stat-v"><span class="stat-n" id="statAlerts">—</span><span class="stat-u">条</span></div>
+      <div class="stat-s">当前过滤下簇内累计</div></div>
+    <div class="stat"><div class="stat-l">拓扑规模</div>
+      <div class="stat-v"><span class="stat-n" id="statNodes">—</span><span class="stat-u">节点</span></div>
+      <div class="stat-s" id="statEdgesSub">— 边</div></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-h">
+      <span class="panel-t">告警簇</span>
+      <span class="panel-sub" id="clusterCount"></span>
+      <div class="panel-x"><span class="panel-sub" id="clusterHint"></span></div>
+    </div>
     <div id="clusterMsg"></div>
-    <div class="tablewrap">
-      <table>
+    <div class="tbl-wrap">
+      <table class="tbl">
         <thead><tr>
           <th>cluster_key</th><th>状态</th><th>严重级</th>
           <th class="num">告警数</th><th>摘要</th>
@@ -148,26 +245,31 @@
       </table>
     </div>
     <div id="clusterDetail" class="detail" style="display:none"></div>
-  </section>
+  </div>
 
-  <section>
-    <h2>拓扑图 <span class="count" id="topoMeta"></span></h2>
-    <div class="legend">
-      <span><i style="background:var(--high)"></i>high（观测事实）</span>
-      <span><i style="background:var(--medium)"></i>medium（聚合/声明）</span>
-      <span><i style="background:var(--low)"></i>low（不进因果推理，ADR-007）</span>
+  <div class="panel">
+    <div class="panel-h">
+      <span class="panel-t">拓扑图</span>
+      <span class="panel-sub" id="topoMeta"></span>
+      <div class="panel-x legend">
+        <span><i style="background:var(--ok)"></i>high（观测事实）</span>
+        <span><i style="background:var(--warn)"></i>medium（聚合/声明）</span>
+        <span><i style="background:var(--text-3)"></i>low（不进因果推理，ADR-007）</span>
+      </div>
     </div>
     <div id="topoMsg"></div>
     <div id="topoView"></div>
     <div id="nodeDetail" class="detail" style="display:none"></div>
-  </section>
-</main>
+  </div>
+</div>
+
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-const sevPill = (s) => `<span class="pill ${esc(s||"info")}">${esc(s||"-")}</span>`;
-const statePill = (s) => `<span class="pill ${esc(s)}">${esc(s)}</span>`;
+// 原型 SevBadge/StChip 形态：底纹 + 同色文字。
+const sevPill = (s) => `<span class="sev sev--${esc(s||"info")}">${esc((s||"-").toUpperCase())}</span>`;
+const statePill = (s) => `<span class="chip chip--${esc(s)}">${esc(s)}</span>`;
 
 // API base：默认同源（经 opscopilot 服务访问）；静态打开本文件时可用
 // ?api=http://127.0.0.1:8080 指向运行中的服务（REST 网关已放开只读 CORS）。
@@ -186,60 +288,69 @@ async function fetchJSON(url) {
 
 // ---- 呈现辅助 ----
 function msg(el, kind, text) {
-  // kind: err | warn | loading | ""（清空）
   el.innerHTML = text
     ? `<div class="banner ${kind}"><span>${kind === "loading" ? '<span class="spin"></span>' : "⚠"}</span><span>${esc(text)}</span>${kind === "err" ? '<span class="x" onclick="this.parentElement.remove()">✕</span>' : ""}</div>`
     : "";
 }
-function emptyRow(cols, icon, text) {
-  return `<tr><td colspan="${cols}"><div class="empty"><span class="ico">${icon}</span>${esc(text)}</div></td></tr>`;
+function emptyState(title, desc) {
+  return `<tr><td colspan="8"><div class="empty"><div class="e-t">${esc(title)}</div><div class="e-d">${esc(desc)}</div></div></td></tr>`;
 }
 function timeAgo(iso) {
   if (!iso) return "—";
   const d = new Date(iso), diff = (Date.now() - d) / 1000;
   const full = iso.replace("T", " ").slice(0, 19);
-  if (diff < 60) return `<span title="${esc(full)}">${Math.max(0, Math.floor(diff))}s 前</span>`;
-  if (diff < 3600) return `<span title="${esc(full)}">${Math.floor(diff/60)}m 前</span>`;
-  if (diff < 86400) return `<span title="${esc(full)}">${Math.floor(diff/3600)}h 前</span>`;
-  return `<span title="${esc(full)}">${Math.floor(diff/86400)}d 前</span>`;
+  const rel = diff < 60 ? Math.max(0, Math.floor(diff)) + "s 前"
+    : diff < 3600 ? Math.floor(diff/60) + "m 前"
+    : diff < 86400 ? Math.floor(diff/3600) + "h 前"
+    : Math.floor(diff/86400) + "d 前";
+  return `<span title="${esc(full)}">${rel}</span>`;
 }
 function setConn(ok) {
-  $("connDot").className = "dot " + (ok ? "ok" : "bad");
+  $("connChip").className = "env-chip " + (ok ? "ok" : "bad");
+  $("connText").textContent = ok ? "服务正常" : "连接异常";
   $("lastRefresh").textContent = "刷新于 " + new Date().toLocaleTimeString();
 }
 
-// ---- 统计卡片 ----
+// ---- 统计卡 ----
 function renderStats(clusters, topoNodes) {
   const act = clusters.filter(c => c.state === "open" || c.state === "acked").length;
   const res = clusters.filter(c => c.state === "resolved").length;
-  $("statActive").innerHTML = act + ' <small>簇</small>';
-  $("statResolved").innerHTML = res + ' <small>簇</small>';
-  $("statNodes").innerHTML = (topoNodes ?? "—") + ' <small>个</small>';
-  $("statEdges").innerHTML = window._lastEdges != null
-    ? window._lastEdges + ' <small>条</small>' : "—";
+  const alerts = clusters.reduce((n, c) => n + (c.alert_count || 0), 0);
+  $("statActive").textContent = act;
+  $("statActiveSub").textContent = res + " 簇已解决";
+  $("statResolved").textContent = res;
+  $("statResolvedSub").textContent = "静默期自动收敛";
+  $("statAlerts").textContent = alerts;
+  $("statNodes").textContent = topoNodes ?? "—";
+  $("statEdgesSub").textContent = window._lastEdges != null ? window._lastEdges + " 边" : "—";
 }
 
 // ---- 簇列表 ----
 let clusterCache = [];
+let curState = "active";
 async function loadClusters() {
   msg($("clusterMsg"), "loading", "加载告警簇…");
   try {
-    const state = $("clusterState").value;
-    const data = await fetchJSON("/api/v1/clusters?state=" + state + "&limit=200");
+    const data = await fetchJSON("/api/v1/clusters?state=" + curState + "&limit=200");
     clusterCache = data.clusters || [];
-    $("clusterCount").textContent = `（${data.count}${data.truncated ? "+，已截断" : ""}）`;
+    $("clusterCount").textContent = `${data.count}${data.truncated ? "+" : ""} 个（当前过滤）`;
+    $("clusterHint").textContent = data.truncated ? "已截断至 limit=200" : "";
     $("clusterRows").innerHTML = clusterCache.map(c => `
-      <tr class="clickable" data-key="${esc(c.cluster_key)}">
+      <tr class="rowlink" data-key="${esc(c.cluster_key)}">
         <td class="mono">${esc(c.cluster_key)}</td>
         <td>${statePill(c.state)}</td>
         <td>${sevPill(c.severity)}</td>
-        <td class="num">${c.alert_count}</td>
+        <td class="num mono">${c.alert_count}</td>
         <td>${esc(c.summary || "-")}</td>
-        <td class="num">${(c.fingerprints||[]).length}</td>
-        <td class="num">${(c.node_keys||[]).length}</td>
+        <td class="num mono">${(c.fingerprints||[]).length}</td>
+        <td class="num mono">${(c.node_keys||[]).length}</td>
         <td class="time">${timeAgo(c.last_seen_at)}</td>
-      </tr>`).join("") || emptyRow(8, "🗂", "当前过滤条件下没有簇——影子降噪在跑，等告警进管道");
-    $("clusterRows").querySelectorAll("tr.clickable").forEach(tr => {
+      </tr>`).join("") || emptyState(
+        curState === "active" ? "当前无活跃簇，系统运行正常" : "当前过滤条件下没有簇",
+        curState === "active"
+          ? "影子降噪在跑；告警进管道后会自动聚簇并在此展示。"
+          : "调整上方分段过滤（活跃 / 已解决 / 全部）查看其他状态。");
+    $("clusterRows").querySelectorAll("tr.rowlink").forEach(tr => {
       tr.onclick = () => {
         $("clusterRows").querySelectorAll("tr").forEach(r => r.classList.remove("sel"));
         tr.classList.add("sel");
@@ -251,7 +362,7 @@ async function loadClusters() {
     renderStats(clusterCache, null);
   } catch (e) {
     msg($("clusterMsg"), "err", "加载失败：" + e.message);
-    $("clusterRows").innerHTML = "";
+    $("clusterRows").innerHTML = emptyState("加载失败", e.message);
     setConn(false);
   }
 }
@@ -259,7 +370,7 @@ async function loadClusters() {
 async function showClusterDetail(key) {
   const box = $("clusterDetail");
   box.style.display = "block";
-  box.innerHTML = `<div class="dt">簇详情 ${esc(key)}</div><span class="spin"></span>`;
+  box.innerHTML = `<div class="dt">簇详情</div><span class="spin"></span>`;
   try {
     const c = await fetchJSON("/api/v1/clusters/" + encodeURIComponent(key));
     const kv = [
@@ -269,8 +380,8 @@ async function showClusterDetail(key) {
       ["指纹", (c.fingerprints||[]).join(", ") || "-"],
       ["节点", (c.node_keys||[]).join(", ") || "-"],
     ];
-    box.innerHTML = `<div class="dt">簇详情</div>` + kv.map(([k,v]) =>
-      `<div><span style="color:var(--muted)">${esc(k)}:</span> ${esc(v)}</div>`).join("");
+    box.innerHTML = `<div class="dt">簇详情</div><div class="kv">` +
+      kv.map(([k,v]) => `<div class="k">${esc(k)}</div><div class="v">${esc(v)}</div>`).join("") + `</div>`;
   } catch (e) { box.textContent = "加载失败：" + e.message; }
 }
 
@@ -282,12 +393,12 @@ async function loadTopology() {
     const data = await fetchJSON("/api/v1/topology");
     const nodes = data.nodes || [], edges = data.edges || [];
     window._lastEdges = edges.length;
-    $("topoMeta").textContent = `（${nodes.length} 节点 / ${edges.length} 边）`;
+    $("topoMeta").textContent = `${nodes.length} 节点 / ${edges.length} 边`;
     const view = $("topoView");
     if (nodes.length === 0) {
-      view.innerHTML = `<div class="empty"><span class="ico">🕸</span>拓扑为空——等第一轮发现进图</div>`;
+      view.innerHTML = `<div class="empty" style="padding:10px var(--pad) 20px"><div class="e-t">拓扑为空</div><div class="e-d">等第一轮发现进图——连接器接入后 30s 内出现。</div></div>`;
     } else if (nodes.length > AGG_THRESHOLD) {
-      renderAggregate(nodes, edges);
+      renderAggregate(nodes);
     } else {
       renderGraph(nodes, edges);
     }
@@ -298,7 +409,7 @@ async function loadTopology() {
   }
 }
 
-function renderAggregate(nodes, edges) {
+function renderAggregate(nodes) {
   // P2-1 聚合渲染：按 node_type 分桶，统计置信度分布。
   const byType = {};
   for (const n of nodes) {
@@ -307,12 +418,12 @@ function renderAggregate(nodes, edges) {
     byType[t].count++;
     byType[t][n.confidence || "low"] = (byType[t][n.confidence || "low"] || 0) + 1;
   }
-  let html = `<div class="banner warn">节点数 ${nodes.length} 超过渲染阈值 ${AGG_THRESHOLD}——聚合视图（按类型分桶，钻取展开留 W6+）</div><div class="tablewrap"><table>
-    <thead><tr><th>type</th><th class="num">节点数</th><th class="num">high</th><th class="num">medium</th><th class="num">low</th></tr></thead><tbody>`;
+  let html = `<div class="panel-b" style="padding-top:12px"><div class="banner warn">节点数 ${nodes.length} 超过渲染阈值 ${AGG_THRESHOLD}——聚合视图（按类型分桶，钻取展开留 W6+）</div>
+  <div class="tbl-wrap"><table class="tbl"><thead><tr><th>type</th><th class="num">节点数</th><th class="num">high</th><th class="num">medium</th><th class="num">low</th></tr></thead><tbody>`;
   for (const [t, v] of Object.entries(byType).sort()) {
-    html += `<tr><td>${esc(t)}</td><td class="num">${v.count}</td><td class="num">${v.high||0}</td><td class="num">${v.medium||0}</td><td class="num">${v.low||0}</td></tr>`;
+    html += `<tr><td class="mono">${esc(t)}</td><td class="num mono">${v.count}</td><td class="num mono" style="color:var(--ok)">${v.high||0}</td><td class="num mono" style="color:var(--warn)">${v.medium||0}</td><td class="num mono faint">${v.low||0}</td></tr>`;
   }
-  html += `</tbody></table></div>`;
+  html += `</tbody></table></div></div>`;
   $("topoView").innerHTML = html;
 }
 
@@ -323,12 +434,12 @@ function renderGraph(nodes, edges) {
     const a = (2 * Math.PI * i) / nodes.length - Math.PI / 2;
     pos[n.node_key] = { x: W/2 + R * Math.cos(a), y: H/2 + R * Math.sin(a) };
   });
-  const color = { high: "var(--high)", medium: "var(--medium)", low: "var(--low)" };
-  let svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;background:var(--bg);border:1px solid var(--border);border-radius:6px">`;
+  const color = { high: "var(--ok)", medium: "var(--warn)", low: "var(--text-3)" };
+  let svg = `<div class="topo-wrap"><svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">`;
   for (const e of edges) {
     const s = pos[e.src_key], d = pos[e.dst_key];
     if (!s || !d) continue;
-    svg += `<line x1="${s.x}" y1="${s.y}" x2="${d.x}" y2="${d.y}" stroke="var(--border-strong)" stroke-width="1"/>`;
+    svg += `<line x1="${s.x}" y1="${s.y}" x2="${d.x}" y2="${d.y}" stroke="var(--line)" stroke-width="1"/>`;
   }
   for (const n of nodes) {
     const p = pos[n.node_key];
@@ -340,7 +451,7 @@ function renderGraph(nodes, edges) {
     const p = pos[n.node_key];
     svg += `<text x="${p.x + 9}" y="${p.y + 3}">${esc(n.node_key.length > 28 ? n.node_key.slice(0, 27) + "…" : n.node_key)}</text>`;
   });
-  svg += `</svg>`;
+  svg += `</svg></div>`;
   $("topoView").innerHTML = svg;
   $("topoView").querySelectorAll("circle").forEach(c => {
     c.onclick = () => showNodeDetail(c.dataset.key);
@@ -359,10 +470,10 @@ async function showNodeDetail(key) {
     ]);
     const ch = changes.changes || [];
     box.innerHTML = `<div class="dt">节点 ${esc(key)}</div>` +
-      `<div>邻居 <b>${(topo.nodes||[]).length - 1}</b> · 边 <b>${(topo.edges||[]).length}</b> · 24h 变更 <b>${ch.length}</b></div>` +
+      `<div style="margin-bottom:6px">邻居 <b class="mono">${(topo.nodes||[]).length - 1}</b> · 边 <b class="mono">${(topo.edges||[]).length}</b> · 24h 变更 <b class="mono">${ch.length}</b></div>` +
       (ch.length
-        ? ch.map(c => `<div><span style="color:var(--muted)">[${esc(c.change_type)}]</span> ${esc((c.occurred_at||"").replace("T"," ").slice(0,19))} ${esc(c.actor || c.source || "")} ${esc(c.summary || "")}</div>`).join("")
-        : `<div style="color:var(--muted)">24h 内无变更</div>`);
+        ? ch.map(c => `<div><span class="sev sev--info" style="margin-right:6px">${esc(c.change_type)}</span><span class="mono faint">${esc((c.occurred_at||"").replace("T"," ").slice(0,19))}</span> ${esc(c.actor || c.source || "")} ${esc(c.summary || "")}</div>`).join("")
+        : `<div class="faint">24h 内无变更</div>`);
   } catch (e) { box.textContent = "加载失败：" + e.message; }
 }
 
@@ -374,12 +485,21 @@ function refreshAll() {
   });
 }
 
+// seg 分段过滤（原型 Seg 交互）。
+$("stateSeg").querySelectorAll(".seg-i").forEach(btn => {
+  btn.onclick = () => {
+    $("stateSeg").querySelectorAll(".seg-i").forEach(b => b.classList.remove("on", "acc"));
+    btn.classList.add("on", "acc");
+    curState = btn.dataset.v;
+    loadClusters();
+  };
+});
+
 let timer = null;
 $("autoRefresh").onchange = () => {
   if (timer) { clearInterval(timer); timer = null; }
   if ($("autoRefresh").checked) timer = setInterval(refreshAll, 30000);
 };
-$("clusterState").onchange = loadClusters;
 if ($("autoRefresh").checked) timer = setInterval(refreshAll, 30000);
 refreshAll();
 </script>
