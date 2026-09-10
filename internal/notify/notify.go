@@ -27,7 +27,12 @@ type Message struct {
 	Severity   string // critical / warning / info
 }
 
-// Notifier 通知渠道接口（实现必须并发安全、失败返回 error 由 Gate 计数）。
+// Notifier 通知渠道接口。
+// 实现契约（R6 审核固化，W10 实渠道必须遵守）：
+//   1. 并发安全；
+//   2. **自带超时**（建议 ≤5s）——Gate.Admit 同步调用 Send，实现若长期
+//      阻塞会拖垮调用方（告警处理路径）；
+//   3. 失败返回 error 由 Gate/调用方计数，不得 panic。
 type Notifier interface {
 	Name() string
 	Send(m Message) error

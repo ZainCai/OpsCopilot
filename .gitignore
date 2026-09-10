@@ -17,3 +17,8 @@ credentials.yaml
 .idea/
 .DS_Store
 Thumbs.db
+# 审核补充（R6）：构建产物与运行时输出
+.demo/
+*.log
+evaluation-report.md
+csmoke.log

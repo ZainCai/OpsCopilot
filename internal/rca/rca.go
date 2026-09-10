@@ -117,5 +117,8 @@ func rootCauses(fs []Finding) []Finding {
 	return out
 }
 
-// ErrNotImplemented 占位步骤统一返回（Pipeline 识别后记 pending 继续）。
+// ErrNotImplemented 占位步骤统一哨兵：Pipeline 用 errors.Is 识别并记
+// pending 继续。**正式步骤实现者不得复用此哨兵**表示真实失败；包装时
+// 必须 %w 传递（如 fmt.Errorf("query as_of: %w", err)），否则 Is 判定
+// 失效、错误分类漂移（R6 审核约定固化）。
 var ErrNotImplemented = errors.New("rca: step not implemented (W10)")
