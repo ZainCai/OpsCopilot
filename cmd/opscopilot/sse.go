@@ -31,6 +31,11 @@ type SSEMessage struct {
 // 缓冲满时丢弃（见 Publish），不阻塞写路径。
 const sseSubBuffer = 32
 
+// maxSSESubscribers 单实例并发 SSE 订阅上限。每个订阅者占一个 goroutine 与
+// 一个缓冲，且 Publish 要遍历全部订阅者——无上限时，网络可达即可用大量长连接
+// 把服务拖垮。事件页是幂等全量刷新语义，超限直接拒绝（503）比拖垮服务好。
+const maxSSESubscribers = 200
+
 // EventHub 事件广播器：把事件变更推给所有已连接控制台（SSE）。
 // 并发安全（写路径多 goroutine 调 Publish，HTTP 连接 goroutine 调 Subscribe）。
 type EventHub struct {
@@ -45,15 +50,16 @@ func NewEventHub() *EventHub {
 	return &EventHub{subs: map[int]chan SSEMessage{}}
 }
 
-// Subscribe 注册一个订阅者，返回只读通道与取消函数。
-// Hub 已关闭时返回一个已关闭的空通道（订阅者立即结束，不悬挂）。
-func (h *EventHub) Subscribe() (<-chan SSEMessage, func()) {
+// Subscribe 注册一个订阅者，返回只读通道、取消函数与是否成功。
+// Hub 已关闭、或订阅数已达 maxSSESubscribers 时返回 false（通道已关闭，
+// 调用方应立即结束请求，不要悬挂等待）。
+func (h *EventHub) Subscribe() (<-chan SSEMessage, func(), bool) {
 	ch := make(chan SSEMessage, sseSubBuffer)
 	h.mu.Lock()
-	if h.closed {
+	if h.closed || len(h.subs) >= maxSSESubscribers {
 		h.mu.Unlock()
 		close(ch)
-		return ch, func() {}
+		return ch, func() {}, false
 	}
 	id := h.nextID
 	h.nextID++
@@ -71,7 +77,7 @@ func (h *EventHub) Subscribe() (<-chan SSEMessage, func()) {
 			h.mu.Unlock()
 		})
 	}
-	return ch, cancel
+	return ch, cancel, true
 }
 
 // Publish 广播一条消息给所有订阅者。订阅者缓冲满则丢弃该条（不阻塞、

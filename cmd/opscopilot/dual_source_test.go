@@ -243,6 +243,7 @@ func TestMergeEndpointRequiresAuthAndAudits(t *testing.T) {
 	// 无 Token → 401（restTest 的 token 为空时应当放行——这里显式设 token）。
 	asm.REST.token = "tk"
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/incidents/M2/merge", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
@@ -250,6 +251,7 @@ func TestMergeEndpointRequiresAuthAndAudits(t *testing.T) {
 	}
 	// 带 Token → 200 + 审计。
 	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/incidents/M2/merge", strings.NewReader(body))
+	req2.Header.Set("Content-Type", "application/json")
 	req2.Header.Set(AuthHeader, "tk")
 	rec2 := httptest.NewRecorder()
 	h.ServeHTTP(rec2, req2)
@@ -340,6 +342,7 @@ func TestTransitionEndpoint(t *testing.T) {
 	asm.REST.token = "tk"
 	post := func(body string, withToken bool) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/incidents/T1/transition", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
 		if withToken {
 			req.Header.Set(AuthHeader, "tk")
 		}
@@ -400,6 +403,7 @@ func TestManualCreatePersistsActorAndIngestFallback(t *testing.T) {
 
 	body := `{"id":"MC-1","title":"manual via rest","severity":"warning","created_by":"zhangsan"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/incidents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(AuthHeader, "tk")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -464,5 +468,103 @@ func TestAuthStatusEndpoint(t *testing.T) {
 	}
 	if b["write_authorized"] != true {
 		t.Fatalf("proxy-injected: body=%v, want write_authorized=true", b)
+	}
+}
+
+// TestWriteEndpointsRequireJSON 写路径 CSRF 准入：缺 Content-Type 或
+// 用 text/plain（浏览器"简单请求"仅有的几种类型，免预检）必须 415。
+// 这是挡住"跨站免预检写"的关键——浏览器不允许脚本把 Content-Type 设成
+// application/json 而不触发预检，而写路径不返回预检响应头。
+func TestWriteEndpointsRequireJSON(t *testing.T) {
+	asm, h := restTest(t)
+	asm.REST.token = "tk"
+	if _, err := asm.Incidents.Create("CS1", "csrf probe", "critical", "ops"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	cases := []struct{ name, path, body string }{
+		{"create", "/api/v1/incidents", `{"title":"x","created_by":"ops"}`},
+		{"transition", "/api/v1/incidents/CS1/transition", `{"to":"acked","actor":"ops"}`},
+		{"merge", "/api/v1/incidents/CS1/merge", `{"target_id":"CS2","actor":"ops"}`},
+	}
+	for _, c := range cases {
+		for _, ct := range []string{"", "text/plain", "application/x-www-form-urlencoded"} {
+			req := httptest.NewRequest(http.MethodPost, c.path, strings.NewReader(c.body))
+			req.Header.Set(AuthHeader, "tk")
+			if ct != "" {
+				req.Header.Set("Content-Type", ct)
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusUnsupportedMediaType {
+				t.Fatalf("%s (content-type %q): code = %d, want 415", c.name, ct, rec.Code)
+			}
+		}
+		// 带正确 Content-Type 时不应因 CSRF 检查被挡（此处 401/400/404 之外的
+		// 415 才算失败）。
+		req := httptest.NewRequest(http.MethodPost, c.path, strings.NewReader(c.body))
+		req.Header.Set(AuthHeader, "tk")
+		req.Header.Set("Content-Type", "application/json; charset=utf-8")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code == http.StatusUnsupportedMediaType {
+			t.Fatalf("%s: valid JSON content-type must not be rejected", c.name)
+		}
+	}
+}
+
+// TestTopologyDepthRejected depth 必须在 [0,maxTopologyDepth]：超限直接 400，
+// 而不是让它拿着一张空图空转 21 亿次（全程持拓扑锁，会阻塞发现入库）。
+func TestTopologyDepthRejected(t *testing.T) {
+	_, h := restTest(t)
+	for _, q := range []string{"depth=11", "depth=2147483647"} {
+		code, _ := getJSON(t, h, "/api/v1/topology?node_key=n1&"+q)
+		if code != http.StatusBadRequest {
+			t.Fatalf("%s: code = %d, want 400", q, code)
+		}
+	}
+	// 边界内不应因 depth 被拒（无拓扑数据 → 404 才是预期，不是 400）。
+	if code, _ := getJSON(t, h, "/api/v1/topology?node_key=n1&depth=10"); code == http.StatusBadRequest {
+		t.Fatal("depth=10 (within bound) must not be rejected as 400")
+	}
+}
+
+// TestCreateValidatesIDAndSeverity 人工建单的 id 字符集/长度与 severity 白名单。
+func TestCreateValidatesIDAndSeverity(t *testing.T) {
+	asm, h := restTest(t)
+	asm.REST.token = "tk"
+	post := func(body string) (int, map[string]any) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/incidents", strings.NewReader(body))
+		req.Header.Set(AuthHeader, "tk")
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		var out map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &out)
+		return rec.Code, out
+	}
+	// 非法 id（含引号 / 尖括号 / 空格）→ 400。
+	for _, bad := range []string{`{"id":"a'b","title":"t","created_by":"ops"}`,
+		`{"id":"a<b>","title":"t","created_by":"ops"}`,
+		`{"id":"a b","title":"t","created_by":"ops"}`} {
+		if code, _ := post(bad); code != http.StatusBadRequest {
+			t.Fatalf("bad id %s: code = %d, want 400", bad, code)
+		}
+	}
+	// 超长 id → 400。
+	long := strings.Repeat("x", incidentIDMaxLen+1)
+	if code, _ := post(`{"id":"` + long + `","title":"t","created_by":"ops"}`); code != http.StatusBadRequest {
+		t.Fatalf("overlong id: code = %d, want 400", code)
+	}
+	// severity 白名单外 → 400。
+	if code, _ := post(`{"title":"t","severity":"bogus","created_by":"ops"}`); code != http.StatusBadRequest {
+		t.Fatalf("bad severity: code = %d, want 400", code)
+	}
+	// severity 省略 → 201 且落为 info（与 DB 默认一致）。
+	code, out := post(`{"title":"sev default probe","created_by":"ops"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("omitted severity: code = %d, want 201", code)
+	}
+	if out["severity"] != "info" {
+		t.Fatalf("omitted severity = %v, want info", out["severity"])
 	}
 }

@@ -137,6 +137,56 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
 }
 
+// requireJSON 写路径的 CSRF 准入：要求 Content-Type: application/json。
+//
+// 为什么这能防 CSRF：跨站的"简单请求"（免预检）只允许 text/plain、
+// application/x-www-form-urlencoded、multipart/form-data 三种类型，浏览器
+// 不允许脚本把 Content-Type 设成 application/json 而不触发预检；而写路径
+// 不返回任何 CORS 预检响应头 → 预检失败 → 浏览器拦下请求。因此"强制 JSON"
+// 即可把"免预检的跨站写"挡在门外（本地 curl / AM 等非浏览器客户端不受影响）。
+//
+// 兼容 `application/json; charset=utf-8` 这类带参数的写法。
+func requireJSON(w http.ResponseWriter, r *http.Request) bool {
+	ct := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
+	if !strings.HasPrefix(ct, "application/json") {
+		writeErr(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
+		return false
+	}
+	return true
+}
+
+// incidentIDMaxLen 人工建单 id 的长度上限（防超长键污染表与前端渲染）。
+const incidentIDMaxLen = 128
+
+// validIncidentID 校验人工建单 id 的字符集与长度。
+//
+// 收窄到 [A-Za-z0-9._:-]：外部来源的 id 形如 `origin:sourceRef`（含冒号），
+// 人工单形如 `INC-20260910-120000.000`（含连字符与点）。收窄字符集同时消除
+// 控制台把 id 拼进 DOM/内联属性时的注入面（前端另有 esc，这里做防御纵深）。
+func validIncidentID(id string) bool {
+	if len(id) == 0 || len(id) > incidentIDMaxLen {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.' || r == '_' || r == ':' || r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// validSeverity 严重级白名单（与前端下拉、DB 默认值口径一致）。
+func validSeverity(s string) bool {
+	switch s {
+	case "critical", "warning", "info":
+		return true
+	}
+	return false
+}
+
 // grpcToHTTP gRPC status → HTTP status 映射（只读面只会遇到这三种）。
 func grpcToHTTP(err error) (int, string) {
 	switch status.Code(err) {
@@ -263,6 +313,9 @@ func (g *RESTGateway) handleCreateIncident(w http.ResponseWriter, r *http.Reques
 		writeErr(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
+	if !requireJSON(w, r) { // CSRF：拒绝免预检的跨站简单请求
+		return
+	}
 	if g.incidents == nil {
 		writeErr(w, http.StatusServiceUnavailable, "incident store not wired")
 		return
@@ -296,8 +349,20 @@ func (g *RESTGateway) handleCreateIncident(w http.ResponseWriter, r *http.Reques
 	id := strings.TrimSpace(in.ID)
 	if id == "" {
 		id = "INC-" + time.Now().Format("20060102-150405.000")
+	} else if !validIncidentID(id) {
+		writeErr(w, http.StatusBadRequest,
+			"id must be 1-128 chars of [A-Za-z0-9._:-]")
+		return
 	}
-	inc, err := g.incidents.Create(id, in.Title, in.Severity, in.CreatedBy)
+	// 严重级枚举化：此前是任意字符串直通，前端会按值拼 class、DB 无约束。
+	severity := strings.ToLower(strings.TrimSpace(in.Severity))
+	if severity == "" {
+		severity = "info" // 与 DB 默认值一致，避免"没填就报错"破坏既有调用方
+	} else if !validSeverity(severity) {
+		writeErr(w, http.StatusBadRequest, "severity must be one of critical|warning|info")
+		return
+	}
+	inc, err := g.incidents.Create(id, in.Title, severity, in.CreatedBy)
 	if err != nil {
 		writeErr(w, http.StatusConflict, err.Error())
 		return
@@ -338,6 +403,9 @@ func (g *RESTGateway) handleDuplicates(w http.ResponseWriter, r *http.Request) {
 func (g *RESTGateway) handleMergeIncident(w http.ResponseWriter, r *http.Request) {
 	if !authorized(r.Header.Get(AuthHeader), g.token) {
 		writeErr(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if !requireJSON(w, r) { // CSRF：拒绝免预检的跨站简单请求
 		return
 	}
 	if g.incidents == nil {
@@ -426,6 +494,14 @@ func (g *RESTGateway) handleEventStream(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusInternalServerError, "streaming unsupported by server")
 		return
 	}
+	// 先订阅再写响应头：订阅失败（超限/停机）要能干净地回 503 而不是先发 200。
+	ch, cancel, ok := g.hub.Subscribe()
+	if !ok {
+		writeErr(w, http.StatusServiceUnavailable, "too many event stream subscribers, retry later")
+		return
+	}
+	defer cancel()
+
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream; charset=utf-8")
 	h.Set("Cache-Control", "no-store, must-revalidate")
@@ -435,9 +511,6 @@ func (g *RESTGateway) handleEventStream(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, ": connected\n\n")
 	fl.Flush()
-
-	ch, cancel := g.hub.Subscribe()
-	defer cancel()
 
 	ka := time.NewTicker(20 * time.Second)
 	defer ka.Stop()
@@ -470,6 +543,9 @@ func (g *RESTGateway) handleEventStream(w http.ResponseWriter, r *http.Request) 
 func (g *RESTGateway) handleTransitionIncident(w http.ResponseWriter, r *http.Request) {
 	if !authorized(r.Header.Get(AuthHeader), g.token) {
 		writeErr(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if !requireJSON(w, r) { // CSRF：拒绝免预检的跨站简单请求
 		return
 	}
 	if g.incidents == nil {

@@ -161,6 +161,13 @@ func main() {
 		<-sig
 		logger.Printf("shutdown signal received, draining...")
 		runCancel()
+		// SSE 是长连接：http.Server.Shutdown 只等"连接变空闲"，**不会**取消
+		// 在途请求的 ctx。若先 Shutdown，每个在线控制台的 SSE 连接都要等到
+		// ctx 超时才退出 → 停机固定拖满 10s。故先关广播器：Hub 一关，SSE
+		// handler 立即返回、连接变空闲，Shutdown 才能迅速收尾。
+		if asm.Events != nil {
+			asm.Events.Close()
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(ctx)

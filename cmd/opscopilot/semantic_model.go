@@ -35,12 +35,27 @@ func NewSemanticModelServer(sink *TopologySink, changes *topology.ChangeStore) *
 	return &SemanticModelServer{sink: sink, changes: changes}
 }
 
+// maxTopologyDepth 邻域裁剪允许的最大跳数。
+//
+// 为什么要上限：Neighborhood 是 `for d := 0; d < depth; d++` 的循环——frontier
+// 变空后每轮只是空转，但**全程持有拓扑锁**（TopologyAsOf 的 s.mu）。因此
+// depth=2147483647 可让一次**匿名**读请求（读面无鉴权）空转 21 亿次，
+// 期间阻塞拓扑发现入库与变更事件的节点校验。10 跳对"看一个故障域"足够。
+const maxTopologyDepth = 10
+
 // GetTopology 时点拓扑查询。
 //
 // as_of 语义（v1.2 C15）：RCA 必须传故障时刻 T0；空 = 当前时刻
 // （ResolvedAsOf 回执为空串）。node_key 非空做邻域裁剪，节点不存在
 // 返回 NotFound——宁可报错，不静默返回空图让调用方误判"当时没有拓扑"。
+//
+// depth 范围在此**单一收口**校验（REST 与进程内 gRPC 共用本方法）；
+// InvalidArgument 经 grpcToHTTP 映射为 HTTP 400。
 func (s *SemanticModelServer) GetTopology(_ context.Context, req *pb.GetTopologyRequest) (*pb.GetTopologyResponse, error) {
+	if d := int(req.GetDepth()); d < 0 || d > maxTopologyDepth {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"depth must be in [0,%d], got %d", maxTopologyDepth, d)
+	}
 	asOf, err := topology.ParseAsOf(req.GetAsOf())
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "as_of: %v", err)

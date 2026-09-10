@@ -17,7 +17,10 @@ import (
 func TestEventHubPublishSubscribe(t *testing.T) {
 	hub := NewEventHub()
 	defer hub.Close()
-	ch, cancel := hub.Subscribe()
+	ch, cancel, ok := hub.Subscribe()
+	if !ok {
+		t.Fatal("subscribe failed")
+	}
 	if n := hub.Subscribers(); n != 1 {
 		t.Fatalf("subscribers=%d, want 1", n)
 	}
@@ -44,7 +47,10 @@ func TestEventHubPublishSubscribe(t *testing.T) {
 func TestEventHubSlowSubscriberDoesNotBlock(t *testing.T) {
 	hub := NewEventHub()
 	defer hub.Close()
-	_, cancel := hub.Subscribe() // 不消费
+	_, cancel, ok := hub.Subscribe() // 不消费
+	if !ok {
+		t.Fatal("subscribe failed")
+	}
 	defer cancel()
 	done := make(chan struct{})
 	go func() {
@@ -64,8 +70,8 @@ func TestEventHubSlowSubscriberDoesNotBlock(t *testing.T) {
 // TestEventHubCloseUnsubscribesAll Close 后所有订阅通道关闭、计数归零。
 func TestEventHubCloseUnsubscribesAll(t *testing.T) {
 	hub := NewEventHub()
-	a, _ := hub.Subscribe()
-	b, _ := hub.Subscribe()
+	a, _, _ := hub.Subscribe()
+	b, _, _ := hub.Subscribe()
 	if n := hub.Subscribers(); n != 2 {
 		t.Fatalf("subscribers=%d, want 2", n)
 	}
@@ -80,7 +86,10 @@ func TestEventHubCloseUnsubscribesAll(t *testing.T) {
 		t.Fatal("b should be closed")
 	}
 	// 关后订阅得到已关闭通道，不悬挂。
-	c, cancel := hub.Subscribe()
+	c, cancel, ok := hub.Subscribe()
+	if ok {
+		t.Fatal("post-close subscribe should fail")
+	}
 	defer cancel()
 	if _, open := <-c; open {
 		t.Fatal("post-close subscribe should be closed")
@@ -191,4 +200,33 @@ func readSSEData(t *testing.T, br *bufio.Reader, wantType string, timeout time.D
 		t.Fatalf("timed out waiting for SSE event type %q", wantType)
 		return ""
 	}
+}
+
+// TestEventHubSubscribeCap 订阅上限：第 maxSSESubscribers+1 次订阅必须失败，
+// 避免无上限长连接把服务拖垮；释放名额后应能再次订阅（不会永久卡死）。
+func TestEventHubSubscribeCap(t *testing.T) {
+	hub := NewEventHub()
+	defer hub.Close()
+	cancels := make([]func(), 0, maxSSESubscribers)
+	for i := 0; i < maxSSESubscribers; i++ {
+		_, cancel, ok := hub.Subscribe()
+		if !ok {
+			t.Fatalf("subscribe #%d should succeed", i)
+		}
+		cancels = append(cancels, cancel)
+	}
+	ch, cancel, ok := hub.Subscribe()
+	if ok {
+		t.Fatal("subscribe beyond cap must fail")
+	}
+	cancel()
+	if _, open := <-ch; open {
+		t.Fatal("rejected subscribe must return a closed channel")
+	}
+	cancels[0]()
+	_, c2, ok := hub.Subscribe()
+	if !ok {
+		t.Fatal("after releasing a slot, subscribe should succeed again")
+	}
+	c2()
 }
