@@ -8,6 +8,7 @@ package main
 import (
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -55,7 +56,17 @@ type NoiseEngine struct {
 }
 
 // DefaultTenant M1 单租户缺省值（alert_cluster.tenant_id 对齐）。
-const DefaultTenant = "default"
+//
+// 可用 OPS_TENANT 覆盖。动机：评估/演示环境常需与既有数据隔离——
+// 本机 8080/19090 上还有一组旧实例在持续写判决，新评估若同租户会互相
+// 污染时间窗。改为包级 var（进程启动时读一次 env），测试不受影响
+// （不设 OPS_TENANT 即得 "default"）。
+var DefaultTenant = func() string {
+	if v := strings.TrimSpace(os.Getenv("OPS_TENANT")); v != "" {
+		return v
+	}
+	return "default"
+}()
 
 // NewNoiseEngine 按 env 构造。返回 nil 表示影子降噪关闭（envNoiseShadow=off），
 // 调用方须容忍 nil（挂载点与 ProcessAlerts 均做 nil 检查）。

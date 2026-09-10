@@ -68,6 +68,21 @@ def fetch_verdicts():
     return rows
 
 
+def load_verdicts_file(path):
+    """从 tools/verdicts 导出的 JSON 读取影子判决（无 Docker 环境用）。"""
+    with open(path, encoding="utf-8") as f:
+        raw = json.load(f)
+    rows = []
+    for v in raw:
+        rows.append({
+            "occurred_at": parse_ts(v["occurred_at"]),
+            "cluster_key": v.get("cluster_key", ""),
+            "fingerprint": v.get("fingerprint", ""),
+            "reason": v.get("reason", ""),
+        })
+    return rows
+
+
 def parse_ts(s):
     return datetime.fromisoformat(s.replace("Z", "+00:00"))
 
@@ -77,12 +92,15 @@ def main():
     ap.add_argument("--answerbook", default="http://127.0.0.1:19090/answerbook")
     ap.add_argument("--threshold", type=float, default=0.85)
     ap.add_argument("--docker", default="docker", help="docker.exe path")
+    ap.add_argument("--verdicts-file", default="",
+                    help="从 tools/verdicts 导出的 JSON 读判决（无 Docker 环境用；"
+                         "设置后跳过 docker exec 取数）")
     args = ap.parse_args()
 
     global DOCKER
     DOCKER = args.docker
     book = fetch_answerbook(args.answerbook)
-    verdicts = fetch_verdicts()
+    verdicts = load_verdicts_file(args.verdicts_file) if args.verdicts_file else fetch_verdicts()
     segments = book["segments"]
     now = datetime.now(timezone.utc)
     # 只评已完结的段（end <= now），且只看最近 7 天。
