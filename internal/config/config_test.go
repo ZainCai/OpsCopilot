@@ -46,3 +46,35 @@ func TestValidateCacheAddrRequired(t *testing.T) {
 		t.Fatal("expected error when cache redis addr is empty")
 	}
 }
+
+// TestValidateAddrAliasSameInstance 同一实例的不同写法（localhost vs
+// 127.0.0.1、大小写、空白）必须被判为"同一个"，否则物理隔离约束可被绕过。
+func TestValidateAddrAliasSameInstance(t *testing.T) {
+	cases := [][2]string{
+		{"localhost:6380", "127.0.0.1:6380"},
+		{"127.0.0.1:6380", " 127.0.0.1:6380 "},
+		{"LOCALHOST:6380", "localhost:6380"},
+	}
+	for _, p := range cases {
+		c := &Config{
+			RedisAlert: RedisConfig{Addr: p[0], Role: RedisAlert},
+			RedisCache: RedisConfig{Addr: p[1], Role: RedisCache},
+		}
+		if err := c.Validate(); err == nil {
+			t.Fatalf("aliases %q / %q must be treated as the same instance", p[0], p[1])
+		}
+	}
+}
+
+// TestValidateAddrFormat 地址必须是 host:port；缺端口的配置启动期就该被拒。
+func TestValidateAddrFormat(t *testing.T) {
+	for _, bad := range []string{"127.0.0.1", "6380", "127.0.0.1:", ":6380"} {
+		c := &Config{
+			RedisAlert: RedisConfig{Addr: bad, Role: RedisAlert},
+			RedisCache: RedisConfig{Addr: "127.0.0.1:6381", Role: RedisCache},
+		}
+		if err := c.Validate(); err == nil {
+			t.Fatalf("addr %q must be rejected (want host:port)", bad)
+		}
+	}
+}
