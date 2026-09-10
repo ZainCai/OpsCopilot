@@ -113,6 +113,19 @@ curl -X POST http://127.0.0.1:8080/api/v1/changes \
 
 **任何 P0 修订或影响其他决策的变更，先写 ADR 再改文档**——这是 v1.3 §5.2 的硬性流程，源于 C17 部署策略与数据层特性冲突的事故。每份 ADR 末尾的"交叉检查提醒"记录耦合项。
 
+## 预留未接线的组件（D9 决策 A：保留不删）
+
+以下 `internal/` 包**带完整测试但尚未被 `cmd` 装配**，是 M2 的直接候选件——不要误读为"已生效"，也不要顺手删除：
+
+| 包 | 行数 | 用途 | 计划接线阶段 |
+|---|---|---|---|
+| `internal/rca` | 124 | 根因分析（证据窗口、因果子图消费方） | M2 |
+| `internal/notify` | 164 | 通知渠道（影子转正的前置件，见 TODO） | M2（影子转正前） |
+| `internal/sessionstore` | 61 | 会话状态（Redis 会话存储） | W5+ |
+
+历史审核报告在 `docs/reviews/`（原堆在仓库根，D11 决策 A 归档）；M2 候选清单与双链路方案在 `docs/`。
+
+
 ## 版本状态
 
 - 远端：`https://github.com/ZainCai/OpsCopilot.git`，分支 `main` 已与 `origin/main` 同步（ahead 0）；
