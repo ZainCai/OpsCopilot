@@ -92,3 +92,22 @@ func TestAssemblyWiresIngestEndToEnd(t *testing.T) {
 		t.Fatalf("pending = %d (err %v), want 0 after processing", n, err)
 	}
 }
+
+// TestNewAssemblyNilLoggerWithDB 回归：logger 传 nil 且配了 DB 时装配不得 panic。
+// 历史缺陷：装配里直接取 nil 接口的方法值 `logger.Printf`（取方法值即解引用
+// itab）会立即 panic——而同函数的注释恰好写着"不再直接调 logger.Printf"。
+func TestNewAssemblyNilLoggerWithDB(t *testing.T) {
+	dsn := os.Getenv("OPS_TEST_PG_DSN")
+	if dsn == "" {
+		t.Skip("OPS_TEST_PG_DSN not set — assembly nil-logger integration skipped")
+	}
+	t.Setenv("OPS_DB_DSN", dsn)
+	asm, err := NewAssembly(nil, "tk")
+	if err != nil {
+		t.Fatalf("assembly with nil logger: %v", err)
+	}
+	defer asm.Close()
+	if asm.Incidents == nil || asm.Incidents.Persistence() != "timescaledb" {
+		t.Fatalf("persistence = %v, want timescaledb", asm.Incidents.Persistence())
+	}
+}

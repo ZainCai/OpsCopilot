@@ -136,7 +136,7 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 			pool.Close()
 		} else {
 			pgPool, incStore = pool, pgInc
-			audit = NewPGAuditLog(pool, DefaultTenant, logger.Printf) // 审计随真相源持久化
+			audit = NewPGAuditLog(pool, DefaultTenant, logf) // 审计随真相源持久化
 			logf("incident persistence: timescaledb (shared pool: store+queue+audit)")
 		}
 	}
@@ -169,7 +169,7 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 		autoCreate := strings.EqualFold(strings.TrimSpace(os.Getenv("OPS_INCIDENT_AUTOCREATE")), "on")
 		asm.Queue = queue
 		asm.Ingest = &AlertmanagerWebhook{Owner: owner, Token: webhookToken, Tenant: DefaultTenant}
-		asm.Worker = NewIngestWorker(queue, incStore, audit, 0, 0, autoCreate, 0, 0, logger.Printf)
+		asm.Worker = NewIngestWorker(queue, incStore, audit, 0, 0, autoCreate, 0, 0, logf)
 		// W11 拉取侧：OPS_PULL_ALERTS=on 且配了源地址时启用（需 DB 队列）。
 		// 未配置即空转——不因"没接拉取源"而报错，骨架照常可用。
 		asm.Poller = buildAlertPoller(owner, logf)
