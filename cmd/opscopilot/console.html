@@ -92,10 +92,18 @@ const statePill = (s) => `<span class="pill ${esc(s)}">${esc(s)}</span>`;
 // P2-1 千节点聚合阈值：超过则不画 SVG（千圆点不可读），按 type 分桶列表。
 const AGG_THRESHOLD = 300;
 
+// API base：默认同源（经 opscopilot 服务访问）；静态打开本文件时可用
+// ?api=http://127.0.0.1:8080 指向运行中的服务（REST 网关已放开只读 CORS）。
+const API_BASE = new URLSearchParams(location.search).get("api") || "";
 async function fetchJSON(url) {
-  const resp = await fetch(url);
+  const resp = await fetch(API_BASE + url);
   const body = await resp.json().catch(() => ({}));
-  if (!resp.ok) throw new Error(body.error || (resp.status + " " + resp.statusText));
+  if (!resp.ok) {
+    if (resp.status === 404 && !API_BASE && location.protocol === "file:") {
+      throw new Error("404——本页面是静态文件，没有后端 API。请启动 opscopilot 后访问 http://127.0.0.1:8080/console");
+    }
+    throw new Error(body.error || (resp.status + " " + resp.statusText));
+  }
   return body;
 }
 

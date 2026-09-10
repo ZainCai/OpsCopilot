@@ -36,11 +36,40 @@ func NewRESTGateway(noise *NoiseEngine, sem *SemanticModelServer) *RESTGateway {
 }
 
 // Register 把全部路由挂到 mux（装配层调用）。
+// CORS：只读 GET 面放开跨源（Access-Control-Allow-Origin: *）——
+// 支撑"静态打开 console.html + ?api= 指向运行中服务"的使用方式；
+// 只读、无 cookie、无写路径（S1 写路径准入不涉及），泄露面为零。
+// GET 简单请求不触发 CORS 预检，无需 OPTIONS 处理（注册 OPTIONS
+// 通配会与 webhook 的写路径模式冲突——踩过）。
+// 写路径（webhook）不经过此处，不受影响。
 func (g *RESTGateway) Register(mux *http.ServeMux) {
-	mux.HandleFunc("GET /api/v1/clusters", g.handleClusters)
-	mux.HandleFunc("GET /api/v1/clusters/{key}", g.handleClusterDetail)
-	mux.HandleFunc("GET /api/v1/topology", g.handleTopology)
-	mux.HandleFunc("GET /api/v1/changes", g.handleChanges)
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		g.route(w, r)
+	})
+	mux.Handle("GET /api/v1/clusters", h)
+	mux.Handle("GET /api/v1/clusters/{key}", h)
+	mux.Handle("GET /api/v1/topology", h)
+	mux.Handle("GET /api/v1/changes", h)
+}
+
+// route 按 path 分发（CORS 包装层之下）。
+func (g *RESTGateway) route(w http.ResponseWriter, r *http.Request) {
+	switch r.URL.Path {
+	case "/api/v1/clusters":
+		g.handleClusters(w, r)
+	case "/api/v1/topology":
+		g.handleTopology(w, r)
+	case "/api/v1/changes":
+		g.handleChanges(w, r)
+	default:
+		// /api/v1/clusters/{key}：路径参数经 PathValue 取。
+		if r.PathValue("key") != "" {
+			g.handleClusterDetail(w, r)
+			return
+		}
+		writeErr(w, http.StatusNotFound, "unknown endpoint")
+	}
 }
 
 // writeJSON 统一成功响应。
