@@ -568,3 +568,28 @@ func TestCreateValidatesIDAndSeverity(t *testing.T) {
 		t.Fatalf("omitted severity = %v, want info", out["severity"])
 	}
 }
+
+// TestCORSOriginConfigurable D2 决策 B+C：默认**不返回** ACAO 头（仅同源），
+// 显式配置后才放行该源。取代早期默认 "*"——读端点含事件与审计数据，
+// "任意网页可跨源读"不该是默认行为。
+func TestCORSOriginConfigurable(t *testing.T) {
+	asm, h := restTest(t)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/incidents", nil))
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Fatalf("default must not emit ACAO header, got %q", got)
+	}
+	asm.REST.SetCORSOrigin("https://ops.example.com")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/incidents", nil))
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://ops.example.com" {
+		t.Fatalf("ACAO = %q, want configured origin", got)
+	}
+	// 清空（同源）再次确认可回退。
+	asm.REST.SetCORSOrigin("")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/incidents", nil))
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Fatalf("empty origin must stop emitting ACAO, got %q", got)
+	}
+}

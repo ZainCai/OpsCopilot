@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -83,6 +84,12 @@ func (a *Assembly) Close() {
 //
 // 影子降噪（W4-1.4）：OPS_NOISE_SHADOW=off 可整体关闭；OPS_NOISE_WINDOW
 // 配置去重/聚类时间窗（默认 10m，解析失败启动失败）。
+//
+// dbDefaultMaxConns 共享连接池默认上限（D7 决策 A）：事件 Store + 导入队列 +
+// 审计三方共用，worker 批处理持一条事务连接再做 Store 写需要第二条；
+// pgx 默认 max(4,NumCPU) 在并发下易耗尽。可用 OPS_DB_MAX_CONNS 覆盖。
+const dbDefaultMaxConns = 16
+
 func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error) {
 	// nil logger 容忍（装配测试惯用 nil）：本函数内日志一律走 logf，
 	// 不再直接调 logger.Printf，避免 nil logger 触发空指针。
@@ -128,16 +135,33 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 	var audit AuditLog = NewMemAuditLog()
 	var pgPool *pgxpool.Pool
 	if dsn := os.Getenv("OPS_DB_DSN"); dsn != "" {
-		pool, err := pgxpool.New(context.Background(), dsn)
+		// D7 决策 A：显式配置连接池容量。pgx 默认 max(4,NumCPU) 偏小——
+		// 这个池被**事件 Store + 导入队列 + 审计**三方共用，且队列批处理
+		// 会持一条连接（事务）再做 Store 写，压测下易"等连接直到超时"。
+		poolCfg, err := pgxpool.ParseConfig(dsn)
 		if err != nil {
-			logf("WARNING: db pool unavailable (incident memory only): %v", err)
-		} else if pgInc, err := incident.NewPGStoreWithPool(context.Background(), pool, DefaultTenant); err != nil {
-			logf("WARNING: incident pg store unavailable (memory only): %v", err)
-			pool.Close()
+			logf("WARNING: db pool unavailable (bad DSN, incident memory only): %v", err)
 		} else {
-			pgPool, incStore = pool, pgInc
-			audit = NewPGAuditLog(pool, DefaultTenant, logf) // 审计随真相源持久化
-			logf("incident persistence: timescaledb (shared pool: store+queue+audit)")
+			if raw := strings.TrimSpace(os.Getenv("OPS_DB_MAX_CONNS")); raw != "" {
+				if n, e := strconv.Atoi(raw); e == nil && n > 0 {
+					poolCfg.MaxConns = int32(n)
+				} else {
+					logf("WARNING: invalid OPS_DB_MAX_CONNS %q — using pgx default", raw)
+				}
+			} else {
+				poolCfg.MaxConns = dbDefaultMaxConns
+			}
+			pool, err := pgxpool.NewWithConfig(context.Background(), poolCfg)
+			if err != nil {
+				logf("WARNING: db pool unavailable (incident memory only): %v", err)
+			} else if pgInc, err := incident.NewPGStoreWithPool(context.Background(), pool, DefaultTenant); err != nil {
+				logf("WARNING: incident pg store unavailable (memory only): %v", err)
+				pool.Close()
+			} else {
+				pgPool, incStore = pool, pgInc
+				audit = NewPGAuditLog(pool, DefaultTenant, logf) // 审计随真相源持久化
+				logf("incident persistence: timescaledb (shared pool: store+queue+audit, max_conns=%d)", poolCfg.MaxConns)
+			}
 		}
 	}
 	// W11 实时推送：Hub + 事件 Store 装饰器（写成功即广播）。装饰必须早于
@@ -146,6 +170,8 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 	hub := NewEventHub()
 	incStore = NewPublishStore(incStore, hub)
 	rest := NewRESTGateway(noiseEngine, semantic, incStore, webhookToken, audit, hub)
+	// D2 决策 B+C：跨源放行改为显式白名单（默认不设置 = 仅同源）。
+	rest.SetCORSOrigin(os.Getenv("OPS_CORS_ORIGIN"))
 
 	asm := &Assembly{
 		Sink:      sink,

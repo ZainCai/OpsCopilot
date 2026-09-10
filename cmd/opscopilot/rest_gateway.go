@@ -49,7 +49,16 @@ type RESTGateway struct {
 	// hub 事件实时广播器（W11：GET /api/v1/events/stream 的订阅源）。
 	// 由装配层注入（经 publishStore 装饰器接到写路径）；nil = 实时推送关闭。
 	hub *EventHub
+	// corsOrigin 跨源放行白名单（D2 决策：默认**不设置** = 仅同源）。
+	// 空串时不返回 ACAO 头——浏览器按同源策略拦下跨源读。
+	// 显式配置（如 https://ops.example.com）才放行该源。
+	// 取代早期的 "*"：读端点含事件与审计数据，默认全放开等于把
+	// "任意网页可在受害者浏览器内跨源读取"当作默认行为。
+	corsOrigin string
 }
+
+// SetCORSOrigin 设置跨源放行白名单（装配期调用；空串 = 仅同源）。
+func (g *RESTGateway) SetCORSOrigin(origin string) { g.corsOrigin = strings.TrimSpace(origin) }
 
 // NewRESTGateway 构造。hub 为事件广播器（W11 实时推送），可为 nil。
 func NewRESTGateway(noise *NoiseEngine, sem *SemanticModelServer, incidents incident.Store, token string, audit AuditLog, hub *EventHub) *RESTGateway {
@@ -60,15 +69,19 @@ func NewRESTGateway(noise *NoiseEngine, sem *SemanticModelServer, incidents inci
 func (g *RESTGateway) SetAudit(a AuditLog) { g.audit = a }
 
 // Register 把全部路由挂到 mux（装配层调用）。
-// CORS：只读 GET 面放开跨源（Access-Control-Allow-Origin: *）——
-// 支撑"静态打开 console.html + ?api= 指向运行中服务"的使用方式；
-// 只读、无 cookie、无写路径（S1 写路径准入不涉及），泄露面为零。
+// CORS（D2 决策 B+C）：默认**不返回** ACAO 头 = 仅同源可读；运维显式配置
+// OPS_CORS_ORIGIN（如 https://ops.example.com）才放行该源。
+// 早期默认 "*" 的理由是支撑"静态打开 console.html + ?api= 指向运行中服务"，
+// 但读端点含事件与审计数据，"任意网页可跨源读"不该是默认行为——该用法
+// 现在需要显式配置 OPS_CORS_ORIGIN=null（或具体源）。
 // GET 简单请求不触发 CORS 预检，无需 OPTIONS 处理（注册 OPTIONS
 // 通配会与 webhook 的写路径模式冲突——踩过）。
 // 写路径（webhook）不经过此处，不受影响。
 func (g *RESTGateway) Register(mux *http.ServeMux) {
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if g.corsOrigin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", g.corsOrigin)
+		}
 		g.route(w, r)
 	})
 	mux.Handle("GET /api/v1/clusters", h)

@@ -108,6 +108,16 @@ func main() {
 	if addr == "" {
 		addr = defaultListenAddr
 	}
+	// D1 决策 C（安全门禁）：非回环监听 + 无写密钥 = 任何能到达端口的人都能
+	// 建单/关单/合并。此前只打一行 WARNING，运维很容易漏看——改为启动失败，
+	// 除非显式声明 OPS_ALLOW_UNAUTHENTICATED=on（本地联调逃生门，禁止用于生产）。
+	if err := checkListenSecurity(addr, webhookToken,
+		strings.EqualFold(strings.TrimSpace(os.Getenv("OPS_ALLOW_UNAUTHENTICATED")), "on")); err != nil {
+		logger.Printf("FATAL: %v", err)
+		logger.Printf("  修复方式：设置 OPS_WEBHOOK_TOKEN；或绑定 127.0.0.1；" +
+			"或显式设置 OPS_ALLOW_UNAUTHENTICATED=on（仅限本机联调，严禁用于生产）。")
+		os.Exit(1)
+	}
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           asm.Handler(),
