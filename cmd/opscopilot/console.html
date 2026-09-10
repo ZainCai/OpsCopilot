@@ -315,6 +315,7 @@ svg text { fill: var(--text); font-family: var(--font-mono); font-size: 11px; }
       <div style="margin-left:auto; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
         <input class="tok-input" id="tokenInput" type="password" placeholder="写操作 Token" autocomplete="off"
                title="写操作（建单/流转/合并）需携带共享密钥；留空则读操作可用、写操作将 401">
+        <span class="panel-sub" id="authChip" style="display:none"></span>
         <div class="seg" id="incStateSeg">
           <button class="seg-i on acc" data-v="active">活跃</button>
           <button class="seg-i" data-v="resolved">已解决</button>
@@ -597,7 +598,8 @@ async function showNodeDetail(key) {
 // ===================== 事件视图（W9 双链路） =====================
 // 双链路可视化：链路 B（人工建单 manual）与链路 A（外部自动导入
 // alertmanager/webhook/…）同一张表，用 origin 徽标区分来源。
-// 写操作（建单 / 流转 / 合并）需携带共享密钥 Token（保存于 localStorage）。
+// 写路径鉴权：生产推荐反代鉴权后注入 X-OpsCopilot-Token（浏览器不持有
+// 密钥，界面自动隐藏 Token 框）；回环/联调可手输，存 sessionStorage。
 let curView = "overview";
 let incState = "active";   // active | resolved | ""
 let incOrigin = "";
@@ -610,9 +612,34 @@ const NEXT_STATES = { open:["acked","mitigated","resolved"], acked:["mitigated",
                       mitigated:["resolved"], resolved:[] };
 const STATE_VERB = { acked:"确认", mitigated:"缓解", resolved:"解决" };
 
-const getToken = () => localStorage.getItem("ops_token") || "";
-const setToken = (t) => localStorage.setItem("ops_token", t);
+// 写操作 Token：默认手输，存 sessionStorage（关页即清，比 localStorage 少
+// 持久暴露）。真实部署推荐在反代层鉴权并注入 X-OpsCopilot-Token——那样
+// 浏览器侧根本不持有密钥，界面会自动隐藏本输入框（见 probeAuth）。
+const getToken = () => sessionStorage.getItem("ops_token") || "";
+const setToken = (t) => sessionStorage.setItem("ops_token", t);
+const getActor = () => sessionStorage.getItem("ops_actor") || "";
+const setActor = (a) => sessionStorage.setItem("ops_actor", a);
 const authHeaders = () => { const t = getToken(); return t ? { "X-OpsCopilot-Token": t } : {}; };
+
+// probeAuth 探测写权限：反代注入密钥时（或未启用鉴权时），自动隐藏 Token
+// 输入框并显示状态芯片——避免让人误以为"没填 Token 就写不了"。
+async function probeAuth() {
+  try {
+    const s = await fetchJSON("/api/v1/auth/status");
+    const inp = $("tokenInput"), chip = $("authChip");
+    if (!inp || !chip) return;
+    if (s.write_authorized) {
+      inp.style.display = "none";
+      chip.style.display = "";
+      chip.textContent = s.mode === "open"
+        ? "写权限：未启用鉴权（仅限回环/内网）"
+        : "写权限：已由前置鉴权提供";
+    } else {
+      inp.style.display = "";
+      chip.style.display = "none";
+    }
+  } catch (_) { /* 探测失败保持默认（显示输入框，手输回退） */ }
+}
 
 async function postJSON(url, body) {
   const resp = await fetch(API_BASE + url, {
@@ -759,9 +786,9 @@ async function showIncidentDetail(id) {
 }
 
 async function doTransition(id, to) {
-  const actor = prompt("操作人工号（审计）：", localStorage.getItem("ops_actor") || "");
+  const actor = prompt("操作人工号（审计）：", getActor() || "");
   if (!actor) return;
-  localStorage.setItem("ops_actor", actor);
+  setActor(actor);
   try {
     await postJSON("/api/v1/incidents/" + encodeURIComponent(id) + "/transition", { to, actor });
     await loadIncidents();
@@ -771,9 +798,9 @@ async function doTransition(id, to) {
 
 async function doMerge(srcId, targetId) {
   if (!confirm(`确认把 ${srcId} 合并到 ${targetId}？\n被合并单将置为已解决，原单保留并记审计。`)) return;
-  const actor = prompt("操作人工号（审计）：", localStorage.getItem("ops_actor") || "");
+  const actor = prompt("操作人工号（审计）：", getActor() || "");
   if (!actor) return;
-  localStorage.setItem("ops_actor", actor);
+  setActor(actor);
   try {
     await postJSON("/api/v1/incidents/" + encodeURIComponent(srcId) + "/merge", { target_id: targetId, actor });
     await loadIncidents();
@@ -837,6 +864,7 @@ $("incStateSeg").querySelectorAll(".seg-i").forEach(btn => {
 $("incOriginFilter").onchange = () => { incOrigin = $("incOriginFilter").value; renderIncidentTable(); };
 $("tokenInput").value = getToken();
 $("tokenInput").oninput = () => setToken($("tokenInput").value.trim());
+probeAuth(); // 反代注入 / 未鉴权 → 自动隐藏输入框
 
 let timer = null;
 $("autoRefresh").onchange = () => {

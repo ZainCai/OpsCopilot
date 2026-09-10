@@ -436,3 +436,33 @@ func TestManualCreatePersistsActorAndIngestFallback(t *testing.T) {
 		t.Fatal("ingest should be unwired without DB")
 	}
 }
+
+// TestAuthStatusEndpoint 写权限探测：控制台据此决定是否显示 Token 输入框。
+// 未配密钥 → open/可写；配了密钥 → 取决于请求是否携带（反代会注入）。
+func TestAuthStatusEndpoint(t *testing.T) {
+	// 未启用鉴权（回环/内网）：可写，mode=open。
+	asm, h := restTest(t)
+	asm.REST.token = ""
+	code, body := getJSON(t, h, "/api/v1/auth/status")
+	if code != http.StatusOK || body["write_authorized"] != true || body["mode"] != "open" {
+		t.Fatalf("open mode: code=%d body=%v", code, body)
+	}
+	// 配了密钥且未携带 → 不可写。
+	asm.REST.token = "tk"
+	code, body = getJSON(t, h, "/api/v1/auth/status")
+	if code != http.StatusOK || body["write_authorized"] != false || body["mode"] != "shared_secret" {
+		t.Fatalf("no token: code=%d body=%v", code, body)
+	}
+	// 携带正确密钥（模拟反代注入）→ 可写。
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/status", nil)
+	req.Header.Set(AuthHeader, "tk")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	var b map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &b); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if b["write_authorized"] != true {
+		t.Fatalf("proxy-injected: body=%v, want write_authorized=true", b)
+	}
+}

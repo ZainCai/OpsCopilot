@@ -78,6 +78,7 @@ func (g *RESTGateway) Register(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/incidents/{id}/audit", h)
 	mux.HandleFunc("POST /api/v1/incidents/{id}/merge", g.handleMergeIncident)
 	mux.HandleFunc("POST /api/v1/incidents/{id}/transition", g.handleTransitionIncident)
+	mux.HandleFunc("GET /api/v1/auth/status", g.handleAuthStatus)
 }
 
 // route 按 path 分发（CORS 包装层之下）。
@@ -365,6 +366,31 @@ func (g *RESTGateway) handleMergeIncident(w http.ResponseWriter, r *http.Request
 			Detail: map[string]any{"merged_into": in.TargetID}})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"merged": srcID, "into": in.TargetID})
+}
+
+// handleAuthStatus GET /api/v1/auth/status —— 写权限探测（控制台据此决定是否
+// 显示 Token 输入框）。
+//
+// 为什么不用服务端下发 cookie：本服务只有一枚共享密钥、**无用户体系**。服务端
+// 下发"可写 cookie"等于把"知道密钥"降级为"能打开页面"——任何能访问 /console
+// 的客户端都能拿到写权限，鉴权边界反而消失。正确做法是边界留在网络/代理层：
+// 反代做鉴权后向下游注入 X-OpsCopilot-Token，浏览器侧不持有密钥。本端点让
+// 控制台能识别这种情况并自动隐藏输入框。
+//
+// 安全：只回布尔与模式名，不回任何密钥材料；GET 无副作用。
+func (g *RESTGateway) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
+	mode := "shared_secret"
+	ok := false
+	if strings.TrimSpace(g.token) == "" {
+		mode = "open" // 未配置密钥（仅限回环/内网；main 启动已告警）
+		ok = true
+	} else {
+		ok = authorized(r.Header.Get(AuthHeader), g.token)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"write_authorized": ok,
+		"mode":             mode,
+	})
 }
 
 // handleTransitionIncident POST /api/v1/incidents/{id}/transition —— 事件状态流转
