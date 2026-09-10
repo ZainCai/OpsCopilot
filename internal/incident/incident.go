@@ -4,9 +4,9 @@
 // 两层解耦——本包只持有 cluster_key 字符串引用，不 import topology/noise
 // （边界纪律：internal 禁互 import）。
 //
-// 主干范围：实体 + 状态机（核心逻辑，落地）+ 内存 Store（接口按可换后端
-// 设计，与 change_store 同惯例）。DB 持久化、与簇的自动关联策略留待
-// W9 细化（TODO 标注）。
+// 主干范围：实体 + 状态机（核心逻辑，落地）+ Store 接口（内存 MemStore /
+// TimescaleDB PGStore 双实现，W9 落地 pg_store.go）+ 簇关联。事件自动
+// 创建策略（告警簇自动升级事件 vs 人工建单）留 W9/W10 决策。
 package incident
 
 import (
@@ -69,8 +69,22 @@ type Incident struct {
 	ResolvedAt  time.Time // 零值 = 未解决（KPI 统计口径）
 }
 
-// Store 内存事件存储（M2 主干；DB 后端接 W9）。
-type Store struct {
+// Store 事件存储接口（W9：内存与 TimescaleDB 双实现）。
+// 全部方法并发安全；返回值为拷贝，调用方修改不影响库内状态。
+type Store interface {
+	Create(id, title, severity string) (*Incident, error)
+	Get(id string) (Incident, error)
+	Transition(id string, to State, actor string) (Incident, error)
+	AttachCluster(id, clusterKey string) error
+	List(state State) []Incident
+	IncidentForCluster(clusterKey string) (Incident, bool)
+	// Persistence 声明落库形态（"memory" | "timescaledb"）——REST 响应
+	// 据此提示调用方（R6-4：内存态重启即丢，必须让消费者知道）。
+	Persistence() string
+}
+
+// MemStore 内存事件存储（默认；重启即丢，见 Persistence）。
+type MemStore struct {
 	mu        sync.Mutex
 	byID      map[string]*Incident
 	byCluster map[string]string // cluster_key → incident_id（一簇最多挂一事件）
@@ -78,20 +92,23 @@ type Store struct {
 	now       func() time.Time  // 可注入时钟（测试用）
 }
 
-// NewStore 构造。
-func NewStore() *Store {
-	return &Store{
+// NewMemStore 构造。
+func NewMemStore() *MemStore {
+	return &MemStore{
 		byID:      map[string]*Incident{},
 		byCluster: map[string]string{},
 		now:       time.Now,
 	}
 }
 
+// Persistence 内存态标识（R6-4）。
+func (s *MemStore) Persistence() string { return "memory" }
+
 // SetClock 注入时钟（测试；生产勿调）。
-func (s *Store) SetClock(f func() time.Time) { s.now = f }
+func (s *MemStore) SetClock(f func() time.Time) { s.now = f }
 
 // Create 新建事件。ID 必填且唯一；初始状态恒为 open（不信任外部状态）。
-func (s *Store) Create(id, title, severity string) (*Incident, error) {
+func (s *MemStore) Create(id, title, severity string) (*Incident, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return nil, errors.New("incident: id is required")
@@ -113,7 +130,7 @@ func (s *Store) Create(id, title, severity string) (*Incident, error) {
 }
 
 // Get 读取事件（值拷贝）。
-func (s *Store) Get(id string) (Incident, error) {
+func (s *MemStore) Get(id string) (Incident, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	inc, ok := s.byID[id]
@@ -124,7 +141,7 @@ func (s *Store) Get(id string) (Incident, error) {
 }
 
 // Transition 状态推进（状态机校验；ResolvedAt 在转入 resolved 时落戳）。
-func (s *Store) Transition(id string, to State, actor string) (Incident, error) {
+func (s *MemStore) Transition(id string, to State, actor string) (Incident, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	inc, ok := s.byID[id]
@@ -147,7 +164,7 @@ func (s *Store) Transition(id string, to State, actor string) (Incident, error) 
 
 // AttachCluster 簇→事件关联（F-02 主干：一簇最多挂一事件；重复挂同一
 // 事件幂等）。事件不存在返回 ErrNotFound。
-func (s *Store) AttachCluster(id, clusterKey string) error {
+func (s *MemStore) AttachCluster(id, clusterKey string) error {
 	if strings.TrimSpace(clusterKey) == "" {
 		return errors.New("incident: empty cluster key")
 	}
@@ -172,7 +189,7 @@ func (s *Store) AttachCluster(id, clusterKey string) error {
 }
 
 // List 按创建序返回全部事件（值拷贝；state 过滤，空串=全部）。
-func (s *Store) List(state State) []Incident {
+func (s *MemStore) List(state State) []Incident {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]Incident, 0, len(s.order))
@@ -187,7 +204,7 @@ func (s *Store) List(state State) []Incident {
 }
 
 // IncidentForCluster 反查簇所属事件（F-02 动线的读侧）。
-func (s *Store) IncidentForCluster(clusterKey string) (Incident, bool) {
+func (s *MemStore) IncidentForCluster(clusterKey string) (Incident, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	id, ok := s.byCluster[clusterKey]

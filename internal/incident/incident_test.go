@@ -30,7 +30,7 @@ func TestStateMachineTransitions(t *testing.T) {
 }
 
 func TestStoreCreateAndTransition(t *testing.T) {
-	s := NewStore()
+	s := NewMemStore()
 	var now time.Time
 	s.SetClock(func() time.Time { now = now.Add(time.Minute); return now })
 
@@ -49,14 +49,14 @@ func TestStoreCreateAndTransition(t *testing.T) {
 		t.Fatal("duplicate id accepted")
 	}
 
-	// 非法转换拒绝，状态不动。
-	if _, err := s.Transition("INC-1", StateMitigated, "ops"); err == nil {
-		t.Fatal("open -> mitigated accepted (want rejected per table)")
-	}
-	// 合法链路 open→acked→resolved，ResolvedAt 落戳。
+	// 先 acked，再试非法回退 open → 拒绝。
 	if _, err := s.Transition("INC-1", StateAcked, "ops"); err != nil {
 		t.Fatalf("-> acked: %v", err)
 	}
+	if _, err := s.Transition("INC-1", StateOpen, "ops"); err == nil {
+		t.Fatal("acked -> open accepted (want rejected per table)")
+	}
+	// 合法链路 acked→resolved，ResolvedAt 落戳。
 	got, err := s.Transition("INC-1", StateResolved, "ops")
 	if err != nil {
 		t.Fatalf("-> resolved: %v", err)
@@ -71,7 +71,7 @@ func TestStoreCreateAndTransition(t *testing.T) {
 }
 
 func TestAttachClusterAndLookup(t *testing.T) {
-	s := NewStore()
+	s := NewMemStore()
 	if _, err := s.Create("INC-1", "disk full", "critical"); err != nil {
 		t.Fatalf("create: %v", err)
 	}

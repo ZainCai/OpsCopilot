@@ -44,6 +44,7 @@ def fetch_verdicts():
         "SELECT occurred_at, cluster_key, fingerprint, "
         "payload->>'reason' AS reason "
         "FROM alert_event WHERE source='shadow' AND tenant_id='default' "
+        "AND occurred_at > now() - interval '7 days' "
         "ORDER BY occurred_at"
     )
     out = subprocess.run(

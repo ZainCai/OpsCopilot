@@ -30,11 +30,11 @@ import (
 type RESTGateway struct {
 	noise     *NoiseEngine
 	sem       *SemanticModelServer
-	incidents *incident.Store
+	incidents incident.Store
 }
 
 // NewRESTGateway 构造。
-func NewRESTGateway(noise *NoiseEngine, sem *SemanticModelServer, incidents *incident.Store) *RESTGateway {
+func NewRESTGateway(noise *NoiseEngine, sem *SemanticModelServer, incidents incident.Store) *RESTGateway {
 	return &RESTGateway{noise: noise, sem: sem, incidents: incidents}
 }
 
@@ -227,7 +227,11 @@ func (g *RESTGateway) handleIncidents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	list := g.incidents.List(state)
-	writeJSON(w, http.StatusOK, map[string]any{"incidents": list, "count": len(list)})
+	// R6-4：内存态重启即丢——把落库形态透出给消费者。
+	writeJSON(w, http.StatusOK, map[string]any{
+		"incidents": list, "count": len(list),
+		"persistence": g.incidents.Persistence(),
+	})
 }
 
 // handleIncidentDetail GET /api/v1/incidents/{id}。

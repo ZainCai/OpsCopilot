@@ -11,8 +11,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"os"
 
 	"google.golang.org/grpc"
 
@@ -39,7 +41,7 @@ type Assembly struct {
 	// REST 只读查询网关（W5-2.2）。
 	REST *RESTGateway
 	// Incidents 事件域内存 Store（M2 主干 F-01/F-02；DB 后端 W9）。
-	Incidents *incident.Store
+	Incidents incident.Store
 }
 
 // NewAssembly 组装 W3+W4+W5 组件并接线。
@@ -82,7 +84,17 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 
 	// W5-2.2：REST 只读查询面（复用 SemanticModelServer 的校验与映射，
 	// gRPC/REST 一套语义不漂移）。M2 主干：事件 Store 同源挂载。
-	incStore := incident.NewStore()
+	// W9：事件 Store 双实现——OPS_DB_DSN 设置用 TimescaleDB（重启不丢），
+	// 否则内存（Persistence 标注提醒）。pg 池错误不阻塞启动（降级内存）。
+	var incStore incident.Store = incident.NewMemStore()
+	if dsn := os.Getenv("OPS_DB_DSN"); dsn != "" {
+		if pgInc, err := incident.NewPGStore(context.Background(), dsn, DefaultTenant); err != nil {
+			logger.Printf("WARNING: incident pg store unavailable (memory only): %v", err)
+		} else {
+			incStore = pgInc
+			logger.Printf("incident persistence: timescaledb")
+		}
+	}
 	rest := NewRESTGateway(noiseEngine, semantic, incStore)
 
 	return &Assembly{
