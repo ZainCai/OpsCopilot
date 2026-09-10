@@ -216,22 +216,26 @@ func (h *Host) CheckAll(ctx context.Context) map[string]Health {
 
 	out := make(map[string]Health, len(cs))
 	for _, c := range cs {
-		// R3：与 RunOnce 一致，为每个连接器派生带超时的独立 ctx——
-		// 运维巡检入口不该被一个无内部超时的连接器拖死。
-		cctx := ctx
-		if h.connTimeout > 0 {
-			var cancel context.CancelFunc
-			cctx, cancel = context.WithTimeout(ctx, h.connTimeout)
-			defer cancel()
-		}
-		health, err := c.HealthCheck(cctx)
-		if err != nil {
-			out[c.ID()] = Health{Status: HealthDown, Detail: err.Error(), CheckedAt: time.Now()}
-			continue
-		}
-		out[c.ID()] = health
+		out[c.ID()] = h.checkHealth(ctx, c)
 	}
 	return out
+}
+
+// checkHealth 单连接器健康巡检。单独成函数是为了让 connTimeout 的 cancel
+// 在**每个连接器**结束时立即释放——写在循环体里 defer 的话，会一直拖到
+// CheckAll 返回才释放（连接器多时白白占着计时器）。
+func (h *Host) checkHealth(ctx context.Context, c Connector) Health {
+	cctx := ctx
+	if h.connTimeout > 0 {
+		var cancel context.CancelFunc
+		cctx, cancel = context.WithTimeout(ctx, h.connTimeout)
+		defer cancel()
+	}
+	health, err := c.HealthCheck(cctx)
+	if err != nil {
+		return Health{Status: HealthDown, Detail: err.Error(), CheckedAt: time.Now()}
+	}
+	return health
 }
 
 // RunOnce 执行一轮"健康→采集→发现→投递"，不入睡眠，供调度循环与测试复用。
