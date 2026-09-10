@@ -158,7 +158,7 @@ func TestWorkerHonorsAutoClosePolicy(t *testing.T) {
 	if got.AutoClosePolicy != "manual_only" {
 		t.Fatalf("after ack policy = %s, want manual_only", got.AutoClosePolicy)
 	}
-	worker := NewIngestWorker(nil, store, time.Second, 10, true, func(string, ...any) {})
+	worker := NewIngestWorker(nil, store, NewMemAuditLog(), time.Second, 10, true, 0, 0, func(string, ...any) {})
 	// 已恢复的告警（endsAt 已过）不得关闭该单。
 	payload := `{"labels":{"severity":"critical"},"annotations":{"summary":"n1 unreachable"},"startsAt":"2026-09-10T10:00:00Z","endsAt":"2020-01-01T00:00:00Z","fingerprint":"fp-r2"}`
 	if err := worker.process(Item{ID: 1, Origin: incident.OriginAlertmanager,
@@ -176,15 +176,150 @@ func TestWorkerHonorsAutoClosePolicy(t *testing.T) {
 
 // fakeQueue 队列桩（记录入队次数，模拟幂等命中）。
 type fakeQueue struct {
-	seen  bool
-	calls int
+	seen       bool
+	calls      int
+	lastOrigin incident.Origin
 }
 
 func (f *fakeQueue) Enqueue(origin incident.Origin, sourceRef, payload string) (bool, error) {
 	f.calls++
+	f.lastOrigin = origin
 	if f.seen {
 		return false, nil
 	}
 	f.seen = true
 	return true, nil
+}
+
+// ---- 二期：L2 提示 / 人工合并端点 / 限流聚合 / 审计 ----
+
+// TestDuplicatesEndpointOnlySuggests L2 只提示不合并：返回候选且声明
+// auto_merge=false，且被提示的事件状态不变（绝不自动合并）。
+func TestDuplicatesEndpointOnlySuggests(t *testing.T) {
+	asm, h := restTest(t)
+	if _, err := asm.Incidents.Create("INC-D1", "disk full on n1", "critical"); err != nil {
+		t.Fatalf("create D1: %v", err)
+	}
+	if _, err := asm.Incidents.Create("INC-D2", "disk full on n1", "critical"); err != nil {
+		t.Fatalf("create D2: %v", err)
+	}
+	code, body := getJSON(t, h, "/api/v1/incidents/INC-D1/duplicates")
+	if code != http.StatusOK {
+		t.Fatalf("duplicates: code=%d body=%v", code, body)
+	}
+	if body["auto_merge"] != false {
+		t.Fatal("auto_merge must be false (contract: never auto-merge)")
+	}
+	if body["count"].(float64) < 1 {
+		t.Fatalf("candidates = %v, want >=1 (same title)", body["count"])
+	}
+	// 关键：提示不产生副作用——两单都还在且都是 open。
+	for _, id := range []string{"INC-D1", "INC-D2"} {
+		inc, err := asm.Incidents.Get(id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if inc.State != incident.StateOpen || inc.MergedInto != "" {
+			t.Fatalf("%s mutated by suggestion: %+v", id, inc)
+		}
+	}
+}
+
+// TestMergeEndpointRequiresAuthAndAudits 人工合并端点：鉴权 + 审计留痕。
+func TestMergeEndpointRequiresAuthAndAudits(t *testing.T) {
+	asm, h := restTest(t)
+	asm.REST.SetAudit(NewMemAuditLog())
+	if _, err := asm.Incidents.Create("M1", "a", "warning"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := asm.Incidents.Create("M2", "b", "warning"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	body := `{"target_id":"M1","actor":"ops"}`
+	// 无 Token → 401（restTest 的 token 为空时应当放行——这里显式设 token）。
+	asm.REST.token = "tk"
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/incidents/M2/merge", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("no token: code = %d, want 401", rec.Code)
+	}
+	// 带 Token → 200 + 审计。
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/incidents/M2/merge", strings.NewReader(body))
+	req2.Header.Set(AuthHeader, "tk")
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("merge: code=%d body=%s", rec2.Code, rec2.Body.String())
+	}
+	entries := asm.REST.audit.List("M2")
+	if len(entries) != 1 || entries[0].Action != AuditMerge || entries[0].Actor != "ops" {
+		t.Fatalf("audit = %+v, want 1 merge entry by ops", entries)
+	}
+	// 审计端点可读。
+	code, abody := getJSON(t, h, "/api/v1/incidents/M2/audit")
+	if code != http.StatusOK || abody["count"].(float64) != 1 {
+		t.Fatalf("audit endpoint: code=%d body=%v", code, abody)
+	}
+}
+
+// TestRateLimitFoldsIntoBurstIncident R1：窗口内超限 → 折叠进聚合单，
+// 不新建大量单（消息不丢、可回放）。
+func TestRateLimitFoldsIntoBurstIncident(t *testing.T) {
+	store := incident.NewMemStore()
+	audit := NewMemAuditLog()
+	// 限额 2/窗口：第 3 条起折叠进 burst 聚合单。
+	w := NewIngestWorker(nil, store, audit, time.Second, 10, true, 2, time.Hour, func(string, ...any) {})
+	payload := func(fp string) string {
+		return `{"labels":{"severity":"critical"},"annotations":{"summary":"disk full"},"startsAt":"2026-09-10T10:00:00Z","endsAt":"0001-01-01T00:00:00Z","fingerprint":"` + fp + `"}`
+	}
+	for i := 1; i <= 5; i++ {
+		if err := w.process(Item{ID: int64(i), Origin: incident.OriginAlertmanager,
+			SourceRef: "fp-" + string(rune('a'+i)), Payload: payload("fp-" + string(rune('a'+i)))}); err != nil {
+			t.Fatalf("process #%d: %v", i, err)
+		}
+	}
+	list := store.List("")
+	if len(list) != 3 { // 2 独立单 + 1 聚合单
+		t.Fatalf("incidents = %d, want 3 (2 + 1 burst)", len(list))
+	}
+	var burst *incident.Incident
+	for i := range list {
+		if strings.HasPrefix(list[i].SourceRef, "burst:") {
+			burst = &list[i]
+		}
+	}
+	if burst == nil {
+		t.Fatal("burst incident missing")
+	}
+	// 限流动作有审计（3 条被折叠）。
+	limited := 0
+	for _, e := range audit.List("") {
+		if e.Action == AuditRateLimited {
+			limited++
+		}
+	}
+	if limited != 1 {
+		t.Fatalf("rate_limited audit = %d, want 1 (first fold creates burst)", limited)
+	}
+}
+
+// TestGenericWebhookOrigin 通用 webhook 路由使用 origin=webhook（扩展性验证）。
+func TestGenericWebhookOrigin(t *testing.T) {
+	q := &fakeQueue{}
+	owner := &QueueOwner{}
+	owner.SetWriter(q)
+	h := &AlertmanagerWebhook{Owner: owner}
+	mux := http.NewServeMux()
+	h.Register(mux)
+	body := `{"status":"firing","alerts":[{"labels":{"alertname":"X"},"startsAt":"2026-09-10T10:00:00Z","endsAt":"0001-01-01T00:00:00Z","fingerprint":"g1"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/ingest/webhook", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("generic webhook: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if q.lastOrigin != incident.OriginWebhook {
+		t.Fatalf("origin = %q, want webhook", q.lastOrigin)
+	}
 }

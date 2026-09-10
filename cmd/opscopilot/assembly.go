@@ -95,7 +95,7 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 			logger.Printf("incident persistence: timescaledb")
 		}
 	}
-	rest := NewRESTGateway(noiseEngine, semantic, incStore, webhookToken)
+	rest := NewRESTGateway(noiseEngine, semantic, incStore, webhookToken, nil)
 
 	return &Assembly{
 		Sink:      sink,

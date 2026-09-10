@@ -13,7 +13,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -114,21 +116,36 @@ SELECT count(*) FROM ingest_queue WHERE processed_at IS NULL AND tenant_id=$1`,
 type IngestWorker struct {
 	queue      *PGIngestQueue
 	store      incident.Store
+	audit      AuditLog
 	interval   time.Duration
 	batch      int
 	autoCreate bool // 开关：false = 只入队不建单（影子期默认）
+	// rateLimit 建单限流（R1 建单风暴应对）：窗口内新建上限；超限不新建，
+	// 改更新"群体事件"聚合单（source_ref=burst:<窗口起点>），事后可回放。
+	rateLimit  int
+	rateWindow time.Duration
+	created    map[int64]int // 窗口起点(unix) → 已建单数
+	mu         sync.Mutex
 	logf       func(string, ...any)
 }
 
 // NewIngestWorker 构造。autoCreate=false 时 Run 立即返回（不消费）。
-func NewIngestWorker(q *PGIngestQueue, s incident.Store, interval time.Duration, batch int, autoCreate bool, logf func(string, ...any)) *IngestWorker {
+func NewIngestWorker(q *PGIngestQueue, s incident.Store, audit AuditLog, interval time.Duration, batch int, autoCreate bool, rateLimit int, rateWindow time.Duration, logf func(string, ...any)) *IngestWorker {
 	if interval <= 0 {
 		interval = 5 * time.Second
 	}
 	if batch <= 0 {
 		batch = 20
 	}
-	return &IngestWorker{queue: q, store: s, interval: interval, batch: batch, autoCreate: autoCreate, logf: logf}
+	if rateLimit <= 0 {
+		rateLimit = 50 // 默认：5 分钟内最多建 50 单，其余进聚合单
+	}
+	if rateWindow <= 0 {
+		rateWindow = 5 * time.Minute
+	}
+	return &IngestWorker{queue: q, store: s, audit: audit, interval: interval, batch: batch,
+		autoCreate: autoCreate, rateLimit: rateLimit, rateWindow: rateWindow,
+		created: map[int64]int{}, logf: logf}
 }
 
 // Run 轮询消费，ctx 取消或开关关闭即退出（优雅停机）。
@@ -173,10 +190,10 @@ func (w *IngestWorker) drain() {
 // 一期只实现 alertmanager；未知 origin 报明确错误（不静默丢）。
 func (w *IngestWorker) process(it Item) error {
 	switch it.Origin {
-	case incident.OriginAlertmanager:
+	case incident.OriginAlertmanager, incident.OriginWebhook:
 		return w.processAlertmanager(it)
 	default:
-		return fmt.Errorf("unsupported origin %q (phase 1)", it.Origin)
+		return fmt.Errorf("unsupported origin %q", it.Origin)
 	}
 }
 
@@ -190,23 +207,36 @@ func (w *IngestWorker) processAlertmanager(it Item) error {
 	}
 	title := amTitle(a)
 	sev := amSeverity(a)
-	created, isNew, err := w.store.UpsertExternal(
-		incident.OriginAlertmanager, it.SourceRef, title, sev, "system:alertmanager", it.Payload)
+	origin := it.Origin
+	actor := "system:" + string(origin)
+
+	// R1 建单风暴：窗口内超限 → 不新建，更新聚合单（保留可回放）。
+	ref, burst := w.applyRateLimit(it.SourceRef)
+	created, isNew, err := w.store.UpsertExternal(origin, ref, title, sev, actor, it.Payload)
 	if err != nil {
 		return err
 	}
-	if isNew {
-		w.logf("incident created from alertmanager: %s (%s)", created.ID, title)
+	if burst && isNew {
+		w.auditAppend(AuditEntry{IncidentID: created.ID, Action: AuditRateLimited,
+			Actor: actor, Detail: map[string]any{"source_ref": it.SourceRef, "bucket": ref}})
+		w.logf("rate limited: %s folded into burst incident %s", it.SourceRef, created.ID)
+	}
+	if isNew && !burst {
+		w.auditAppend(AuditEntry{IncidentID: created.ID, Action: AuditCreate,
+			Actor: actor, Detail: map[string]any{"origin": origin, "source_ref": it.SourceRef, "title": title}})
+		w.logf("incident created from %s: %s (%s)", origin, created.ID, title)
 	}
 	if !amResolved(a) {
 		return nil
 	}
 	// 已恢复：受 auto_close_policy 约束。
 	if strings.TrimSpace(created.AutoClosePolicy) == "manual_only" {
+		w.auditAppend(AuditEntry{IncidentID: created.ID, Action: AuditExternalRecoveryIgnored,
+			Actor: actor, Detail: map[string]any{"source_ref": it.SourceRef}})
 		w.logf("external recovery ignored (manual_only): %s — awaiting human confirm", created.ID)
 		return nil
 	}
-	if _, err := w.store.Transition(created.ID, incident.StateResolved, "system:alertmanager"); err != nil &&
+	if _, err := w.store.Transition(created.ID, incident.StateResolved, actor); err != nil &&
 		!errors.Is(err, incident.ErrNotFound) && !errors.Is(err, pgx.ErrNoRows) {
 		var invalid incident.ErrInvalidTransition
 		if !errors.As(err, &invalid) { // 已 resolved 不是错误（重复恢复通知）
@@ -214,4 +244,29 @@ func (w *IngestWorker) processAlertmanager(it Item) error {
 		}
 	}
 	return nil
+}
+
+// applyRateLimit 建单限流（R1）：窗口内新建数达上限后，后续消息折叠进
+// "群体事件"聚合单（source_ref=burst:<窗口起点>）——不丢消息、可回放，
+// 也不让看板被上千单淹没。返回实际使用的 source_ref 与是否命中限流。
+func (w *IngestWorker) applyRateLimit(sourceRef string) (string, bool) {
+	if w.rateLimit <= 0 {
+		return sourceRef, false
+	}
+	bucket := time.Now().Unix() / int64(w.rateWindow.Seconds())
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.created[bucket] < w.rateLimit {
+		w.created[bucket]++
+		return sourceRef, false
+	}
+	w.created[bucket]++
+	return "burst:" + strconv.FormatInt(bucket, 10), true
+}
+
+// auditAppend 审计写入（审计未接线时静默跳过，不阻断业务）。
+func (w *IngestWorker) auditAppend(e AuditEntry) {
+	if w.audit != nil {
+		w.audit.Append(e)
+	}
 }

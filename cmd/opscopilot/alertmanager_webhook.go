@@ -54,13 +54,32 @@ type amAlert struct {
 	Fingerprint string            `json:"fingerprint"`
 }
 
-// Register 挂载 POST /api/v1/ingest/alertmanager。
+// Register 挂载两条接收路由：
+//   - POST /api/v1/ingest/alertmanager（origin=alertmanager）
+//   - POST /api/v1/ingest/webhook（origin=webhook，通用契约——同一
+//     payload 形态，便于接入非 AM 的推送方；二期扩展性的最小验证）。
 func (h *AlertmanagerWebhook) Register(mux *http.ServeMux) {
-	mux.HandleFunc("POST /api/v1/ingest/alertmanager", h.ServeHTTP)
+	mux.HandleFunc("POST /api/v1/ingest/alertmanager", func(w http.ResponseWriter, r *http.Request) {
+		h.serveOrigin(w, r, incident.OriginAlertmanager)
+	})
+	mux.HandleFunc("POST /api/v1/ingest/webhook", func(w http.ResponseWriter, r *http.Request) {
+		h.serveOrigin(w, r, incident.OriginWebhook)
+	})
 }
 
-// ServeHTTP 接收 AM 通知 → 逐条入队 → 202。
+// serveOrigin 按来源处理：origin 经参数传递（**不用结构体字段**——
+// 并发请求下共享字段会互相覆盖，属于实现级竞态）。
+func (h *AlertmanagerWebhook) serveOrigin(w http.ResponseWriter, r *http.Request, origin incident.Origin) {
+	h.handle(w, r, origin)
+}
+
+// ServeHTTP 接收通知 → 逐条入队 → 202（默认来源 alertmanager）。
 func (h *AlertmanagerWebhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.handle(w, r, incident.OriginAlertmanager)
+}
+
+// handle 实际处理逻辑（来源由调用方显式传入）。
+func (h *AlertmanagerWebhook) handle(w http.ResponseWriter, r *http.Request, origin incident.Origin) {
 	if !authorized(r.Header.Get(AuthHeader), h.Token) {
 		writeErr(w, http.StatusUnauthorized, "unauthorized")
 		return
@@ -92,7 +111,7 @@ func (h *AlertmanagerWebhook) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		if err != nil {
 			continue
 		}
-		ok, err := h.enqueue(incident.OriginAlertmanager, ref, string(payload))
+		ok, err := h.enqueue(origin, ref, string(payload))
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "enqueue failed: "+err.Error())
 			return

@@ -31,6 +31,9 @@ import (
 // incidentBodyLimit 人工建单请求体上限（建单是几行 JSON，1MiB 足够）。
 const incidentBodyLimit = 1 << 20
 
+// dedupWindow L2 相似度的时间邻近窗口。
+const dedupWindow = 30 * time.Minute
+
 // RESTGateway 只读查询面。
 // noise 可为 nil（影子降噪关闭 → 簇端点 503，其余端点照常）。
 // incidents 可为 nil（M2 主干未接线时事件端点 503）。
@@ -40,12 +43,17 @@ type RESTGateway struct {
 	incidents incident.Store
 	// token 写路径共享密钥（人工建单端点鉴权，R6）。
 	token string
+	// audit 审计日志（人工操作与外部自动动作统一留痕，二期）。
+	audit AuditLog
 }
 
 // NewRESTGateway 构造。
-func NewRESTGateway(noise *NoiseEngine, sem *SemanticModelServer, incidents incident.Store, token string) *RESTGateway {
-	return &RESTGateway{noise: noise, sem: sem, incidents: incidents, token: token}
+func NewRESTGateway(noise *NoiseEngine, sem *SemanticModelServer, incidents incident.Store, token string, audit AuditLog) *RESTGateway {
+	return &RESTGateway{noise: noise, sem: sem, incidents: incidents, token: token, audit: audit}
 }
+
+// SetAudit 挂载审计（装配期可选）。
+func (g *RESTGateway) SetAudit(a AuditLog) { g.audit = a }
 
 // Register 把全部路由挂到 mux（装配层调用）。
 // CORS：只读 GET 面放开跨源（Access-Control-Allow-Origin: *）——
@@ -66,6 +74,9 @@ func (g *RESTGateway) Register(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/incidents", h)
 	mux.Handle("GET /api/v1/incidents/{id}", h)
 	mux.HandleFunc("POST /api/v1/incidents", g.handleCreateIncident)
+	mux.Handle("GET /api/v1/incidents/{id}/duplicates", h)
+	mux.Handle("GET /api/v1/incidents/{id}/audit", h)
+	mux.HandleFunc("POST /api/v1/incidents/{id}/merge", g.handleMergeIncident)
 }
 
 // route 按 path 分发（CORS 包装层之下）。
@@ -90,7 +101,14 @@ func (g *RESTGateway) route(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if id := r.PathValue("id"); id != "" {
-			g.handleIncidentDetail(w, r)
+			switch {
+			case strings.HasSuffix(r.URL.Path, "/duplicates"):
+				g.handleDuplicates(w, r)
+			case strings.HasSuffix(r.URL.Path, "/audit"):
+				g.handleAudit(w, r)
+			default:
+				g.handleIncidentDetail(w, r)
+			}
 			return
 		}
 		writeErr(w, http.StatusNotFound, "unknown endpoint")
@@ -275,6 +293,81 @@ func (g *RESTGateway) handleCreateIncident(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, http.StatusCreated, inc)
+}
+
+// handleDuplicates GET /api/v1/incidents/{id}/duplicates
+// L2 疑似重复**提示**（方案决策：绝不自动合并）——只返回候选与理由，
+// 由人决定是否走 POST /{id}/merge。
+func (g *RESTGateway) handleDuplicates(w http.ResponseWriter, r *http.Request) {
+	if g.incidents == nil {
+		writeErr(w, http.StatusServiceUnavailable, "incident store not wired")
+		return
+	}
+	id := r.PathValue("id")
+	target, err := g.incidents.Get(id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "incident not found: "+id)
+		return
+	}
+	// 候选集：全部未解决事件（M2 规模下够用；量大时改按时间窗裁剪）。
+	cands := incident.SimilarCandidates(target, g.incidents.List(""), dedupWindow)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"incident_id": id, "candidates": cands, "count": len(cands),
+		"auto_merge": false, // 契约声明：本系统永不自动合并
+	})
+}
+
+// handleMergeIncident POST /api/v1/incidents/{id}/merge —— 人工合并（L2 落地动作）。
+// body: {"target_id":"...","actor":"..."}；鉴权必过。
+func (g *RESTGateway) handleMergeIncident(w http.ResponseWriter, r *http.Request) {
+	if !authorized(r.Header.Get(AuthHeader), g.token) {
+		writeErr(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if g.incidents == nil {
+		writeErr(w, http.StatusServiceUnavailable, "incident store not wired")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, incidentBodyLimit)
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeErr(w, http.StatusRequestEntityTooLarge, "body too large")
+		return
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var in struct {
+		TargetID string `json:"target_id"`
+		Actor    string `json:"actor"`
+	}
+	if err := dec.Decode(&in); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid body: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(in.TargetID) == "" || strings.TrimSpace(in.Actor) == "" {
+		writeErr(w, http.StatusBadRequest, "target_id and actor are required (audit)")
+		return
+	}
+	srcID := r.PathValue("id")
+	if err := g.incidents.MergeInto(srcID, in.TargetID); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if g.audit != nil {
+		g.audit.Append(AuditEntry{IncidentID: srcID, Action: AuditMerge, Actor: in.Actor,
+			Detail: map[string]any{"merged_into": in.TargetID}})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"merged": srcID, "into": in.TargetID})
+}
+
+// handleAudit GET /api/v1/incidents/{id}/audit —— 单条事件的审计轨迹。
+func (g *RESTGateway) handleAudit(w http.ResponseWriter, r *http.Request) {
+	if g.audit == nil {
+		writeErr(w, http.StatusServiceUnavailable, "audit not wired")
+		return
+	}
+	list := g.audit.List(r.PathValue("id"))
+	writeJSON(w, http.StatusOK, map[string]any{"incident_id": r.PathValue("id"), "entries": list, "count": len(list)})
 }
 
 // handleIncidents GET /api/v1/incidents?state=open|acked|mitigated|resolved
