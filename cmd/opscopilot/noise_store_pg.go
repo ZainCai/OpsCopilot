@@ -16,17 +16,27 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"opscopilot/internal/noise"
 )
 
+// pgSinkTimeout 单语句超时。此前 SaveCluster/SaveVerdict 用
+// context.Background()（无超时），DB 卡住会挂住降噪落库路径。
+const pgSinkTimeout = 5 * time.Second
+
 // PGClusterSink 真相源出口：同时实现 RecordSink（簇 upsert）与
 // VerdictSink（判决追加）。
 type PGClusterSink struct {
 	pool     *pgxpool.Pool
 	tenantID string
+
+	// 租户存在性的进程内记忆（tenant 行只建一次，避免每次落库都多一次往返）。
+	tenantMu   sync.Mutex
+	tenantDone bool
 }
 
 // NewPGClusterSink 建连接池（默认 MaxConns=2：单进程写路径足够）。
@@ -41,12 +51,24 @@ func NewPGClusterSink(ctx context.Context, dsn, tenantID string) (*PGClusterSink
 // Close 释放连接池（main 停机时调用）。
 func (s *PGClusterSink) Close() { s.pool.Close() }
 
-// ensureTenant 幂等确保租户行（FK 要求；M1 单租户，仅首次插入生效）。
+// ensureTenant 幂等确保租户行（FK 要求；M1 单租户）。
+// 进程内记忆：成功一次后不再重复插（每簇一次纯属多余往返）。
 func (s *PGClusterSink) ensureTenant(ctx context.Context) error {
-	_, err := s.pool.Exec(ctx,
+	s.tenantMu.Lock()
+	done := s.tenantDone
+	s.tenantMu.Unlock()
+	if done {
+		return nil
+	}
+	if _, err := s.pool.Exec(ctx,
 		`INSERT INTO tenant (id, name) VALUES ($1, $1) ON CONFLICT (id) DO NOTHING`,
-		s.tenantID)
-	return err
+		s.tenantID); err != nil {
+		return err
+	}
+	s.tenantMu.Lock()
+	s.tenantDone = true
+	s.tenantMu.Unlock()
+	return nil
 }
 
 // SaveCluster 幂等 upsert：UNIQUE(tenant_id, cluster_key) 冲突时覆盖
@@ -58,7 +80,8 @@ func (s *PGClusterSink) SaveCluster(rec noise.ClusterRecord) error {
 	if rec.ClusterKey == "" {
 		return fmt.Errorf("pg sink: empty cluster key")
 	}
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), pgSinkTimeout)
+	defer cancel()
 	if err := s.ensureTenant(ctx); err != nil {
 		return fmt.Errorf("pg sink: ensure tenant: %w", err)
 	}
@@ -96,7 +119,8 @@ func (s *PGClusterSink) SaveVerdict(rec noise.VerdictRecord) error {
 	if rec.TenantID == "" {
 		rec.TenantID = s.tenantID
 	}
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), pgSinkTimeout)
+	defer cancel()
 	payload, err := json.Marshal(map[string]any{
 		"node_key":       rec.NodeKey,
 		"severity":       rec.Severity,

@@ -9,19 +9,37 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // writeTimeout 单语句超时（R6-5：pgxpool 默认无 statement timeout）。
 const writeTimeout = 5 * time.Second
 
+// pgUniqueViolation SQLSTATE 唯一约束冲突。
+const pgUniqueViolation = "23505"
+
+// isUniqueViolation 判定唯一约束冲突。
+// 用 SQLSTATE 而非匹配错误文案——PG 的错误文本会随语言/版本变化
+// （"duplicate key value violates unique constraint" 不是稳定契约）。
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation
+}
+
 // PGStore TimescaleDB 实现。
 type PGStore struct {
 	pool     *pgxpool.Pool
 	tenantID string
+
+	// 租户存在性的进程内记忆：tenant 行只建一次（幂等 INSERT），
+	// 每次都去查一遍纯属多余往返（写路径上每单一次）。
+	tenantMu   sync.Mutex
+	tenantDone bool
 }
 
 // NewPGStore 建连接池并确保租户行（FK 要求）。
@@ -55,13 +73,30 @@ func (s *PGStore) Close() { s.pool.Close() }
 func (s *PGStore) Persistence() string { return "timescaledb" }
 
 // ensureTenant 幂等确保租户行（alert/alert_cluster 同惯例）。
+// ensureTenant 幂等确保租户行（FK 要求）。
+//
+// 进程内记忆 + 双检：tenant 行只建一次，此前每次写入都先插一遍（幂等但
+// 纯属多余往返，建单热路径上每单多一次 DB 往返）。若首查失败不记为完成，
+// 下次写入会重试。若进程运行期间租户行被外部删掉，后续写入会以 FK 错误
+// 显式失败——宁可响亮报错，不静默。
 func (s *PGStore) ensureTenant(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, writeTimeout)
+	s.tenantMu.Lock()
+	done := s.tenantDone
+	s.tenantMu.Unlock()
+	if done {
+		return nil
+	}
+	ectx, cancel := context.WithTimeout(ctx, writeTimeout)
 	defer cancel()
-	_, err := s.pool.Exec(ctx,
+	if _, err := s.pool.Exec(ectx,
 		`INSERT INTO tenant (id, name) VALUES ($1, $1) ON CONFLICT (id) DO NOTHING`,
-		s.tenantID)
-	return err
+		s.tenantID); err != nil {
+		return err
+	}
+	s.tenantMu.Lock()
+	s.tenantDone = true
+	s.tenantMu.Unlock()
+	return nil
 }
 
 func (s *PGStore) ctx() (context.Context, context.CancelFunc) {
@@ -94,7 +129,7 @@ RETURNING incident_id, title, severity, state, created_at, updated_at, resolved_
 		&nullTime{t: &inc.ResolvedAt}, &inc.Origin, &inc.SourceRef, &inc.SourceMeta,
 		&inc.CreatedBy, &inc.MergedInto, &inc.AutoClosePolicy)
 	if err != nil {
-		if strings.Contains(err.Error(), "duplicate key") {
+		if isUniqueViolation(err) {
 			return nil, fmt.Errorf("incident: duplicate id %q", id)
 		}
 		return nil, fmt.Errorf("incident pg: create: %w", err)
@@ -244,6 +279,11 @@ ORDER BY created_at`, s.tenantID, string(state))
 }
 
 // IncidentForCluster 反查簇所属事件。
+//
+// ⚠️ 返回值语义：`(zero, false)` 同时覆盖"该簇没有事件"与"DB 故障"两种情况
+// ——接口签名无 error，二者不可区分。当前生产代码**没有**调用本方法
+// （仅测试），故无实际影响；若未来接入业务，请优先用 `Get()`（带 error）
+// 而不是把 false 当成"无事件"去新建，否则 DB 不可用时会建出重复单。
 func (s *PGStore) IncidentForCluster(clusterKey string) (Incident, bool) {
 	ctx, cancel := s.ctx()
 	defer cancel()
