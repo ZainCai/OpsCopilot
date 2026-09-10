@@ -144,3 +144,42 @@ func (c *Clusterer) Restore(records []ClusterRecord) error {
 	c.byNode = byNode
 	return nil
 }
+
+// VerdictRecord 逐告警影子判决落库行（W6-1，对齐 alert_event 表：
+// cluster_key 可空、payload JSONB 承载评估字段）。评估脚本按
+// OccurredAt 对照注入器 answerbook 时间线打分——这是 W6-3 的数据源。
+type VerdictRecord struct {
+	TenantID      string    `json:"tenant_id"`
+	Fingerprint   string    `json:"fingerprint"`
+	NodeKey       string    `json:"node_key"`
+	OccurredAt    time.Time `json:"occurred_at"`
+	ClusterKey    string    `json:"cluster_key"`
+	Severity      string    `json:"severity"`
+	Summary       string    `json:"summary"`
+	WouldSuppress bool      `json:"would_suppress"`
+	WouldConverge bool      `json:"would_converge"`
+	Reason        string    `json:"reason"`
+}
+
+// ToRecord 导出为落库行（调用方填租户）。
+func (v Verdict) ToRecord(tenantID string) VerdictRecord {
+	return VerdictRecord{
+		TenantID:      tenantID,
+		Fingerprint:   v.Fingerprint,
+		NodeKey:       v.NodeKey,
+		OccurredAt:    v.OccurredAt,
+		ClusterKey:    v.ClusterKey,
+		Severity:      v.Severity,
+		Summary:       v.Summary,
+		WouldSuppress: v.WouldSuppress,
+		WouldConverge: v.WouldConverge,
+		Reason:        v.Reason,
+	}
+}
+
+// VerdictSink 逐告警判决落库出口（与 RecordSink 簇快照并存）。
+// 实现必须容忍高频调用（每告警一次）且尽力而为——失败由调用方
+// 计数，不中断告警链路。
+type VerdictSink interface {
+	SaveVerdict(rec VerdictRecord) error
+}

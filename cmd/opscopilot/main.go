@@ -71,15 +71,28 @@ func main() {
 		os.Exit(1)
 	}
 
-	// W4-1.5 簇状态落库：Redis 镜像（ADR-001 加速层）+ 启动期恢复。
-	// 真相源 alert_cluster 表的 upsert 随 W5 引入 pgx 后并列注入 RecordSink；
-	// Redis 不可达不阻塞启动——加速层冷启动为空，第一批告警照常处理。
+	// W6-1 真相源：OPS_DB_DSN 设置时启用 TimescaleDB 出口（簇 upsert +
+	// 逐告警 Verdict），与 Redis 镜像双写。DB 不可达不阻塞启动——
+	// 运维通过日志与失败计数观察；ADR-001 语义下库缺席只影响重建能力。
 	var noiseRDB *redis.Client
 	if asm.Noise != nil {
 		noiseRDB = redis.NewClient(&redis.Options{Addr: os.Getenv("REDIS_ALERT_ADDR")})
-		clusterSink := NewRedisClusterSink(noiseRDB, DefaultTenant)
-		asm.Noise.SetRecordSink(clusterSink)
-		if recs, err := clusterSink.LoadClusters(context.Background()); err != nil {
+		redisSink := NewRedisClusterSink(noiseRDB, DefaultTenant)
+		if dsn := os.Getenv("OPS_DB_DSN"); dsn != "" {
+			pgSink, err := NewPGClusterSink(context.Background(), dsn, DefaultTenant)
+			if err != nil {
+				logger.Printf("WARNING: pg sink unavailable (redis mirror only): %v", err)
+			} else {
+				defer pgSink.Close()
+				asm.Noise.SetRecordSink(&multiRecordSink{a: redisSink, b: pgSink})
+				asm.Noise.SetVerdictSink(pgSink)
+				logger.Printf("noise persistence: redis mirror + timescaledb truth source")
+			}
+		} else {
+			asm.Noise.SetRecordSink(redisSink)
+			logger.Printf("noise persistence: redis mirror only (set OPS_DB_DSN for truth source)")
+		}
+		if recs, err := redisSink.LoadClusters(context.Background()); err != nil {
 			logger.Printf("noise cluster restore skipped (redis unreachable): %v", err)
 		} else if len(recs) > 0 {
 			if err := asm.Noise.RestoreFrom(recs); err != nil {

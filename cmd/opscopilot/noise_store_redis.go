@@ -76,3 +76,24 @@ func (s *RedisClusterSink) LoadClusters(ctx context.Context) ([]noise.ClusterRec
 	sort.Slice(recs, func(i, j int) bool { return recs[i].ClusterKey < recs[j].ClusterKey })
 	return recs, nil
 }
+
+// verdictMaxEntries Redis 判决流上限（7 天评估期 × 告警量级的安全阀）。
+const verdictMaxEntries = 200000
+
+// SaveVerdict 逐告警判决追加（W6-1）：RPUSH JSON 线 + LTRIM 上限。
+// 评估脚本 LRANGE 全量读取；单条损坏不拖垮整体（JSON 线按行解析）。
+func (s *RedisClusterSink) SaveVerdict(rec noise.VerdictRecord) error {
+	if rec.TenantID == "" {
+		rec.TenantID = s.tenantID
+	}
+	blob, err := json.Marshal(rec)
+	if err != nil {
+		return fmt.Errorf("redis verdict sink: marshal: %w", err)
+	}
+	key := "opscopilot:{" + s.tenantID + "}:verdicts"
+	pipe := s.rdb.Pipeline()
+	pipe.RPush(context.Background(), key, blob)
+	pipe.LTrim(context.Background(), key, -verdictMaxEntries, -1)
+	_, err = pipe.Exec(context.Background())
+	return err
+}

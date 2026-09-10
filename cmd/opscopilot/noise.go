@@ -43,8 +43,10 @@ type NoiseEngine struct {
 	tenant string
 	// records 簇落库出口（W4-1.5，可选；nil = 只跑影子不落库）。
 	records noise.RecordSink
-	// saveFailures 落库失败累计（不中断告警链路，供运维观察）。
-	saveFailures int
+	// verdicts 逐告警判决落库出口（W6-1 评估数据链，可选）。
+	verdicts noise.VerdictSink
+	// saveFailures / verdictFailures 落库失败累计（不中断告警链路）。
+	saveFailures, verdictFailures int
 	// persistedSig 已落库签名：clusterKey → state|lastSeenUnixNano|alertCount。
 	// 第四轮扫描 F3：resolved 簇状态不再变化，全量重写会让 Redis 写放大
 	// 随历史线性增长——按签名去重，只有变化过的簇才写。Restore 后清空
@@ -93,6 +95,16 @@ func (n *NoiseEngine) SetRecordSink(rs noise.RecordSink) {
 	n.records = rs
 }
 
+// SetVerdictSink 挂载逐告警判决落库出口（W6-1）。传 nil 卸载。
+func (n *NoiseEngine) SetVerdictSink(vs noise.VerdictSink) {
+	if n == nil {
+		return
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.verdicts = vs
+}
+
 type invalidNoiseWindowError struct {
 	raw string
 	err error
@@ -131,8 +143,11 @@ func (n *NoiseEngine) ProcessAlerts(alerts []connector.Alert) {
 	n.shadow.SetDomain(func(a, b string) bool { return reachable(view.adj, a, b) })
 
 	var suppressed, merged, created int
+	var verdicts []noise.VerdictRecord
 	for _, a := range alerts {
-		v := n.shadow.Process(n.toEvent(a, view))
+		e := n.toEvent(a, view)
+		v := n.shadow.Process(e)
+		verdicts = append(verdicts, v.ToRecord(n.tenant))
 		n.total++
 		switch {
 		case v.WouldSuppress:
@@ -154,10 +169,33 @@ func (n *NoiseEngine) ProcessAlerts(alerts []connector.Alert) {
 	if n.records != nil {
 		dirty = n.collectDirtyClusters()
 	}
+	var vs noise.VerdictSink
+	if n.verdicts != nil {
+		vs = n.verdicts
+	}
 	n.mu.Unlock()
 
 	if len(dirty) > 0 {
 		n.persistClusters(dirty)
+	}
+	if vs != nil {
+		n.persistVerdicts(vs, verdicts)
+	}
+}
+
+// persistVerdicts 逐告警判决落库（W6-1，锁外）。失败只计数+日志——
+// 评估数据缺行会让准确率分母偏小，运维通过 verdictFailures 观察丢失面。
+func (n *NoiseEngine) persistVerdicts(vs noise.VerdictSink, verdicts []noise.VerdictRecord) {
+	failed := 0
+	for _, rec := range verdicts {
+		if err := vs.SaveVerdict(rec); err != nil {
+			failed++
+			n.verdictFailures++
+		}
+	}
+	if failed > 0 {
+		n.logf("WARNING: verdict persist failed for %d/%d (cumulative %d)",
+			failed, len(verdicts), n.verdictFailures)
 	}
 }
 

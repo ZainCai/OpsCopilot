@@ -34,6 +34,10 @@ type Verdict struct {
 	// "dedup-window"（窗口内重复）/"cluster-merge"（故障域并入）/
 	// "new-incident"（新事件，不应收敛）。空 = 未参与判定。
 	Reason string
+	// Severity / Summary 告警严重级与摘要（W6-1：评估报告按严重级
+	// 分桶需要；从 Event 原样拷贝）。
+	Severity string
+	Summary  string
 }
 
 // 收敛原因常量。
@@ -69,6 +73,8 @@ func (s *Shadow) Process(e Event) Verdict {
 		Fingerprint: e.Fingerprint,
 		NodeKey:     e.NodeKey,
 		OccurredAt:  e.OccurredAt,
+		Severity:    e.Severity,
+		Summary:     e.Summary,
 	}
 	if e.Fingerprint == "" {
 		v.Reason = ReasonNewIncident
