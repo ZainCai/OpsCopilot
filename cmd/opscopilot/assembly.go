@@ -18,6 +18,7 @@ import (
 
 	"opscopilot/internal/connector"
 	pb "opscopilot/internal/contracts/pb"
+	"opscopilot/internal/incident"
 	"opscopilot/internal/topology"
 )
 
@@ -37,6 +38,8 @@ type Assembly struct {
 	GRPC *grpc.Server
 	// REST 只读查询网关（W5-2.2）。
 	REST *RESTGateway
+	// Incidents 事件域内存 Store（M2 主干 F-01/F-02；DB 后端 W9）。
+	Incidents *incident.Store
 }
 
 // NewAssembly 组装 W3+W4+W5 组件并接线。
@@ -78,16 +81,18 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 	pb.RegisterSemanticModelServer(grpcServer, semantic)
 
 	// W5-2.2：REST 只读查询面（复用 SemanticModelServer 的校验与映射，
-	// gRPC/REST 一套语义不漂移）。
-	rest := NewRESTGateway(noiseEngine, semantic)
+	// gRPC/REST 一套语义不漂移）。M2 主干：事件 Store 同源挂载。
+	incStore := incident.NewStore()
+	rest := NewRESTGateway(noiseEngine, semantic, incStore)
 
 	return &Assembly{
-		Sink:    sink,
-		Changes: store,
-		Webhook: hook,
-		Noise:   noiseEngine,
-		GRPC:    grpcServer,
-		REST:    rest,
+		Sink:      sink,
+		Changes:   store,
+		Webhook:   hook,
+		Noise:     noiseEngine,
+		GRPC:      grpcServer,
+		REST:      rest,
+		Incidents: incStore,
 	}, nil
 }
 

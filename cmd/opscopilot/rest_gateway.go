@@ -20,19 +20,22 @@ import (
 	"google.golang.org/grpc/status"
 
 	pb "opscopilot/internal/contracts/pb"
+	"opscopilot/internal/incident"
 	"opscopilot/internal/noise"
 )
 
 // RESTGateway 只读查询面。
 // noise 可为 nil（影子降噪关闭 → 簇端点 503，其余端点照常）。
+// incidents 可为 nil（M2 主干未接线时事件端点 503）。
 type RESTGateway struct {
-	noise *NoiseEngine
-	sem   *SemanticModelServer
+	noise     *NoiseEngine
+	sem       *SemanticModelServer
+	incidents *incident.Store
 }
 
 // NewRESTGateway 构造。
-func NewRESTGateway(noise *NoiseEngine, sem *SemanticModelServer) *RESTGateway {
-	return &RESTGateway{noise: noise, sem: sem}
+func NewRESTGateway(noise *NoiseEngine, sem *SemanticModelServer, incidents *incident.Store) *RESTGateway {
+	return &RESTGateway{noise: noise, sem: sem, incidents: incidents}
 }
 
 // Register 把全部路由挂到 mux（装配层调用）。
@@ -51,6 +54,8 @@ func (g *RESTGateway) Register(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/clusters/{key}", h)
 	mux.Handle("GET /api/v1/topology", h)
 	mux.Handle("GET /api/v1/changes", h)
+	mux.Handle("GET /api/v1/incidents", h)
+	mux.Handle("GET /api/v1/incidents/{id}", h)
 }
 
 // route 按 path 分发（CORS 包装层之下）。
@@ -62,10 +67,16 @@ func (g *RESTGateway) route(w http.ResponseWriter, r *http.Request) {
 		g.handleTopology(w, r)
 	case "/api/v1/changes":
 		g.handleChanges(w, r)
+	case "/api/v1/incidents":
+		g.handleIncidents(w, r)
 	default:
-		// /api/v1/clusters/{key}：路径参数经 PathValue 取。
-		if r.PathValue("key") != "" {
+		// /api/v1/clusters/{key} 与 /api/v1/incidents/{id}：路径参数经 PathValue 取。
+		if key := r.PathValue("key"); key != "" {
 			g.handleClusterDetail(w, r)
+			return
+		}
+		if id := r.PathValue("id"); id != "" {
+			g.handleIncidentDetail(w, r)
 			return
 		}
 		writeErr(w, http.StatusNotFound, "unknown endpoint")
@@ -199,6 +210,38 @@ func (g *RESTGateway) handleTopology(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleIncidents GET /api/v1/incidents?state=open|acked|mitigated|resolved
+// （M2 主干：内存 Store，DB 后端 W9）。
+func (g *RESTGateway) handleIncidents(w http.ResponseWriter, r *http.Request) {
+	if g.incidents == nil {
+		writeErr(w, http.StatusServiceUnavailable, "incident store not wired")
+		return
+	}
+	state := incident.State(r.URL.Query().Get("state"))
+	switch state {
+	case "", incident.StateOpen, incident.StateAcked, incident.StateMitigated, incident.StateResolved:
+	default:
+		writeErr(w, http.StatusBadRequest, "invalid state filter")
+		return
+	}
+	list := g.incidents.List(state)
+	writeJSON(w, http.StatusOK, map[string]any{"incidents": list, "count": len(list)})
+}
+
+// handleIncidentDetail GET /api/v1/incidents/{id}。
+func (g *RESTGateway) handleIncidentDetail(w http.ResponseWriter, r *http.Request) {
+	if g.incidents == nil {
+		writeErr(w, http.StatusServiceUnavailable, "incident store not wired")
+		return
+	}
+	inc, err := g.incidents.Get(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "incident not found: "+r.PathValue("id"))
+		return
+	}
+	writeJSON(w, http.StatusOK, inc)
 }
 
 // handleChanges GET /api/v1/changes?node_key=&window_start=&window_end=

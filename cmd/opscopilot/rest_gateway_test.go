@@ -214,3 +214,36 @@ func TestRESTClustersLimit(t *testing.T) {
 		t.Fatalf("limit=-1: code = %d, want 400", code)
 	}
 }
+
+// TestRESTIncidentsEndpoint M2 主干：事件列表/详情/过滤/未知路由。
+func TestRESTIncidentsEndpoint(t *testing.T) {
+	asm, h := restTest(t)
+	if _, err := asm.Incidents.Create("INC-9001", "磁盘满", "critical"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// 列表。
+	code, body := getJSON(t, h, "/api/v1/incidents")
+	if code != http.StatusOK || body["count"].(float64) != 1 {
+		t.Fatalf("list: code=%d count=%v, want 200/1", code, body["count"])
+	}
+	// state 过滤（acked 下为空）。
+	code, body = getJSON(t, h, "/api/v1/incidents?state=acked")
+	if code != http.StatusOK || body["count"].(float64) != 0 {
+		t.Fatalf("state filter: code=%d count=%v, want 200/0", code, body["count"])
+	}
+	// 详情。
+	code, body = getJSON(t, h, "/api/v1/incidents/INC-9001")
+	if code != http.StatusOK || body["title"] != "磁盘满" || body["state"] != "open" {
+		t.Fatalf("detail: code=%d body=%v", code, body)
+	}
+	// 未知 ID → 404。
+	code, _ = getJSON(t, h, "/api/v1/incidents/INC-X")
+	if code != http.StatusNotFound {
+		t.Fatalf("unknown incident: code = %d, want 404", code)
+	}
+	// 非法 state → 400。
+	code, _ = getJSON(t, h, "/api/v1/incidents?state=bogus")
+	if code != http.StatusBadRequest {
+		t.Fatalf("bogus state: code = %d, want 400", code)
+	}
+}
