@@ -33,7 +33,7 @@ func TestExternalUpsertIdempotent(t *testing.T) {
 	if created != 1 {
 		t.Fatalf("created = %d, want 1 (repeat push must not create)", created)
 	}
-	if got := len(s.List("")); got != 1 {
+	if got := len(mustList(s, "")); got != 1 {
 		t.Fatalf("list = %d, want 1", got)
 	}
 	// 空 source_ref / 非法 origin 拒绝。
@@ -285,7 +285,7 @@ func TestRateLimitFoldsIntoBurstIncident(t *testing.T) {
 			t.Fatalf("process #%d: %v", i, err)
 		}
 	}
-	list := store.List("")
+	list := mustList(store, "")
 	if len(list) != 3 { // 2 独立单 + 1 聚合单
 		t.Fatalf("incidents = %d, want 3 (2 + 1 burst)", len(list))
 	}
@@ -591,5 +591,81 @@ func TestCORSOriginConfigurable(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/incidents", nil))
 	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
 		t.Fatalf("empty origin must stop emitting ACAO, got %q", got)
+	}
+}
+
+// mustList 测试辅助：List 现在返回 error（D5），出错直接失败。
+func mustList(s incident.Store, st incident.State) []incident.Incident {
+	l, err := s.List(st)
+	if err != nil {
+		panic(err)
+	}
+	return l
+}
+
+// TestIncidentsPaginationEndpoint D4：REST 层游标翻页——limit/cursor、
+// next_cursor 终止、翻页不重不漏、坏游标 400。
+func TestIncidentsPaginationEndpoint(t *testing.T) {
+	asm, h := restTest(t)
+	ids := []string{"PA", "PB", "PC", "PD", "PE"}
+	for _, id := range ids {
+		if _, err := asm.Incidents.Create(id, "p-"+id, "info", "ops"); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+	get := func(q string) (int, map[string]any) {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/incidents"+q, nil))
+		var out map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &out)
+		return rec.Code, out
+	}
+	code, p1 := get("?limit=2")
+	if code != http.StatusOK {
+		t.Fatalf("page1 code = %d", code)
+	}
+	if n, _ := p1["count"].(float64); int(n) != 2 {
+		t.Fatalf("page1 count = %v, want 2", p1["count"])
+	}
+	cursor, _ := p1["next_cursor"].(string)
+	if cursor == "" {
+		t.Fatal("page1 must carry next_cursor")
+	}
+	if st, ok := p1["stats"].(map[string]any); !ok || st["manual"].(float64) != 5 {
+		t.Fatalf("stats missing/wrong: %v", p1["stats"])
+	}
+	seen := map[string]bool{}
+	for _, v := range p1["incidents"].([]any) {
+		seen[v.(map[string]any)["id"].(string)] = true
+	}
+	pages := 1
+	for cursor != "" {
+		code, p := get("?limit=2&cursor=" + cursor)
+		if code != http.StatusOK {
+			t.Fatalf("page code = %d", code)
+		}
+		for _, v := range p["incidents"].([]any) {
+			id := v.(map[string]any)["id"].(string)
+			if seen[id] {
+				t.Fatalf("id repeated across pages: %s", id)
+			}
+			seen[id] = true
+		}
+		cursor, _ = p["next_cursor"].(string)
+		pages++
+		if pages > 10 {
+			t.Fatal("pagination did not terminate")
+		}
+	}
+	if len(seen) != 5 {
+		t.Fatalf("walked %d unique incidents, want 5", len(seen))
+	}
+	// 坏游标 → 400。
+	if code, _ := get("?cursor=!!!bad"); code != http.StatusBadRequest {
+		t.Fatalf("bad cursor code = %d, want 400", code)
+	}
+	// 非法 state → 400。
+	if code, _ := get("?state=bogus"); code != http.StatusBadRequest {
+		t.Fatalf("bad state code = %d, want 400", code)
 	}
 }

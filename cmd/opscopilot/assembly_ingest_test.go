@@ -188,7 +188,7 @@ func TestAssemblyExternalRecurrence(t *testing.T) {
 		asm.Worker.drain()
 	}
 	idsByRef := func() (ids, open []string) {
-		for _, inc := range asm.Incidents.List("") {
+		for _, inc := range mustList(asm.Incidents, "") {
 			if inc.SourceRef == ref {
 				ids = append(ids, inc.ID)
 				if inc.State == incident.StateOpen {

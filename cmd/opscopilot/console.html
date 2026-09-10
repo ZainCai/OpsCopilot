@@ -379,6 +379,9 @@ svg text { fill: var(--text); font-family: var(--font-mono); font-size: 11px; }
           <tbody id="incRows"></tbody>
         </table>
       </div>
+      <div id="incMore" style="display:none; padding:10px; text-align:center">
+        <button class="btn btn--sm" onclick="loadMoreIncidents()">加载更多</button>
+      </div>
       <div id="incDetail" class="detail" style="display:none"></div>
     </div>
   </div><!-- /view-events -->
@@ -606,8 +609,10 @@ async function showNodeDetail(key) {
 // 写路径鉴权：生产推荐反代鉴权后注入 X-OpsCopilot-Token（浏览器不持有
 // 密钥，界面自动隐藏 Token 框）；回环/联调可手输，存 sessionStorage。
 let curView = "overview";
-let incState = "active";   // active | resolved | ""
+let incState = "active";   // active | resolved | ""（服务端过滤，D4）
 let incOrigin = "";
+let incNextCursor = "";    // D4 分页游标；空 = 已到末尾
+let incStats = null;       // 服务端全量聚合（KPI 数据源，不受过滤/分页影响）
 let incCache = [];
 
 const ORIGIN_LABEL = { manual:"人工", alertmanager:"AM", webhook:"Webhook",
@@ -711,11 +716,25 @@ function disconnectStream() {
   setStreamChip("off");
 }
 
+// D4：分页 + 服务端过滤。incCache 只持有已加载的页；state/origin 过滤在
+// 服务端做（不再拉全量），"加载更多"用 nextCursor 追加下一页。
+// SSE 触发的刷新会重置回第一页——新事件总在最新一页的顶部。
+function incQueryURL(cursor) {
+  const p = new URLSearchParams();
+  if (incState) p.set("state", incState);
+  if (incOrigin) p.set("origin", incOrigin);
+  p.set("limit", "200");
+  if (cursor) p.set("cursor", cursor);
+  return "/api/v1/incidents?" + p.toString();
+}
+
 async function loadIncidents() {
   msg($("incMsg"), "loading", "加载事件…");
   try {
-    const data = await fetchJSON("/api/v1/incidents"); // 全量取回，前端按 state/origin 过滤
+    const data = await fetchJSON(incQueryURL(""));
     incCache = data.incidents || [];
+    incNextCursor = data.next_cursor || "";
+    incStats = data.stats || null;
     renderIncidentStats();
     renderIncidentTable();
     msg($("incMsg"), "", "");
@@ -727,25 +746,33 @@ async function loadIncidents() {
   }
 }
 
-function incFiltered() {
-  return incCache.filter(i => {
-    if (incOrigin && i.origin !== incOrigin) return false;
-    if (incState === "active") return i.state !== "resolved";
-    if (incState === "resolved") return i.state === "resolved";
-    return true;
-  });
+// 追加下一页（游标翻页）。
+async function loadMoreIncidents() {
+  if (!incNextCursor) return;
+  msg($("incMsg"), "loading", "加载更多…");
+  try {
+    const data = await fetchJSON(incQueryURL(incNextCursor));
+    incCache = incCache.concat(data.incidents || []);
+    incNextCursor = data.next_cursor || "";
+    renderIncidentTable();
+    msg($("incMsg"), "", "");
+  } catch (e) {
+    msg($("incMsg"), "err", "加载失败：" + e.message);
+  }
 }
 
+// 过滤已下沉到服务端（D4），前端只做展示过滤 = 原样返回。
+function incFiltered() { return incCache; }
+
 function renderIncidentStats() {
-  const act = incCache.filter(i => i.state !== "resolved").length;
-  const res = incCache.filter(i => i.state === "resolved").length;
-  const manual = incCache.filter(i => i.origin === "manual").length;
-  const ext = incCache.filter(i => i.origin && i.origin !== "manual").length;
-  $("statIncOpen").textContent = act;
-  $("statIncOpenSub").textContent = incCache.length + " 单总量";
-  $("statIncResolved").textContent = res;
-  $("statIncManual").textContent = manual;
-  $("statIncExternal").textContent = ext;
+  // KPI 来自服务端全量聚合（D4）——分页后 incCache 不再是全量，
+  // 用它算 KPI 会随"加载了多少页"漂移。
+  const st = incStats || { active: 0, resolved: 0, manual: 0, external: 0 };
+  $("statIncOpen").textContent = st.active;
+  $("statIncOpenSub").textContent = (st.active + st.resolved) + " 单总量";
+  $("statIncResolved").textContent = st.resolved;
+  $("statIncManual").textContent = st.manual;
+  $("statIncExternal").textContent = st.external;
 }
 
 function renderIncidentTable() {
@@ -764,6 +791,9 @@ function renderIncidentTable() {
     </tr>`).join("") || emptyState(
       incState === "active" ? "当前无活跃事件" : "当前过滤条件下没有事件",
       "外部告警经入队 worker 建单，或点右上角「+ 人工建单」手动录入。");
+  // 分页：还有下一页时露出"加载更多"（D4）。
+  const more = $("incMore");
+  if (more) more.style.display = incNextCursor ? "" : "none";
   $("incRows").querySelectorAll("tr.rowlink").forEach(tr => {
     tr.onclick = () => {
       $("incRows").querySelectorAll("tr").forEach(r => r.classList.remove("sel"));
@@ -908,10 +938,10 @@ $("incStateSeg").querySelectorAll(".seg-i").forEach(btn => {
     $("incStateSeg").querySelectorAll(".seg-i").forEach(b => b.classList.remove("on", "acc"));
     btn.classList.add("on", "acc");
     incState = btn.dataset.v;
-    renderIncidentTable();
+    loadIncidents(); // D4：过滤下沉服务端，改过滤要重新拉第一页
   };
 });
-$("incOriginFilter").onchange = () => { incOrigin = $("incOriginFilter").value; renderIncidentTable(); };
+$("incOriginFilter").onchange = () => { incOrigin = $("incOriginFilter").value; loadIncidents(); };
 
 // 详情面板内的动作按钮：事件委托，而非把服务端数据拼进内联 onclick 的 JS 字符串。
 // 内联 onclick 里拼字符串是 XSS 注入面（事件 id 可含引号，可闭合后注入脚本、

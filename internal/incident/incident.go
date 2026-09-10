@@ -10,6 +10,7 @@
 package incident
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"sort"
@@ -50,6 +51,9 @@ const (
 	StateAcked     State = "acked"
 	StateMitigated State = "mitigated"
 	StateResolved  State = "resolved"
+	// StateActive 过滤别名（不是真实状态）：表示"未解决"（state<>resolved）。
+	// 仅供查询过滤使用，任何事件的实际状态都不会是它。
+	StateActive State = "active"
 )
 
 // transitions 合法状态转换表（单向前进；回退走人工重开——M2 不做）。
@@ -104,6 +108,35 @@ type Incident struct {
 	AutoClosePolicy string `json:"auto_close_policy"`
 }
 
+// PageQuery 分页查询参数（D4 决策 A：游标分页，按创建时间倒序=最新优先）。
+type PageQuery struct {
+	State  State  // "" = 全部；"active" = 未解决；其余为具体状态
+	Origin string // "" = 全部；否则按 origin 精确过滤（人工/外部）
+	Limit  int    // <=0 用 PageLimitDefault；超过 PageLimitMax 截断
+	Cursor string // 上一页返回的 next_cursor；空 = 第一页
+}
+
+// 分页默认与上限（D4）。
+const (
+	PageLimitDefault = 200
+	PageLimitMax     = 1000
+)
+
+// PageStats 事件面**全量聚合**（不受分页与过滤影响）——控制台 KPI 数据源。
+type PageStats struct {
+	Active   int `json:"active"`
+	Resolved int `json:"resolved"`
+	Manual   int `json:"manual"`
+	External int `json:"external"`
+}
+
+// Page 分页结果。NextCursor 为空表示已到末尾。
+type Page struct {
+	Items      []Incident `json:"incidents"`
+	NextCursor string     `json:"next_cursor"`
+	Stats      PageStats  `json:"stats"`
+}
+
 // Store 事件存储接口（W9：内存与 TimescaleDB 双实现）。
 // 全部方法并发安全；返回值为拷贝，调用方修改不影响库内状态。
 type Store interface {
@@ -111,7 +144,11 @@ type Store interface {
 	Get(id string) (Incident, error)
 	Transition(id string, to State, actor string) (Incident, error)
 	AttachCluster(id, clusterKey string) error
-	List(state State) []Incident
+	List(state State) ([]Incident, error)
+	// ListPage 分页读取事件（D4 决策 A：游标分页，按创建时间倒序=最新优先）。
+	// 服务端做 state/origin 过滤，客户端不再拉全量；返回 next_cursor，
+	// 空串 = 已到末尾。Stats 为**全量聚合**（不受分页与过滤影响），供看板 KPI。
+	ListPage(q PageQuery) (Page, error)
 	IncidentForCluster(clusterKey string) (Incident, bool)
 	// UpsertExternal 外部链路写入（链路 A）。幂等语义（M9：复发即新建）：
 	//   - 命中未解决（open/acked/mitigated）的当前代 → 刷新（重推不新建）；
@@ -250,7 +287,7 @@ func (s *MemStore) AttachCluster(id, clusterKey string) error {
 }
 
 // List 按创建序返回全部事件（值拷贝；state 过滤，空串=全部）。
-func (s *MemStore) List(state State) []Incident {
+func (s *MemStore) List(state State) ([]Incident, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]Incident, 0, len(s.order))
@@ -261,7 +298,147 @@ func (s *MemStore) List(state State) []Incident {
 		}
 		out = append(out, *clone(inc))
 	}
-	return out
+	return out, nil
+}
+
+// ListPage 分页读取（最新优先）。MemStore 直接在内存里排序/切片。
+func (s *MemStore) ListPage(q PageQuery) (Page, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := normalizePageQuery(&q); err != nil {
+		return Page{}, err
+	}
+	limit := pageLimit(q.Limit)
+
+	var curT time.Time
+	var curID string
+	if q.Cursor != "" {
+		t, id, err := decodeCursor(q.Cursor)
+		if err != nil {
+			return Page{}, err
+		}
+		curT, curID = t, id
+	}
+
+	cands := make([]*Incident, 0, len(s.byID))
+	for _, inc := range s.byID {
+		if pageMatch(q, *inc) {
+			cands = append(cands, inc)
+		}
+	}
+	// 与 PG 同一排序契约：created_at DESC, incident_id DESC（稳定且可游标）。
+	sort.Slice(cands, func(i, j int) bool {
+		if !cands[i].CreatedAt.Equal(cands[j].CreatedAt) {
+			return cands[i].CreatedAt.After(cands[j].CreatedAt)
+		}
+		return cands[i].ID > cands[j].ID
+	})
+
+	items := make([]Incident, 0, limit+1)
+	for _, inc := range cands {
+		if q.Cursor != "" && !afterCursor(*inc, curT, curID) {
+			continue // 上一页已包含
+		}
+		items = append(items, *clone(inc))
+		if len(items) > limit {
+			break
+		}
+	}
+	next := ""
+	if len(items) > limit {
+		last := items[limit-1]
+		next = encodeCursor(last.CreatedAt, last.ID)
+		items = items[:limit]
+	}
+	return Page{Items: items, NextCursor: next, Stats: s.statsLocked()}, nil
+}
+
+// statsLocked 全量聚合（不受过滤影响）。
+func (s *MemStore) statsLocked() PageStats {
+	var st PageStats
+	for _, inc := range s.byID {
+		if inc.State == StateResolved {
+			st.Resolved++
+		} else {
+			st.Active++
+		}
+		if inc.Origin == OriginManual {
+			st.Manual++
+		} else {
+			st.External++
+		}
+	}
+	return st
+}
+
+// pageMatch 服务端过滤：state（含 "active"=未解决）与 origin。
+func pageMatch(q PageQuery, inc Incident) bool {
+	switch q.State {
+	case "":
+	case StateActive:
+		if inc.State == StateResolved {
+			return false
+		}
+	default:
+		if inc.State != q.State {
+			return false
+		}
+	}
+	if q.Origin != "" && string(inc.Origin) != q.Origin {
+		return false
+	}
+	return true
+}
+
+// normalizePageQuery 校验/归一化分页参数（两个实现共用，语义必须一致）。
+func normalizePageQuery(q *PageQuery) error {
+	switch q.State {
+	case "", StateActive, StateOpen, StateAcked, StateMitigated, StateResolved:
+	default:
+		return errors.New("incident: invalid state filter " + string(q.State))
+	}
+	return nil
+}
+
+// pageLimit 归一化 limit。
+func pageLimit(n int) int {
+	if n <= 0 {
+		return PageLimitDefault
+	}
+	if n > PageLimitMax {
+		return PageLimitMax
+	}
+	return n
+}
+
+// afterCursor 判断 inc 是否严格排在游标之后（倒序序列里"更旧"）。
+func afterCursor(inc Incident, curT time.Time, curID string) bool {
+	if inc.CreatedAt.Equal(curT) {
+		return inc.ID < curID
+	}
+	return inc.CreatedAt.Before(curT)
+}
+
+// encodeCursor/decodeCursor 游标编解码：base64url("RFC3339Nano\x1fincidentID")。
+// 不透明字符串，客户端只透传。
+func encodeCursor(at time.Time, id string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(at.Format(time.RFC3339Nano) + "\x1f" + id))
+}
+
+func decodeCursor(s string) (time.Time, string, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil {
+		return time.Time{}, "", fmt.Errorf("incident: bad cursor: %w", err)
+	}
+	i := strings.IndexByte(string(raw), 0x1f)
+	if i < 0 {
+		return time.Time{}, "", errors.New("incident: bad cursor")
+	}
+	at, err := time.Parse(time.RFC3339Nano, string(raw[:i]))
+	if err != nil {
+		return time.Time{}, "", fmt.Errorf("incident: bad cursor time: %w", err)
+	}
+	return at, string(raw[i+1:]), nil
 }
 
 // IncidentForCluster 反查簇所属事件（F-02 动线的读侧）。

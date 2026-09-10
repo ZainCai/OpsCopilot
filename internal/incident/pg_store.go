@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -245,12 +246,12 @@ UPDATE incident SET updated_at=now() WHERE id=$1`, rowID); err != nil {
 }
 
 // List 按创建序列出（state 空串=全部；含簇关联聚合）。
-func (s *PGStore) List(state State) []Incident {
+// 错误如实上抛（D5 决策 A）——DB 故障不得伪装成"空列表"。
+func (s *PGStore) List(state State) ([]Incident, error) {
 	ctx, cancel := s.ctx()
 	defer cancel()
-	// state 走绑定参数而非字符串拼接：此前是 "state = '" + string(state) + "'"，
-	// 虽然经 REST 白名单挡住，但 incident.Store 是公开接口，防线只在调用方。
-	// `$2='' OR state=$2` 一次表达"空串=全部"。
+	// state 走绑定参数（非字符串拼接）：incident.Store 是公开接口，
+	// 防线不能只靠调用方白名单。`$2='' OR state=$2` 一次表达"空串=全部"。
 	rows, err := s.pool.Query(ctx, `
 SELECT incident_id, title, severity, state, created_at, updated_at, resolved_at,
        origin, source_ref, source_meta, created_by, merged_into, auto_close_policy
@@ -258,7 +259,7 @@ FROM incident
 WHERE tenant_id=$1 AND ($2 = '' OR state = $2)
 ORDER BY created_at`, s.tenantID, string(state))
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("incident pg: list: %w", err)
 	}
 	defer rows.Close()
 	out := []Incident{}
@@ -268,14 +269,90 @@ ORDER BY created_at`, s.tenantID, string(state))
 			&inc.CreatedAt, &inc.UpdatedAt, &nullTime{t: &inc.ResolvedAt},
 			&inc.Origin, &inc.SourceRef, &inc.SourceMeta, &inc.CreatedBy,
 			&inc.MergedInto, &inc.AutoClosePolicy); err != nil {
-			return out
+			return nil, fmt.Errorf("incident pg: list scan: %w", err)
 		}
 		out = append(out, inc)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("incident pg: list rows: %w", err)
 	}
 	// 簇关联批量聚合（一条 ANY(...) 查询取全，见 fillClusters——早期误写成
 	// 逐事件一查的 N+1，已修）。
 	s.fillClusters(ctx, out)
-	return out
+	return out, nil
+}
+
+// ListPage 分页读取（D4 决策 A：游标分页，最新优先；服务端过滤 state/origin）。
+// 游标 = 上一页最后一行的 (created_at, incident_id)，行值比较一次定位，
+// 无 OFFSET 的"翻深页越翻越慢"问题。Stats 为全量聚合（不受过滤影响）。
+func (s *PGStore) ListPage(q PageQuery) (Page, error) {
+	ctx, cancel := s.ctx()
+	defer cancel()
+	if err := normalizePageQuery(&q); err != nil {
+		return Page{}, err
+	}
+	limit := pageLimit(q.Limit)
+
+	// 全量聚合（KPI 数据源）：一条带 FILTER 的聚合，代价可忽略。
+	var st PageStats
+	if err := s.pool.QueryRow(ctx, `
+SELECT count(*) FILTER (WHERE state <> 'resolved'),
+       count(*) FILTER (WHERE state = 'resolved'),
+       count(*) FILTER (WHERE origin = 'manual'),
+       count(*) FILTER (WHERE origin <> 'manual')
+FROM incident WHERE tenant_id=$1`, s.tenantID).Scan(
+		&st.Active, &st.Resolved, &st.Manual, &st.External); err != nil {
+		return Page{}, fmt.Errorf("incident pg: page stats: %w", err)
+	}
+
+	args := []any{s.tenantID, string(q.State), q.Origin}
+	cond := ""
+	if q.Cursor != "" {
+		at, id, err := decodeCursor(q.Cursor)
+		if err != nil {
+			return Page{}, err
+		}
+		args = append(args, at, id)
+		cond = fmt.Sprintf(" AND (created_at, incident_id) < ($%d, $%d)", len(args)-1, len(args))
+	}
+	args = append(args, limit+1) // 多取一行判断是否还有下一页
+	rows, err := s.pool.Query(ctx, `
+SELECT incident_id, title, severity, state, created_at, updated_at, resolved_at,
+       origin, source_ref, source_meta, created_by, merged_into, auto_close_policy
+FROM incident
+WHERE tenant_id=$1
+  AND ($2 = '' OR ($2 = 'active' AND state <> 'resolved') OR state = $2)
+  AND ($3 = '' OR origin = $3)`+cond+`
+ORDER BY created_at DESC, incident_id DESC
+LIMIT $`+strconv.Itoa(len(args)), args...)
+	if err != nil {
+		return Page{}, fmt.Errorf("incident pg: page query: %w", err)
+	}
+	defer rows.Close()
+
+	items := []Incident{}
+	for rows.Next() {
+		var inc Incident
+		if err := rows.Scan(&inc.ID, &inc.Title, &inc.Severity, &inc.State,
+			&inc.CreatedAt, &inc.UpdatedAt, &nullTime{t: &inc.ResolvedAt},
+			&inc.Origin, &inc.SourceRef, &inc.SourceMeta, &inc.CreatedBy,
+			&inc.MergedInto, &inc.AutoClosePolicy); err != nil {
+			return Page{}, fmt.Errorf("incident pg: page scan: %w", err)
+		}
+		items = append(items, inc)
+	}
+	if err := rows.Err(); err != nil {
+		return Page{}, fmt.Errorf("incident pg: page rows: %w", err)
+	}
+	s.fillClusters(ctx, items)
+
+	next := ""
+	if len(items) > limit {
+		last := items[limit-1]
+		next = encodeCursor(last.CreatedAt, last.ID)
+		items = items[:limit]
+	}
+	return Page{Items: items, NextCursor: next, Stats: st}, nil
 }
 
 // IncidentForCluster 反查簇所属事件。

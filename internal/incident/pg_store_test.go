@@ -76,7 +76,7 @@ func TestPGStoreRoundTrip(t *testing.T) {
 		t.Fatal("resolved -> acked accepted")
 	}
 	// List 过滤。
-	if list := s.List(StateResolved); len(list) == 0 {
+	if list := mustList(s, StateResolved); len(list) == 0 {
 		t.Fatal("resolved list empty")
 	}
 	if s.Persistence() != "timescaledb" {
@@ -145,7 +145,7 @@ func TestPGStoreListFillClustersBatched(t *testing.T) {
 	}
 
 	byID := map[string][]string{}
-	for _, inc := range s.List("") {
+	for _, inc := range mustList(s, "") {
 		byID[inc.ID] = inc.ClusterKeys
 	}
 	if got := byID[idA]; len(got) != 1 || got[0] != ckA {
@@ -187,15 +187,15 @@ func TestPGStoreListStateFilterSemantics(t *testing.T) {
 		}
 		return false
 	}
-	open := s.List(StateOpen)
+	open := mustList(s, StateOpen)
 	if !has(open, openID) || has(open, doneID) {
 		t.Fatalf("StateOpen filter wrong (open=%v resolved=%v)", has(open, openID), has(open, doneID))
 	}
-	res := s.List(StateResolved)
+	res := mustList(s, StateResolved)
 	if !has(res, doneID) || has(res, openID) {
 		t.Fatalf("StateResolved filter wrong")
 	}
-	all := s.List("")
+	all := mustList(s, "")
 	if !has(all, openID) || !has(all, doneID) {
 		t.Fatal("empty state must mean ALL")
 	}

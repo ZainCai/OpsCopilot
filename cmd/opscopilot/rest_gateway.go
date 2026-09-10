@@ -404,7 +404,14 @@ func (g *RESTGateway) handleDuplicates(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 候选集：全部未解决事件（M2 规模下够用；量大时改按时间窗裁剪）。
-	cands := incident.SimilarCandidates(target, g.incidents.List(""), dedupWindow)
+	all, err := g.incidents.List("")
+	if err != nil {
+		// D5 决策 A：List 现在带 error，DB 故障必须如实暴露（500），
+		// 不能再伪装成"没有候选"。
+		writeErr(w, http.StatusInternalServerError, "list incidents: "+err.Error())
+		return
+	}
+	cands := incident.SimilarCandidates(target, all, dedupWindow)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"incident_id": id, "candidates": cands, "count": len(cands),
 		"auto_merge": false, // 契约声明：本系统永不自动合并
@@ -617,22 +624,59 @@ func (g *RESTGateway) handleAudit(w http.ResponseWriter, r *http.Request) {
 
 // handleIncidents GET /api/v1/incidents?state=open|acked|mitigated|resolved
 // （M2 主干：内存 Store，DB 后端 W9）。
+// handleIncidents GET /api/v1/incidents —— 事件列表（D4 决策 A：游标分页）。
+//
+// 参数：state（""|active|open|acked|mitigated|resolved）、origin（精确过滤）、
+// limit（默认 200，上限 1000）、cursor（上一页返回的 next_cursor）。
+// 响应：{"incidents":[...], "count":N, "next_cursor":"", "stats":{...},
+//
+//	"persistence":"..."}；next_cursor 为空 = 已到末尾。
+//
+// 排序固定 created_at DESC（最新优先）。Stats 为全量聚合，供看板 KPI。
 func (g *RESTGateway) handleIncidents(w http.ResponseWriter, r *http.Request) {
 	if g.incidents == nil {
 		writeErr(w, http.StatusServiceUnavailable, "incident store not wired")
 		return
 	}
-	state := incident.State(r.URL.Query().Get("state"))
+	q := r.URL.Query()
+	state := incident.State(q.Get("state"))
 	switch state {
-	case "", incident.StateOpen, incident.StateAcked, incident.StateMitigated, incident.StateResolved:
+	case "", incident.StateActive, incident.StateOpen, incident.StateAcked,
+		incident.StateMitigated, incident.StateResolved:
 	default:
 		writeErr(w, http.StatusBadRequest, "invalid state filter")
 		return
 	}
-	list := g.incidents.List(state)
+	limit := 0
+	if raw := q.Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			writeErr(w, http.StatusBadRequest, "limit must be a non-negative integer")
+			return
+		}
+		limit = n
+	}
+	page, err := g.incidents.ListPage(incident.PageQuery{
+		State:  state,
+		Origin: q.Get("origin"),
+		Limit:  limit,
+		Cursor: q.Get("cursor"),
+	})
+	if err != nil {
+		// 游标损坏 / state 非法 / DB 故障：前两者是客户端错，DB 故障是服务端错。
+		// 简化：游标/参数类错误由 Store 以 "bad cursor"/"invalid state" 前缀给出。
+		msg := err.Error()
+		code := http.StatusInternalServerError
+		if strings.Contains(msg, "bad cursor") || strings.Contains(msg, "invalid state") {
+			code = http.StatusBadRequest
+		}
+		writeErr(w, code, msg)
+		return
+	}
 	// R6-4：内存态重启即丢——把落库形态透出给消费者。
 	writeJSON(w, http.StatusOK, map[string]any{
-		"incidents": list, "count": len(list),
+		"incidents": page.Items, "count": len(page.Items),
+		"next_cursor": page.NextCursor, "stats": page.Stats,
 		"persistence": g.incidents.Persistence(),
 	})
 }

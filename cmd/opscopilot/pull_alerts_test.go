@@ -204,7 +204,7 @@ func TestIngestWorkerHandlesPrometheusOrigin(t *testing.T) {
 	if err := w.process(it); err != nil {
 		t.Fatalf("process: %v", err)
 	}
-	got := store.List("")
+	got := mustList(store, "")
 	if len(got) != 1 {
 		t.Fatalf("incidents=%d, want 1", len(got))
 	}
@@ -218,7 +218,7 @@ func TestIngestWorkerHandlesPrometheusOrigin(t *testing.T) {
 	if err := w.process(it); err != nil {
 		t.Fatalf("reprocess: %v", err)
 	}
-	if n := len(store.List("")); n != 1 {
+	if n := len(mustList(store, "")); n != 1 {
 		t.Fatalf("after reprocess incidents=%d, want 1 (idempotent)", n)
 	}
 	if entries := audit.List(got[0].ID); len(entries) == 0 {

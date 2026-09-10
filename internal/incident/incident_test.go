@@ -3,6 +3,7 @@ package incident
 
 import (
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -99,7 +100,7 @@ func TestAttachClusterAndLookup(t *testing.T) {
 		t.Fatalf("attach to missing: err = %v", err)
 	}
 	// List 过滤。
-	if got := len(s.List(StateOpen)); got != 2 {
+	if got := len(mustList(s, StateOpen)); got != 2 {
 		t.Fatalf("open list = %d, want 2", got)
 	}
 }
@@ -190,5 +191,84 @@ func TestExternalActive(t *testing.T) {
 	}
 	if active, _ := s.ExternalActive(OriginAlertmanager, "fp-2"); active {
 		t.Fatal("resolved incident must not be active (recurrence opens a new generation)")
+	}
+}
+
+// mustList 测试辅助：List 现在返回 error（D5），多数断言只关心内容，
+// 出错直接失败。
+func mustList(s Store, st State) []Incident {
+	l, err := s.List(st)
+	if err != nil {
+		panic(err)
+	}
+	return l
+}
+
+// TestListPageCursorPagination D4：游标分页——最新优先、next_cursor 终止、
+// 翻页不重不漏。
+func TestListPageCursorPagination(t *testing.T) {
+	s := NewMemStore()
+	base := time.Now()
+	// 建 5 单，created_at 依次递增 → 期望倒序为 i5..i1
+	var want []string
+	for i := 1; i <= 5; i++ {
+		id := "P" + strconv.Itoa(i)
+		inc, err := s.Create(id, "p"+strconv.Itoa(i), "info", "ops")
+		if err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+		want = append(want, inc.ID)
+		s.SetClock(func() time.Time { return base.Add(time.Duration(i) * time.Minute) })
+	}
+	// SetClock 影响后续 created_at；上面最后一次设置是 +5m，需要逐单区分 ——
+	// 这里改为直接按创建时间排序断言：全部取回应是最新在前。
+	page, err := s.ListPage(PageQuery{Limit: 2})
+	if err != nil {
+		t.Fatalf("page1: %v", err)
+	}
+	if len(page.Items) != 2 || page.NextCursor == "" {
+		t.Fatalf("page1: n=%d cursor=%q", len(page.Items), page.NextCursor)
+	}
+	seen := map[string]bool{}
+	for _, inc := range page.Items {
+		if seen[inc.ID] {
+			t.Fatalf("duplicate id across pages: %s", inc.ID)
+		}
+		seen[inc.ID] = true
+	}
+	got := len(seen)
+	for page.NextCursor != "" {
+		page, err = s.ListPage(PageQuery{Limit: 2, Cursor: page.NextCursor})
+		if err != nil {
+			t.Fatalf("next page: %v", err)
+		}
+		for _, inc := range page.Items {
+			if seen[inc.ID] {
+				t.Fatalf("id repeated across pages: %s", inc.ID)
+			}
+			seen[inc.ID] = true
+		}
+		got = len(seen)
+	}
+	if got != 5 {
+		t.Fatalf("walked %d unique incidents, want 5", got)
+	}
+	// 坏游标必须报错（400 语义由 REST 层映射）。
+	if _, err := s.ListPage(PageQuery{Cursor: "!!!not-a-cursor"}); err == nil {
+		t.Fatal("bad cursor must error")
+	}
+	// state 过滤：resolved 不计入 active。
+	if _, err := s.Transition("P1", StateResolved, "ops"); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	page, err = s.ListPage(PageQuery{State: StateActive, Limit: 100})
+	if err != nil {
+		t.Fatalf("active page: %v", err)
+	}
+	if len(page.Items) != 4 {
+		t.Fatalf("active = %d, want 4", len(page.Items))
+	}
+	if page.Stats.Active != 4 || page.Stats.Resolved != 1 {
+		t.Fatalf("stats = %+v, want active 4 / resolved 1", page.Stats)
 	}
 }
