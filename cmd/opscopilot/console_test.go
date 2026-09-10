@@ -35,9 +35,18 @@ func TestConsoleServed(t *testing.T) {
 		"api/v1/incidents", "view-events", "originBadge", "/transition", "/merge",
 		// W11 实时推送：SSE 终结端 + 前端订阅 + 降级轮询。
 		"api/v1/events/stream", "EventSource", "streamChip", "sseLive",
+		// 安全：动作按钮走 data-* + 事件委托；esc 覆盖单引号。
+		`data-act="transition"`, `data-act="merge"`, "&#39;",
 	} {
 		if !strings.Contains(body, marker) {
 			t.Fatalf("console.html missing marker %q", marker)
+		}
+	}
+	// XSS 回归门禁：禁止把服务端数据拼进内联 onclick 的 JS 字符串
+	// （事件 id 可含引号，闭合后即可注入脚本、窃取会话写 Token）。
+	for _, bad := range []string{`onclick="doTransition(`, `onclick="doMerge(`} {
+		if strings.Contains(body, bad) {
+			t.Fatalf("console.html must not inline server data into onclick (%q)", bad)
 		}
 	}
 }

@@ -387,7 +387,7 @@ svg text { fill: var(--text); font-family: var(--font-mono); font-size: 11px; }
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 // 原型 SevBadge/StChip 形态：底纹 + 同色文字。
 const sevPill = (s) => `<span class="sev sev--${esc(s||"info")}">${esc((s||"-").toUpperCase())}</span>`;
 const statePill = (s) => `<span class="chip chip--${esc(s)}">${esc(s)}</span>`;
@@ -791,7 +791,7 @@ async function showIncidentDetail(id) {
     // 操作闭环：仅展示状态机允许的转移（R2 由后端状态机保证）。
     const nexts = NEXT_STATES[inc.state] || [];
     html += `<div class="acts">` + (nexts.length
-      ? nexts.map(to => `<button class="btn btn--sm${to === "resolved" ? " btn--acc" : ""}" onclick="doTransition('${esc(id)}','${to}')">${esc(STATE_VERB[to])}</button>`).join("")
+      ? nexts.map(to => `<button class="btn btn--sm${to === "resolved" ? " btn--acc" : ""}" data-act="transition" data-id="${esc(id)}" data-to="${esc(to)}">${esc(STATE_VERB[to])}</button>`).join("")
       : `<span class="panel-sub">已解决，无可用操作</span>`) + `</div>`;
 
     // L2 疑似重复：只提示，合并动作由人点按钮触发（绝不自动合并）。
@@ -804,8 +804,8 @@ async function showIncidentDetail(id) {
           <span>${esc(c.title)}</span>
           <span class="why">${esc((c.reasons || []).join(" / "))}</span>
           <span style="margin-left:auto;display:flex;gap:6px">
-            <button class="btn btn--sm" onclick="doMerge('${esc(id)}','${esc(c.incident_id)}')" title="把本单并入该候选">并入它</button>
-            <button class="btn btn--sm" onclick="doMerge('${esc(c.incident_id)}','${esc(id)}')" title="把该候选并入本单">并来本单</button>
+            <button class="btn btn--sm" data-act="merge" data-id="${esc(id)}" data-target="${esc(c.incident_id)}" title="把本单并入该候选">并入它</button>
+            <button class="btn btn--sm" data-act="merge" data-id="${esc(c.incident_id)}" data-target="${esc(id)}" title="把该候选并入本单">并来本单</button>
           </span>
         </div>`).join("") : `<div class="faint">无相似候选</div>`) + `</div>`;
 
@@ -897,6 +897,17 @@ $("incStateSeg").querySelectorAll(".seg-i").forEach(btn => {
   };
 });
 $("incOriginFilter").onchange = () => { incOrigin = $("incOriginFilter").value; renderIncidentTable(); };
+
+// 详情面板内的动作按钮：事件委托，而非把服务端数据拼进内联 onclick 的 JS 字符串。
+// 内联 onclick 里拼字符串是 XSS 注入面（事件 id 可含引号，可闭合后注入脚本、
+// 进而读取 sessionStorage 里的写 Token）；data-* 只承载文本且经 esc 转义。
+$("incDetail").addEventListener("click", (ev) => {
+  const btn = ev.target.closest ? ev.target.closest("button[data-act]") : null;
+  if (!btn) return;
+  const act = btn.dataset.act, id = btn.dataset.id;
+  if (act === "transition") doTransition(id, btn.dataset.to);
+  else if (act === "merge") doMerge(id, btn.dataset.target);
+});
 $("tokenInput").value = getToken();
 $("tokenInput").oninput = () => setToken($("tokenInput").value.trim());
 probeAuth(); // 反代注入 / 未鉴权 → 自动隐藏输入框
