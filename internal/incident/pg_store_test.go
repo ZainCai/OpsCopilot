@@ -38,10 +38,10 @@ func TestPGStoreRoundTrip(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	// 创建 → 重复 ID 拒绝。
-	if _, err := s.Create(id, "pg roundtrip", "critical"); err != nil {
+	if _, err := s.Create(id, "pg roundtrip", "critical", "ops"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := s.Create(id, "dup", "critical"); err == nil {
+	if _, err := s.Create(id, "dup", "critical", "ops"); err == nil {
 		t.Fatal("duplicate id accepted")
 	}
 	// 关联（幂等）。
@@ -98,10 +98,10 @@ func TestPGStoreClusterOwnership(t *testing.T) {
 	}
 	cleanup()
 	t.Cleanup(cleanup)
-	if _, err := s.Create(idA, "a", "critical"); err != nil {
+	if _, err := s.Create(idA, "a", "critical", "ops"); err != nil {
 		t.Fatalf("create a: %v", err)
 	}
-	if _, err := s.Create(idB, "b", "warning"); err != nil {
+	if _, err := s.Create(idB, "b", "warning", "ops"); err != nil {
 		t.Fatalf("create b: %v", err)
 	}
 	if err := s.AttachCluster(idA, ck); err != nil {

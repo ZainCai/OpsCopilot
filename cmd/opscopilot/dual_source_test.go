@@ -48,7 +48,7 @@ func TestExternalUpsertIdempotent(t *testing.T) {
 // TestManualIncidentAttributes 人工单来源属性（链路 B）。
 func TestManualIncidentAttributes(t *testing.T) {
 	s := incident.NewMemStore()
-	inc, err := s.Create("INC-M1", "manual ticket", "warning")
+	inc, err := s.Create("INC-M1", "manual ticket", "warning", "ops")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -58,15 +58,19 @@ func TestManualIncidentAttributes(t *testing.T) {
 	if inc.AutoClosePolicy != "manual_only" {
 		t.Fatalf("auto_close_policy = %s, want manual_only (R2)", inc.AutoClosePolicy)
 	}
+	// 建单人是审计字段，必须真的落库（此前 Create 丢弃了它）。
+	if inc.CreatedBy != "ops" {
+		t.Fatalf("created_by = %q, want ops (must persist)", inc.CreatedBy)
+	}
 }
 
 // TestMergeInto 人工合并（L2 由人触发）：源单关闭 + merged_into + 簇转移。
 func TestMergeInto(t *testing.T) {
 	s := incident.NewMemStore()
-	if _, err := s.Create("A", "a", "critical"); err != nil {
+	if _, err := s.Create("A", "a", "critical", "ops"); err != nil {
 		t.Fatalf("create A: %v", err)
 	}
-	if _, err := s.Create("B", "b", "warning"); err != nil {
+	if _, err := s.Create("B", "b", "warning", "ops"); err != nil {
 		t.Fatalf("create B: %v", err)
 	}
 	if err := s.AttachCluster("B", "c:x@1"); err != nil {
@@ -197,10 +201,10 @@ func (f *fakeQueue) Enqueue(origin incident.Origin, sourceRef, payload string) (
 // auto_merge=false，且被提示的事件状态不变（绝不自动合并）。
 func TestDuplicatesEndpointOnlySuggests(t *testing.T) {
 	asm, h := restTest(t)
-	if _, err := asm.Incidents.Create("INC-D1", "disk full on n1", "critical"); err != nil {
+	if _, err := asm.Incidents.Create("INC-D1", "disk full on n1", "critical", "ops"); err != nil {
 		t.Fatalf("create D1: %v", err)
 	}
-	if _, err := asm.Incidents.Create("INC-D2", "disk full on n1", "critical"); err != nil {
+	if _, err := asm.Incidents.Create("INC-D2", "disk full on n1", "critical", "ops"); err != nil {
 		t.Fatalf("create D2: %v", err)
 	}
 	code, body := getJSON(t, h, "/api/v1/incidents/INC-D1/duplicates")
@@ -229,10 +233,10 @@ func TestDuplicatesEndpointOnlySuggests(t *testing.T) {
 func TestMergeEndpointRequiresAuthAndAudits(t *testing.T) {
 	asm, h := restTest(t)
 	asm.REST.SetAudit(NewMemAuditLog())
-	if _, err := asm.Incidents.Create("M1", "a", "warning"); err != nil {
+	if _, err := asm.Incidents.Create("M1", "a", "warning", "ops"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := asm.Incidents.Create("M2", "b", "warning"); err != nil {
+	if _, err := asm.Incidents.Create("M2", "b", "warning", "ops"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	body := `{"target_id":"M1","actor":"ops"}`
@@ -321,5 +325,114 @@ func TestGenericWebhookOrigin(t *testing.T) {
 	}
 	if q.lastOrigin != incident.OriginWebhook {
 		t.Fatalf("origin = %q, want webhook", q.lastOrigin)
+	}
+}
+
+// TestTransitionEndpoint 事件状态流转端点（控制台事件页操作闭环）：
+// 鉴权必过 / actor 必填（审计）/ R2 由状态机兜底（ack → manual_only）/
+// 非法转移拒绝。
+func TestTransitionEndpoint(t *testing.T) {
+	asm, h := restTest(t)
+	asm.REST.SetAudit(NewMemAuditLog())
+	if _, err := asm.Incidents.Create("T1", "n2 cpu saturated", "critical", "ops"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	asm.REST.token = "tk"
+	post := func(body string, withToken bool) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/incidents/T1/transition", strings.NewReader(body))
+		if withToken {
+			req.Header.Set(AuthHeader, "tk")
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	// 无 Token → 401。
+	if rec := post(`{"to":"acked","actor":"ops"}`, false); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("no token: code = %d, want 401", rec.Code)
+	}
+	// 缺 actor → 400（审计要求）。
+	if rec := post(`{"to":"acked"}`, true); rec.Code != http.StatusBadRequest {
+		t.Fatalf("no actor: code = %d, want 400", rec.Code)
+	}
+	// 非法目标态 → 400。
+	if rec := post(`{"to":"open","actor":"ops"}`, true); rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid to: code = %d, want 400", rec.Code)
+	}
+	// 合法：open → acked。
+	rec := post(`{"to":"acked","actor":"ops"}`, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ack: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	inc, err := asm.Incidents.Get("T1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if inc.State != incident.StateAcked {
+		t.Fatalf("state = %s, want acked", inc.State)
+	}
+	// R2：人工确认后自动转 manual_only（由状态机保证，不靠调用方）。
+	if inc.AutoClosePolicy != "manual_only" {
+		t.Fatalf("auto_close_policy = %s, want manual_only (R2)", inc.AutoClosePolicy)
+	}
+	// 审计留痕。
+	entries := asm.REST.audit.List("T1")
+	if len(entries) != 1 || entries[0].Action != AuditTransition || entries[0].Actor != "ops" {
+		t.Fatalf("audit = %+v, want 1 transition entry by ops", entries)
+	}
+	// 非法转移：acked → open 状态机拒绝 → 400。
+	if rec := post(`{"to":"acked","actor":"ops"}`, true); rec.Code != http.StatusBadRequest {
+		t.Fatalf("acked->acked: code = %d, want 400", rec.Code)
+	}
+}
+
+// TestManualCreatePersistsActorAndIngestFallback
+//  1. REST 人工建单把 created_by 落库（审计字段不再被丢弃）；
+//  2. 无 DB 队列时外部导入端点显式 503（可诊断，不是 404）。
+func TestManualCreatePersistsActorAndIngestFallback(t *testing.T) {
+	t.Setenv("OPS_DB_DSN", "") // 确定性：无 DB → 内存 store + 入队端点 503
+	asm, err := NewAssembly(newQuietLogger(), "")
+	if err != nil {
+		t.Fatalf("assembly: %v", err)
+	}
+	h := asm.Handler()
+	asm.REST.token = "tk"
+
+	body := `{"id":"MC-1","title":"manual via rest","severity":"warning","created_by":"zhangsan"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/incidents", strings.NewReader(body))
+	req.Header.Set(AuthHeader, "tk")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	inc, err := asm.Incidents.Get("MC-1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if inc.CreatedBy != "zhangsan" {
+		t.Fatalf("created_by = %q, want zhangsan (persisted)", inc.CreatedBy)
+	}
+	// 人工建单留痕（create 审计，与外部单 worker 侧对齐）。
+	audited := false
+	for _, e := range asm.audit.List("MC-1") {
+		if e.Action == AuditCreate && e.Actor == "zhangsan" {
+			audited = true
+		}
+	}
+	if !audited {
+		t.Fatal("manual create not audited (create entry missing)")
+	}
+
+	// 无 DB：入队端点显式 503（配置缺失一眼可诊断）。
+	ireq := httptest.NewRequest(http.MethodPost, "/api/v1/ingest/alertmanager", strings.NewReader(`{"alerts":[]}`))
+	ireq.Header.Set(AuthHeader, "tk")
+	irec := httptest.NewRecorder()
+	h.ServeHTTP(irec, ireq)
+	if irec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("ingest without DB: code = %d, want 503 (not 404)", irec.Code)
+	}
+	if asm.Ingest != nil || asm.Worker != nil {
+		t.Fatal("ingest should be unwired without DB")
 	}
 }

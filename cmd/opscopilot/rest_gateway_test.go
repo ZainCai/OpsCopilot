@@ -218,7 +218,7 @@ func TestRESTClustersLimit(t *testing.T) {
 // TestRESTIncidentsEndpoint M2 主干：事件列表/详情/过滤/未知路由。
 func TestRESTIncidentsEndpoint(t *testing.T) {
 	asm, h := restTest(t)
-	if _, err := asm.Incidents.Create("INC-9001", "磁盘满", "critical"); err != nil {
+	if _, err := asm.Incidents.Create("INC-9001", "磁盘满", "critical", "ops"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	// 列表。

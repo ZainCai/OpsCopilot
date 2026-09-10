@@ -21,7 +21,11 @@ func TestConsoleServed(t *testing.T) {
 		t.Fatalf("content-type = %q, want text/html", ct)
 	}
 	body := rec.Body.String()
-	for _, marker := range []string{"OpsCopilot 控制台", "api/v1/clusters", "api/v1/topology", "AGG_THRESHOLD"} {
+	for _, marker := range []string{
+		"OpsCopilot 控制台", "api/v1/clusters", "api/v1/topology", "AGG_THRESHOLD",
+		// W9 双链路事件页：来源徽标 + 事件 API + 写操作端点。
+		"api/v1/incidents", "view-events", "originBadge", "/transition", "/merge",
+	} {
 		if !strings.Contains(body, marker) {
 			t.Fatalf("console.html missing marker %q", marker)
 		}

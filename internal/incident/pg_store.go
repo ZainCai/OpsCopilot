@@ -30,9 +30,19 @@ func NewPGStore(ctx context.Context, dsn, tenantID string) (*PGStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("incident pg: %w", err)
 	}
+	s, err := NewPGStoreWithPool(ctx, pool, tenantID)
+	if err != nil {
+		pool.Close() // 构造失败由本函数负责释放自己建的池
+		return nil, err
+	}
+	return s, nil
+}
+
+// NewPGStoreWithPool 用调用方提供的连接池构造（装配期共享池：事件 Store、
+// 导入队列、审计共用一条池，避免多池各占连接）。池的生命周期归调用方。
+func NewPGStoreWithPool(ctx context.Context, pool *pgxpool.Pool, tenantID string) (*PGStore, error) {
 	s := &PGStore{pool: pool, tenantID: tenantID}
 	if err := s.ensureTenant(ctx); err != nil {
-		pool.Close()
 		return nil, err
 	}
 	return s, nil
@@ -60,7 +70,7 @@ func (s *PGStore) ctx() (context.Context, context.CancelFunc) {
 
 // Create 新建事件（UNIQUE(tenant_id, incident_id) 冲突 → 报错，与 MemStore
 // 重复 ID 语义一致）。初始状态恒 open（DB 默认值保证，不信任调用方）。
-func (s *PGStore) Create(id, title, severity string) (*Incident, error) {
+func (s *PGStore) Create(id, title, severity, createdBy string) (*Incident, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return nil, errors.New("incident: id is required")
@@ -75,11 +85,11 @@ func (s *PGStore) Create(id, title, severity string) (*Incident, error) {
 	defer cancel()
 	var inc Incident
 	err := s.pool.QueryRow(ctx, `
-INSERT INTO incident (tenant_id, incident_id, title, severity, state, origin, auto_close_policy)
-VALUES ($1, $2, $3, NULLIF($4,''), 'open', 'manual', 'manual_only')
+INSERT INTO incident (tenant_id, incident_id, title, severity, state, origin, created_by, auto_close_policy)
+VALUES ($1, $2, $3, NULLIF($4,''), 'open', 'manual', NULLIF($5,''), 'manual_only')
 RETURNING incident_id, title, severity, state, created_at, updated_at, resolved_at,
           origin, source_ref, source_meta, created_by, merged_into, auto_close_policy`,
-		s.tenantID, id, title, severity).Scan(
+		s.tenantID, id, title, severity, createdBy).Scan(
 		&inc.ID, &inc.Title, &inc.Severity, &inc.State, &inc.CreatedAt, &inc.UpdatedAt,
 		&nullTime{t: &inc.ResolvedAt}, &inc.Origin, &inc.SourceRef, &inc.SourceMeta,
 		&inc.CreatedBy, &inc.MergedInto, &inc.AutoClosePolicy)

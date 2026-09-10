@@ -77,6 +77,7 @@ func (g *RESTGateway) Register(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/incidents/{id}/duplicates", h)
 	mux.Handle("GET /api/v1/incidents/{id}/audit", h)
 	mux.HandleFunc("POST /api/v1/incidents/{id}/merge", g.handleMergeIncident)
+	mux.HandleFunc("POST /api/v1/incidents/{id}/transition", g.handleTransitionIncident)
 }
 
 // route 按 path 分发（CORS 包装层之下）。
@@ -287,10 +288,16 @@ func (g *RESTGateway) handleCreateIncident(w http.ResponseWriter, r *http.Reques
 	if id == "" {
 		id = "INC-" + time.Now().Format("20060102-150405.000")
 	}
-	inc, err := g.incidents.Create(id, in.Title, in.Severity)
+	inc, err := g.incidents.Create(id, in.Title, in.Severity, in.CreatedBy)
 	if err != nil {
 		writeErr(w, http.StatusConflict, err.Error())
 		return
+	}
+	// 人工建单也留痕（与外部单的 worker create 审计对齐——审计轨迹不能只有
+	// 自动动作，"这单是谁建的"必须可查）。
+	if g.audit != nil {
+		g.audit.Append(AuditEntry{IncidentID: inc.ID, Action: AuditCreate, Actor: in.CreatedBy,
+			Detail: map[string]any{"origin": string(inc.Origin), "title": inc.Title}})
 	}
 	writeJSON(w, http.StatusCreated, inc)
 }
@@ -358,6 +365,60 @@ func (g *RESTGateway) handleMergeIncident(w http.ResponseWriter, r *http.Request
 			Detail: map[string]any{"merged_into": in.TargetID}})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"merged": srcID, "into": in.TargetID})
+}
+
+// handleTransitionIncident POST /api/v1/incidents/{id}/transition —— 事件状态流转
+// （ack/mitigate/resolve）。写路径鉴权必过、actor 必填（审计）。
+//
+// R2 由状态机兜底：转 acked 会自动置 auto_close_policy=manual_only（人工接手后
+// 外部恢复不得自动关单）——端点不重复做这个判断，避免两处口径漂移。
+func (g *RESTGateway) handleTransitionIncident(w http.ResponseWriter, r *http.Request) {
+	if !authorized(r.Header.Get(AuthHeader), g.token) {
+		writeErr(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if g.incidents == nil {
+		writeErr(w, http.StatusServiceUnavailable, "incident store not wired")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, incidentBodyLimit)
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeErr(w, http.StatusRequestEntityTooLarge, "body too large")
+		return
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var in struct {
+		To    string `json:"to"`
+		Actor string `json:"actor"`
+	}
+	if err := dec.Decode(&in); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid body: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(in.Actor) == "" {
+		writeErr(w, http.StatusBadRequest, "actor is required (audit)")
+		return
+	}
+	to := incident.State(strings.TrimSpace(in.To))
+	switch to {
+	case incident.StateAcked, incident.StateMitigated, incident.StateResolved:
+	default:
+		writeErr(w, http.StatusBadRequest, "to must be one of acked|mitigated|resolved")
+		return
+	}
+	id := r.PathValue("id")
+	inc, err := g.incidents.Transition(id, to, in.Actor)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if g.audit != nil {
+		g.audit.Append(AuditEntry{IncidentID: id, Action: AuditTransition, Actor: in.Actor,
+			Detail: map[string]any{"to": string(to)}})
+	}
+	writeJSON(w, http.StatusOK, inc)
 }
 
 // handleAudit GET /api/v1/incidents/{id}/audit —— 单条事件的审计轨迹。

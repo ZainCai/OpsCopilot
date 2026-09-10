@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -124,6 +125,12 @@ func main() {
 		}
 	}()
 
+	// W9 链路 A：外部导入队列消费者。autoCreate off（影子期默认）时 Run 立即
+	// 返回——消息只堆积不建单，转正后开启即可回放历史消息。
+	if asm.Worker != nil {
+		go asm.Worker.Run(runCtx)
+	}
+
 	// credential 周期清扫（C9 收尾）：过期条目不再是"删除前一直占内存"。
 	// 周期 10 分钟——清扫是幂等原语，频率只需远小于凭证最小有效期。
 	go func() {
@@ -158,6 +165,7 @@ func main() {
 		if noiseRDB != nil {
 			_ = noiseRDB.Close() // 第四轮扫描 F4：落库连接随停机关闭
 		}
+		asm.Close() // 释放事件 Store/队列/审计共享的连接池
 		close(done)
 	}()
 
@@ -175,7 +183,14 @@ func main() {
 	} else {
 		logger.Printf("  noise: shadow mode ON (alerts annotated, NOT suppressed; window %s)", noiseWindowForLog())
 	}
-	logger.Printf("  not wired (W5+): 控制台视图, sessionstore, /metrics, DB 真相源 upsert")
+	if asm.Ingest != nil {
+		logger.Printf("  ingest: ON (POST /api/v1/ingest/{alertmanager,webhook}; auto-create %s)",
+			autoCreateLabel())
+	} else {
+		logger.Printf("  ingest: OFF (set OPS_DB_DSN to enable external import queue)")
+	}
+	logger.Printf("  events: 双链路（人工建单 POST /api/v1/incidents ∥ 外部导入）+ 控制台事件页 /console")
+	logger.Printf("  not wired (W5+): sessionstore, /metrics, DB 真相源 upsert")
 	logger.Printf("POST %s (change events) | GET /healthz | listening on %s",
 		changeWebhookPath, addr)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -193,4 +208,12 @@ func noiseWindowForLog() string {
 		return raw
 	}
 	return defaultNoiseWindow.String()
+}
+
+// autoCreateLabel 启动日志用：外部导入自动建单开关状态（决策 2 / R8）。
+func autoCreateLabel() string {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("OPS_INCIDENT_AUTOCREATE")), "on") {
+		return "ON"
+	}
+	return "off (shadow: queue only)"
 }

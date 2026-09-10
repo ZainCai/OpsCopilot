@@ -26,13 +26,14 @@ const (
 	AuditIngestFailed            AuditAction = "ingest_failed"
 )
 
-// AuditEntry 一条审计记录。
+// AuditEntry 一条审计记录（json tag 与 Incident 同口径：REST 契约不暴露
+// Go 字段名）。
 type AuditEntry struct {
-	IncidentID string
-	Action     AuditAction
-	Actor      string
-	Detail     map[string]any
-	OccurredAt time.Time
+	IncidentID string         `json:"incident_id"`
+	Action     AuditAction    `json:"action"`
+	Actor      string         `json:"actor"`
+	Detail     map[string]any `json:"detail"`
+	OccurredAt time.Time      `json:"occurred_at"`
 }
 
 // AuditLog 审计写入口（内存/PG 双实现）。

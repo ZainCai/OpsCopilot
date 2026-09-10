@@ -35,17 +35,17 @@ func TestStoreCreateAndTransition(t *testing.T) {
 	s.SetClock(func() time.Time { now = now.Add(time.Minute); return now })
 
 	// 缺字段拒绝。
-	if _, err := s.Create("", "t", "critical"); err == nil {
+	if _, err := s.Create("", "t", "critical", "ops"); err == nil {
 		t.Fatal("empty id accepted")
 	}
-	if _, err := s.Create("INC-1", "", "critical"); err == nil {
+	if _, err := s.Create("INC-1", "", "critical", "ops"); err == nil {
 		t.Fatal("empty title accepted")
 	}
 	// 重复 ID 拒绝。
-	if _, err := s.Create("INC-1", "t1", "critical"); err != nil {
+	if _, err := s.Create("INC-1", "t1", "critical", "ops"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := s.Create("INC-1", "t1", "critical"); err == nil {
+	if _, err := s.Create("INC-1", "t1", "critical", "ops"); err == nil {
 		t.Fatal("duplicate id accepted")
 	}
 
@@ -72,7 +72,7 @@ func TestStoreCreateAndTransition(t *testing.T) {
 
 func TestAttachClusterAndLookup(t *testing.T) {
 	s := NewMemStore()
-	if _, err := s.Create("INC-1", "disk full", "critical"); err != nil {
+	if _, err := s.Create("INC-1", "disk full", "critical", "ops"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	// 关联 + 幂等。
@@ -83,7 +83,7 @@ func TestAttachClusterAndLookup(t *testing.T) {
 		t.Fatalf("attach idempotent: %v", err)
 	}
 	// 一簇只能挂一事件。
-	if _, err := s.Create("INC-2", "other", "warning"); err != nil {
+	if _, err := s.Create("INC-2", "other", "warning", "ops"); err != nil {
 		t.Fatalf("create2: %v", err)
 	}
 	if err := s.AttachCluster("INC-2", "c:fp-a@1"); err == nil {

@@ -107,7 +107,7 @@ type Incident struct {
 // Store 事件存储接口（W9：内存与 TimescaleDB 双实现）。
 // 全部方法并发安全；返回值为拷贝，调用方修改不影响库内状态。
 type Store interface {
-	Create(id, title, severity string) (*Incident, error)
+	Create(id, title, severity, createdBy string) (*Incident, error)
 	Get(id string) (Incident, error)
 	Transition(id string, to State, actor string) (Incident, error)
 	AttachCluster(id, clusterKey string) error
@@ -149,7 +149,7 @@ func (s *MemStore) Persistence() string { return "memory" }
 func (s *MemStore) SetClock(f func() time.Time) { s.now = f }
 
 // Create 新建事件。ID 必填且唯一；初始状态恒为 open（不信任外部状态）。
-func (s *MemStore) Create(id, title, severity string) (*Incident, error) {
+func (s *MemStore) Create(id, title, severity, createdBy string) (*Incident, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return nil, errors.New("incident: id is required")
@@ -165,7 +165,7 @@ func (s *MemStore) Create(id, title, severity string) (*Incident, error) {
 	now := s.now()
 	inc := &Incident{ID: id, Title: title, Severity: severity,
 		State: StateOpen, CreatedAt: now, UpdatedAt: now,
-		Origin: OriginManual, AutoClosePolicy: "manual_only"}
+		Origin: OriginManual, CreatedBy: createdBy, AutoClosePolicy: "manual_only"}
 	s.byID[id] = inc
 	s.order = append(s.order, id)
 	return clone(inc), nil
@@ -345,11 +345,14 @@ type Candidate struct {
 // SimilarCandidates 在候选集里找出与 target 相似的事件（L2）。
 // 纯函数：不依赖存储实现，调用方传入候选集（通常是同状态/近期事件）。
 //
-// 判定维度（保守：任一维命中即入候选，命中越多分越高）：
+// 判定维度（保守：任一**内容**维命中即入候选，命中越多分越高）：
 //   - dedup_key 相同（节点+指纹+时间窗归一化，最强信号）
 //   - 簇关联重叠（同一 cluster_key）
 //   - 标题规范化后相同（去空白/大小写）
-//   - 时间邻近（同一窗口内创建）
+//   - 时间邻近（同一窗口内创建）——**仅加权，不作独立入选项**
+//
+// 时间邻近单独不足以称"疑似重复"（批量数据同一分钟创建会让候选列表被噪声
+// 淹没）；至少命中一个内容维才入候选，时间只在此之上加分。
 //
 // **不自动合并**：运维领域误并两个不同故障是灾难，一律交给人确认。
 func SimilarCandidates(target Incident, others []Incident, window time.Duration) []Candidate {
@@ -372,12 +375,13 @@ func SimilarCandidates(target Incident, others []Incident, window time.Duration)
 			reasons = append(reasons, "标题相同")
 			score += 25
 		}
+		if len(reasons) == 0 {
+			// 无内容信号：时间邻近单独不作候选（避免噪声淹没真重复）。
+			continue
+		}
 		if window > 0 && absDur(target.CreatedAt.Sub(o.CreatedAt)) <= window {
 			reasons = append(reasons, "创建时间相近")
 			score += 10
-		}
-		if len(reasons) == 0 {
-			continue
 		}
 		if score > 100 {
 			score = 100

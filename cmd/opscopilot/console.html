@@ -149,6 +149,41 @@ label.toggle { display: inline-flex; gap: 6px; align-items: center; font-size: 1
 .chip--acked    { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 35%, transparent); background: color-mix(in srgb, var(--warn) 8%, transparent); }
 .chip--resolved { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 35%, transparent); background: color-mix(in srgb, var(--ok) 8%, transparent); }
 
+/* ---------- 顶部导航（视图切换：降噪总览 / 事件） ---------- */
+.tb-nav { display: inline-flex; gap: 4px; background: var(--panel-2); border: 1px solid var(--line);
+          border-radius: 9px; padding: 2px; }
+.tb-tab { height: 26px; padding: 0 14px; border-radius: 7px; font-size: 12.5px; color: var(--text-2);
+          background: none; border: none; cursor: pointer; white-space: nowrap; }
+.tb-tab:hover { color: var(--text); }
+.tb-tab.on { background: var(--panel); color: var(--text); box-shadow: inset 0 0 0 1px var(--line); font-weight: 600; }
+
+/* ---------- 来源徽标（双链路可视化：人工 / 外部自动导入） ---------- */
+.og { display: inline-flex; align-items: center; gap: 5px; height: 20px; padding: 0 8px; border-radius: 6px;
+      font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: .3px;
+      border: 1px solid transparent; }
+.og::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+.og--manual       { color: var(--brand); border-color: color-mix(in srgb, var(--brand) 38%, transparent); background: color-mix(in srgb, var(--brand) 10%, transparent); }
+.og--alertmanager { color: var(--crit);  border-color: color-mix(in srgb, var(--crit) 38%, transparent);  background: color-mix(in srgb, var(--crit) 10%, transparent); }
+.og--webhook      { color: var(--info);  border-color: color-mix(in srgb, var(--info) 38%, transparent);  background: color-mix(in srgb, var(--info) 10%, transparent); }
+.og--prometheus, .og--azure, .og--pull, .og--api { color: var(--text-2); border-color: var(--line); background: var(--panel-2); }
+
+/* ---------- 事件详情：分区 / 候选 / 操作 / 表单 ---------- */
+.detail .sec { margin-top: 12px; }
+.detail .sec-h { font-size: 11.5px; font-weight: 600; color: var(--text-2); margin-bottom: 6px;
+                 border-top: 1px solid var(--line-soft); padding-top: 10px; }
+.cand { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 7px; background: var(--panel);
+        border: 1px solid var(--line-soft); margin-bottom: 6px; font-size: 12px; flex-wrap: wrap; }
+.cand .score { font-family: var(--font-mono); font-weight: 600; color: var(--warn); flex: none; width: 34px; }
+.cand .why { color: var(--text-3); font-size: 11.5px; }
+.acts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; align-items: center; }
+.form-row { display: grid; grid-template-columns: 96px 1fr; gap: 6px 10px; align-items: center; }
+.form-row input, .form-row select { height: 30px; border: 1px solid var(--line); border-radius: 8px;
+      background: var(--panel); color: var(--text); padding: 0 9px; font-size: 12.5px; font-family: var(--font-sans); }
+.tok-input { height: 28px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel);
+      color: var(--text); padding: 0 9px; font-size: 12px; font-family: var(--font-mono); width: 150px; }
+.banner.ok { background: color-mix(in srgb, var(--ok) 10%, transparent);
+             color: var(--ok); border: 1px solid color-mix(in srgb, var(--ok) 35%, transparent); }
+
 /* ---------- 横幅 / 空状态 / 加载 ---------- */
 .banner { display: flex; gap: 8px; align-items: flex-start; border-radius: 8px;
           padding: 10px 13px; margin: var(--pad); font-size: 12.5px; }
@@ -190,6 +225,10 @@ svg text { fill: var(--text); font-family: var(--font-mono); font-size: 11px; }
       <div class="brand-sub">SHADOW CONSOLE</div>
     </div>
   </div>
+  <nav class="tb-nav" id="tbNav">
+    <button class="tb-tab on" data-view="overview">降噪总览</button>
+    <button class="tb-tab" data-view="events">事件</button>
+  </nav>
   <div class="tb-spacer"></div>
   <span class="env-chip" id="connChip"><span class="dot"></span><span id="connText">连接中</span></span>
   <span class="tb-meta" id="lastRefresh">未刷新</span>
@@ -198,6 +237,8 @@ svg text { fill: var(--text); font-family: var(--font-mono); font-size: 11px; }
 </div>
 
 <div class="content">
+  <!-- ===== 视图一：降噪总览（既有功能，原样保留） ===== -->
+  <div id="view-overview">
   <div class="page-head">
     <div>
       <div class="page-title">降噪总览</div>
@@ -261,6 +302,81 @@ svg text { fill: var(--text); font-family: var(--font-mono); font-size: 11px; }
     <div id="topoView"></div>
     <div id="nodeDetail" class="detail" style="display:none"></div>
   </div>
+  </div><!-- /view-overview -->
+
+  <!-- ===== 视图二：事件（W9 双链路：人工建单 ∥ 外部自动导入） ===== -->
+  <div id="view-events" style="display:none">
+    <div class="page-head">
+      <div>
+        <div class="page-title">事件</div>
+        <div class="page-desc">人工建单 ∥ 外部自动导入 · 同一张表 · L2 疑似重复只提示不自动合并</div>
+      </div>
+      <div style="margin-left:auto; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+        <input class="tok-input" id="tokenInput" type="password" placeholder="写操作 Token" autocomplete="off"
+               title="写操作（建单/流转/合并）需携带共享密钥；留空则读操作可用、写操作将 401">
+        <div class="seg" id="incStateSeg">
+          <button class="seg-i on acc" data-v="active">活跃</button>
+          <button class="seg-i" data-v="resolved">已解决</button>
+          <button class="seg-i" data-v="">全部</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="kpi-grid">
+      <div class="stat"><div class="stat-l">活跃事件</div>
+        <div class="stat-v"><span class="stat-n" id="statIncOpen" style="color:var(--brand)">—</span><span class="stat-u">单</span></div>
+        <div class="stat-s" id="statIncOpenSub">未刷新</div></div>
+      <div class="stat"><div class="stat-l">已解决</div>
+        <div class="stat-v"><span class="stat-n" id="statIncResolved" style="color:var(--ok)">—</span><span class="stat-u">单</span></div>
+        <div class="stat-s">含被合并单</div></div>
+      <div class="stat"><div class="stat-l">人工单</div>
+        <div class="stat-v"><span class="stat-n" id="statIncManual" style="color:var(--brand)">—</span><span class="stat-u">单</span></div>
+        <div class="stat-s">链路 B · 界面建单</div></div>
+      <div class="stat"><div class="stat-l">外部单</div>
+        <div class="stat-v"><span class="stat-n" id="statIncExternal" style="color:var(--crit)">—</span><span class="stat-u">单</span></div>
+        <div class="stat-s" id="statIncExternalSub">链路 A · 自动导入</div></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-h">
+        <span class="panel-t">事件列表</span>
+        <span class="panel-sub" id="incCount"></span>
+        <div class="panel-x" style="gap:10px">
+          <select class="select" id="incOriginFilter">
+            <option value="">全部来源</option>
+            <option value="manual">人工（manual）</option>
+            <option value="alertmanager">Alertmanager</option>
+            <option value="webhook">Webhook</option>
+          </select>
+          <button class="btn btn--acc btn--sm" onclick="toggleCreateForm()">+ 人工建单</button>
+        </div>
+      </div>
+      <div id="incMsg"></div>
+      <div id="createForm" class="panel-b" style="display:none; border-bottom:1px solid var(--line-soft)">
+        <div class="form-row" style="max-width:580px">
+          <span class="muted">标题</span><input id="cfTitle" placeholder="如：n1 磁盘使用率 96%">
+          <span class="muted">严重级</span><select id="cfSeverity"><option>critical</option><option>warning</option><option>info</option></select>
+          <span class="muted">事件 ID（可选）</span><input id="cfID" placeholder="留空自动生成">
+          <span class="muted">建单人工号</span><input id="cfBy" placeholder="审计必填，如 zhangsan">
+        </div>
+        <div class="acts">
+          <button class="btn btn--acc btn--sm" onclick="submitCreate()">提交建单</button>
+          <button class="btn btn--sm" onclick="toggleCreateForm()">取消</button>
+          <span class="panel-sub" id="cfHint"></span>
+        </div>
+      </div>
+      <div class="tbl-wrap">
+        <table class="tbl">
+          <thead><tr>
+            <th>事件 ID</th><th>来源</th><th>严重级</th><th>状态</th>
+            <th>标题</th><th class="num">关联簇</th><th>建单人</th><th>创建时间</th>
+          </tr></thead>
+          <tbody id="incRows"></tbody>
+        </table>
+      </div>
+      <div id="incDetail" class="detail" style="display:none"></div>
+    </div>
+  </div><!-- /view-events -->
 </div>
 
 <script>
@@ -477,10 +593,220 @@ async function showNodeDetail(key) {
   } catch (e) { box.textContent = "加载失败：" + e.message; }
 }
 
+// ===================== 事件视图（W9 双链路） =====================
+// 双链路可视化：链路 B（人工建单 manual）与链路 A（外部自动导入
+// alertmanager/webhook/…）同一张表，用 origin 徽标区分来源。
+// 写操作（建单 / 流转 / 合并）需携带共享密钥 Token（保存于 localStorage）。
+let curView = "overview";
+let incState = "active";   // active | resolved | ""
+let incOrigin = "";
+let incCache = [];
+
+const ORIGIN_LABEL = { manual:"人工", alertmanager:"AM", webhook:"Webhook",
+                       prometheus:"Prom", azure:"Azure", pull:"拉取", api:"API" };
+const originBadge = (o) => `<span class="og og--${esc(o || "api")}">${esc(ORIGIN_LABEL[o] || o || "-")}</span>`;
+const NEXT_STATES = { open:["acked","mitigated","resolved"], acked:["mitigated","resolved"],
+                      mitigated:["resolved"], resolved:[] };
+const STATE_VERB = { acked:"确认", mitigated:"缓解", resolved:"解决" };
+
+const getToken = () => localStorage.getItem("ops_token") || "";
+const setToken = (t) => localStorage.setItem("ops_token", t);
+const authHeaders = () => { const t = getToken(); return t ? { "X-OpsCopilot-Token": t } : {}; };
+
+async function postJSON(url, body) {
+  const resp = await fetch(API_BASE + url, {
+    method: "POST",
+    headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
+    body: JSON.stringify(body),
+  });
+  const out = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(out.error || (resp.status + " " + resp.statusText));
+  return out;
+}
+const needToken = (e) => e.message.includes("unauthorized") ? "（写操作需填右上角 Token）" : "";
+
+function switchView(v) {
+  curView = v;
+  $("view-overview").style.display = v === "overview" ? "" : "none";
+  $("view-events").style.display = v === "events" ? "" : "none";
+  document.querySelectorAll("#tbNav .tb-tab").forEach(b => b.classList.toggle("on", b.dataset.view === v));
+  if (v === "events") loadIncidents();
+}
+
+async function loadIncidents() {
+  msg($("incMsg"), "loading", "加载事件…");
+  try {
+    const data = await fetchJSON("/api/v1/incidents"); // 全量取回，前端按 state/origin 过滤
+    incCache = data.incidents || [];
+    renderIncidentStats();
+    renderIncidentTable();
+    msg($("incMsg"), "", "");
+    setConn(true);
+  } catch (e) {
+    msg($("incMsg"), "err", "加载失败：" + e.message);
+    $("incRows").innerHTML = emptyState("加载失败", e.message);
+    setConn(false);
+  }
+}
+
+function incFiltered() {
+  return incCache.filter(i => {
+    if (incOrigin && i.origin !== incOrigin) return false;
+    if (incState === "active") return i.state !== "resolved";
+    if (incState === "resolved") return i.state === "resolved";
+    return true;
+  });
+}
+
+function renderIncidentStats() {
+  const act = incCache.filter(i => i.state !== "resolved").length;
+  const res = incCache.filter(i => i.state === "resolved").length;
+  const manual = incCache.filter(i => i.origin === "manual").length;
+  const ext = incCache.filter(i => i.origin && i.origin !== "manual").length;
+  $("statIncOpen").textContent = act;
+  $("statIncOpenSub").textContent = incCache.length + " 单总量";
+  $("statIncResolved").textContent = res;
+  $("statIncManual").textContent = manual;
+  $("statIncExternal").textContent = ext;
+}
+
+function renderIncidentTable() {
+  const rows = incFiltered();
+  $("incCount").textContent = rows.length + " 单（当前过滤）";
+  $("incRows").innerHTML = rows.map(i => `
+    <tr class="rowlink" data-id="${esc(i.id)}">
+      <td class="mono">${esc(i.id)}${i.merged_into ? ' <span class="faint" title="已合并到 ' + esc(i.merged_into) + '">⇥</span>' : ""}</td>
+      <td>${originBadge(i.origin)}</td>
+      <td>${sevPill(i.severity)}</td>
+      <td>${statePill(i.state)}</td>
+      <td>${esc(i.title || "-")}</td>
+      <td class="num mono">${(i.cluster_keys || []).length}</td>
+      <td>${esc(i.created_by || "—")}</td>
+      <td class="time">${timeAgo(i.created_at)}</td>
+    </tr>`).join("") || emptyState(
+      incState === "active" ? "当前无活跃事件" : "当前过滤条件下没有事件",
+      "外部告警经入队 worker 建单，或点右上角「+ 人工建单」手动录入。");
+  $("incRows").querySelectorAll("tr.rowlink").forEach(tr => {
+    tr.onclick = () => {
+      $("incRows").querySelectorAll("tr").forEach(r => r.classList.remove("sel"));
+      tr.classList.add("sel");
+      showIncidentDetail(tr.dataset.id);
+    };
+  });
+}
+
+function detailStr(d) {
+  if (!d) return "";
+  try { return Object.entries(d).map(([k, v]) => k + "=" + v).join(" "); } catch { return ""; }
+}
+
+async function showIncidentDetail(id) {
+  const box = $("incDetail");
+  box.style.display = "block";
+  box.innerHTML = `<div class="dt">事件 ${esc(id)}</div><span class="spin"></span>`;
+  try {
+    const enc = encodeURIComponent(id);
+    const [inc, dup, aud] = await Promise.all([
+      fetchJSON("/api/v1/incidents/" + enc),
+      fetchJSON("/api/v1/incidents/" + enc + "/duplicates").catch(() => ({ candidates: [] })),
+      fetchJSON("/api/v1/incidents/" + enc + "/audit").catch(() => ({ entries: [] })),
+    ]);
+    const kv = [
+      ["来源", (ORIGIN_LABEL[inc.origin] || inc.origin || "-") + (inc.source_ref ? " · " + inc.source_ref : "")],
+      ["状态", inc.state], ["严重级", inc.severity || "-"],
+      ["建单人", inc.created_by || "—"],
+      ["关联簇", (inc.cluster_keys || []).join(", ") || "—"],
+      ["去重键", inc.dedup_key || "—"],
+      ["合并到", inc.merged_into || "—"],
+      ["外部关单", inc.auto_close_policy || "auto"],
+      ["创建", (inc.created_at || "").replace("T", " ").slice(0, 19)],
+      ["更新", (inc.updated_at || "").replace("T", " ").slice(0, 19)],
+    ];
+    let html = `<div class="dt">事件详情</div><div class="kv">` +
+      kv.map(([k, v]) => `<div class="k">${esc(k)}</div><div class="v">${esc(v)}</div>`).join("") + `</div>`;
+
+    // 操作闭环：仅展示状态机允许的转移（R2 由后端状态机保证）。
+    const nexts = NEXT_STATES[inc.state] || [];
+    html += `<div class="acts">` + (nexts.length
+      ? nexts.map(to => `<button class="btn btn--sm${to === "resolved" ? " btn--acc" : ""}" onclick="doTransition('${esc(id)}','${to}')">${esc(STATE_VERB[to])}</button>`).join("")
+      : `<span class="panel-sub">已解决，无可用操作</span>`) + `</div>`;
+
+    // L2 疑似重复：只提示，合并动作由人点按钮触发（绝不自动合并）。
+    const cands = dup.candidates || [];
+    html += `<div class="sec"><div class="sec-h">疑似重复（L2 · 只提示不自动合并）</div>` +
+      (cands.length ? cands.map(c => `
+        <div class="cand">
+          <span class="score">${c.score}</span>
+          <span class="mono">${esc(c.incident_id)}</span>
+          <span>${esc(c.title)}</span>
+          <span class="why">${esc((c.reasons || []).join(" / "))}</span>
+          <span style="margin-left:auto;display:flex;gap:6px">
+            <button class="btn btn--sm" onclick="doMerge('${esc(id)}','${esc(c.incident_id)}')" title="把本单并入该候选">并入它</button>
+            <button class="btn btn--sm" onclick="doMerge('${esc(c.incident_id)}','${esc(id)}')" title="把该候选并入本单">并来本单</button>
+          </span>
+        </div>`).join("") : `<div class="faint">无相似候选</div>`) + `</div>`;
+
+    // 审计轨迹。
+    const entries = aud.entries || [];
+    html += `<div class="sec"><div class="sec-h">审计轨迹（${entries.length}）</div>` +
+      (entries.length ? entries.map(e => `<div><span class="sev sev--info" style="margin-right:6px">${esc(e.action)}</span>` +
+        `<span class="mono faint">${esc((e.occurred_at || "").replace("T", " ").slice(0, 19))}</span> ` +
+        `<b>${esc(e.actor || "-")}</b> ${esc(detailStr(e.detail))}</div>`).join("") : `<div class="faint">暂无审计记录</div>`) + `</div>`;
+
+    box.innerHTML = html;
+  } catch (e) { box.textContent = "加载失败：" + e.message; }
+}
+
+async function doTransition(id, to) {
+  const actor = prompt("操作人工号（审计）：", localStorage.getItem("ops_actor") || "");
+  if (!actor) return;
+  localStorage.setItem("ops_actor", actor);
+  try {
+    await postJSON("/api/v1/incidents/" + encodeURIComponent(id) + "/transition", { to, actor });
+    await loadIncidents();
+    showIncidentDetail(id);
+  } catch (e) { alert("流转失败：" + e.message + needToken(e)); }
+}
+
+async function doMerge(srcId, targetId) {
+  if (!confirm(`确认把 ${srcId} 合并到 ${targetId}？\n被合并单将置为已解决，原单保留并记审计。`)) return;
+  const actor = prompt("操作人工号（审计）：", localStorage.getItem("ops_actor") || "");
+  if (!actor) return;
+  localStorage.setItem("ops_actor", actor);
+  try {
+    await postJSON("/api/v1/incidents/" + encodeURIComponent(srcId) + "/merge", { target_id: targetId, actor });
+    await loadIncidents();
+    showIncidentDetail(targetId);
+  } catch (e) { alert("合并失败：" + e.message + needToken(e)); }
+}
+
+function toggleCreateForm() {
+  const f = $("createForm");
+  f.style.display = f.style.display === "none" ? "block" : "none";
+}
+
+async function submitCreate() {
+  const title = $("cfTitle").value.trim();
+  const by = $("cfBy").value.trim();
+  if (!title) { $("cfHint").textContent = "标题必填"; return; }
+  if (!by) { $("cfHint").textContent = "建单人工号必填（审计）"; return; }
+  $("cfHint").textContent = "提交中…";
+  const body = { title, severity: $("cfSeverity").value, created_by: by };
+  const idv = $("cfID").value.trim();
+  if (idv) body.id = idv;
+  try {
+    const inc = await postJSON("/api/v1/incidents", body);
+    $("cfHint").textContent = "已建单 " + inc.id;
+    $("cfTitle").value = ""; $("cfID").value = "";
+    await loadIncidents();
+  } catch (e) { $("cfHint").textContent = "建单失败：" + e.message + needToken(e); }
+}
+
 function refreshAll() {
   const b = $("btnRefresh");
   b.classList.add("busy"); b.disabled = true;
-  Promise.allSettled([loadClusters(), loadTopology()]).then(() => {
+  const jobs = curView === "events" ? [loadIncidents()] : [loadClusters(), loadTopology()];
+  Promise.allSettled(jobs).then(() => {
     b.classList.remove("busy"); b.disabled = false;
   });
 }
@@ -494,6 +820,22 @@ $("stateSeg").querySelectorAll(".seg-i").forEach(btn => {
     loadClusters();
   };
 });
+
+// 视图切换导航。
+$("tbNav").querySelectorAll(".tb-tab").forEach(b => { b.onclick = () => switchView(b.dataset.view); });
+
+// 事件：状态分段 + 来源过滤 + 写操作 Token（持久化）。
+$("incStateSeg").querySelectorAll(".seg-i").forEach(btn => {
+  btn.onclick = () => {
+    $("incStateSeg").querySelectorAll(".seg-i").forEach(b => b.classList.remove("on", "acc"));
+    btn.classList.add("on", "acc");
+    incState = btn.dataset.v;
+    renderIncidentTable();
+  };
+});
+$("incOriginFilter").onchange = () => { incOrigin = $("incOriginFilter").value; renderIncidentTable(); };
+$("tokenInput").value = getToken();
+$("tokenInput").oninput = () => setToken($("tokenInput").value.trim());
 
 let timer = null;
 $("autoRefresh").onchange = () => {
