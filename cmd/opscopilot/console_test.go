@@ -20,7 +20,15 @@ func TestConsoleServed(t *testing.T) {
 	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
 		t.Fatalf("content-type = %q, want text/html", ct)
 	}
+	// 缓存纪律：控制台必须每次回源（旧副本会让新功能"看不见"）。
+	if cc := rec.Header().Get("Cache-Control"); !strings.Contains(cc, "no-store") {
+		t.Fatalf("cache-control = %q, want no-store", cc)
+	}
 	body := rec.Body.String()
+	// 构建标识占位符必须已被替换（运维据此确认打开的是哪个 build）。
+	if strings.Contains(body, "{{BUILD}}") {
+		t.Fatal("build stamp placeholder not substituted")
+	}
 	for _, marker := range []string{
 		"OpsCopilot 控制台", "api/v1/clusters", "api/v1/topology", "AGG_THRESHOLD",
 		// W9 双链路事件页：来源徽标 + 事件 API + 写操作端点。

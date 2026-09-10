@@ -229,6 +229,7 @@ svg text { fill: var(--text); font-family: var(--font-mono); font-size: 11px; }
     <button class="tb-tab on" data-view="overview">降噪总览</button>
     <button class="tb-tab" data-view="events">事件</button>
   </nav>
+  <span class="tb-meta" id="buildStamp" title="当前构建（vcs 短哈希 · 提交时间）——排查“功能不见了”先看这里">{{BUILD}}</span>
   <div class="tb-spacer"></div>
   <span class="env-chip" id="connChip"><span class="dot"></span><span id="connText">连接中</span></span>
   <span class="tb-meta" id="lastRefresh">未刷新</span>
@@ -843,7 +844,13 @@ $("autoRefresh").onchange = () => {
   if ($("autoRefresh").checked) timer = setInterval(refreshAll, 30000);
 };
 if ($("autoRefresh").checked) timer = setInterval(refreshAll, 30000);
-refreshAll();
+
+// 深链：?view=events 直接打开事件视图（书签/分享友好）。须在 refreshAll 前
+// 设定 curView，刷新方可落在正确视图；events 视图由 switchView 自行拉取，
+// 避免重复请求。
+const initView = new URLSearchParams(location.search).get("view");
+if (initView === "events" || initView === "overview") switchView(initView);
+if (curView === "overview") refreshAll();
 </script>
 </body>
 </html>
