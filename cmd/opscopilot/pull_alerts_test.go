@@ -225,3 +225,28 @@ func TestIngestWorkerHandlesPrometheusOrigin(t *testing.T) {
 		t.Fatal("expected audit entry for created incident")
 	}
 }
+
+// TestApplyRateLimitCountsOnlyNew 限流只统计"新建"：去重刷新不占额度，
+// 否则重复推送的老告警会吃光额度、把真正的新告警误折叠进 burst 聚合单。
+func TestApplyRateLimitCountsOnlyNew(t *testing.T) {
+	w := NewIngestWorker(nil, incident.NewMemStore(), nil, 0, 0, true, 2, time.Minute, nil)
+	if _, burst := w.applyRateLimit("r1", true); burst {
+		t.Fatal("1st new alert must not burst")
+	}
+	if _, burst := w.applyRateLimit("r2", true); burst {
+		t.Fatal("2nd new alert must not burst")
+	}
+	ref, burst := w.applyRateLimit("r3", true)
+	if !burst || !strings.HasPrefix(ref, "burst:") {
+		t.Fatalf("3rd new alert should fold into burst, got ref=%q burst=%v", ref, burst)
+	}
+	// 刷新（count=false）即使已超限也必须原样透传、且不再消耗额度。
+	if ref, burst := w.applyRateLimit("r4", false); burst || ref != "r4" {
+		t.Fatalf("refresh must pass through untouched: ref=%q burst=%v", ref, burst)
+	}
+	// 子秒窗口不得除零（与 cluster/DedupKeyFor 同一类缺陷）。
+	w2 := NewIngestWorker(nil, incident.NewMemStore(), nil, 0, 0, true, 1, 500*time.Millisecond, nil)
+	if ref, burst := w2.applyRateLimit("r5", true); burst || ref != "r5" {
+		t.Fatalf("sub-second window must be safe (treated as unlimited): ref=%q burst=%v", ref, burst)
+	}
+}

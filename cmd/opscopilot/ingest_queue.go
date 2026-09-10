@@ -24,8 +24,17 @@ import (
 	"opscopilot/internal/incident"
 )
 
-// ingestTimeout 单条处理超时（与 PGStore 同口径，5s）。
+// ingestTimeout 单条 SQL 超时。
 const ingestTimeout = 5 * time.Second
+
+// batchTimeout 一批"领取→处理→落状态"的整体超时。批量处理含 N 次建单/更新，
+// 用单语句的 5s 会误杀正常的批量（20 条 × 每条数十毫秒）。30s 足够且不至于
+// 让一个卡死的批次永久占着行锁。
+const batchTimeout = 30 * time.Second
+
+// maxIngestAttempts 单条消息的最大处理次数。达上限后不再被领取（死信），
+// 否则一条永久坏消息会每轮占用批量名额、每轮失败、刷爆日志。
+const maxIngestAttempts = 5
 
 // PGIngestQueue 基于 ingest_queue 表的导入队列。
 type PGIngestQueue struct {
@@ -63,50 +72,72 @@ type Item struct {
 	Attempts  int
 }
 
-// Claim 取一批待处理消息（FOR UPDATE SKIP LOCKED：多 worker 安全）。
-func (q *PGIngestQueue) Claim(limit int) ([]Item, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), ingestTimeout)
+// processBatch 在一个**事务内**完成"领取 → 逐条处理 → 落状态"。
+//
+// 为什么必须是一个事务：`FOR UPDATE SKIP LOCKED` 的行锁只在事务存续期间有效。
+// 此前用 pool.Query 领取，隐式事务在 rows 读完（Close）时就已提交，行锁随即
+// 释放 → 另一个 worker 能重复领到同一批消息，注释宣称的"多 worker 安全"
+// 并不成立。把 claim 与 done 放进同一事务后，行锁覆盖到处理结束。
+//
+// 失败语义：单条失败只累加 attempts（事务照常提交），不因一条坏消息回滚整批；
+// 达 maxIngestAttempts 后该行不再被领取（死信，attempts/last_error 留存可查）。
+func (q *PGIngestQueue) processBatch(limit int, process func(Item) error) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), batchTimeout)
 	defer cancel()
-	rows, err := q.pool.Query(ctx, `
-SELECT id, origin, source_ref, payload, attempts FROM ingest_queue
-WHERE processed_at IS NULL AND tenant_id=$1
-ORDER BY received_at FOR UPDATE SKIP LOCKED LIMIT $2`, q.tenant, limit)
+	tx, err := q.pool.Begin(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("ingest: claim: %w", err)
+		return 0, fmt.Errorf("ingest: begin: %w", err)
 	}
-	defer rows.Close()
-	var out []Item
+	defer func() { _ = tx.Rollback(ctx) }() // 提交后为 no-op
+
+	rows, err := tx.Query(ctx, `
+SELECT id, origin, source_ref, payload, attempts FROM ingest_queue
+WHERE processed_at IS NULL AND attempts < $3 AND tenant_id=$1
+ORDER BY received_at FOR UPDATE SKIP LOCKED LIMIT $2`,
+		q.tenant, limit, maxIngestAttempts)
+	if err != nil {
+		return 0, fmt.Errorf("ingest: claim: %w", err)
+	}
+	var items []Item
 	for rows.Next() {
 		var it Item
 		if err := rows.Scan(&it.ID, &it.Origin, &it.SourceRef, &it.Payload, &it.Attempts); err != nil {
-			return out, fmt.Errorf("ingest: scan: %w", err)
+			rows.Close()
+			return 0, fmt.Errorf("ingest: scan: %w", err)
 		}
-		out = append(out, it)
+		items = append(items, it)
 	}
-	return out, rows.Err()
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("ingest: rows: %w", err)
+	}
+
+	for _, it := range items {
+		if perr := process(it); perr != nil {
+			if _, err := tx.Exec(ctx, `
+UPDATE ingest_queue SET attempts=attempts+1, last_error=$2 WHERE id=$1`,
+				it.ID, perr.Error()); err != nil {
+				return 0, fmt.Errorf("ingest: record failure: %w", err)
+			}
+			continue
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE ingest_queue SET processed_at=now() WHERE id=$1`, it.ID); err != nil {
+			return 0, fmt.Errorf("ingest: done: %w", err)
+		}
+	}
+	return len(items), tx.Commit(ctx)
 }
 
-// Done 处理完成（成功置 processed_at；失败累加 attempts 与错误）。
-func (q *PGIngestQueue) Done(id int64, err error) error {
-	ctx, cancel := context.WithTimeout(context.Background(), ingestTimeout)
-	defer cancel()
-	if err == nil {
-		_, e := q.pool.Exec(ctx, `UPDATE ingest_queue SET processed_at=now() WHERE id=$1`, id)
-		return e
-	}
-	_, e := q.pool.Exec(ctx, `
-UPDATE ingest_queue SET attempts=attempts+1, last_error=$2 WHERE id=$1`, id, err.Error())
-	return e
-}
-
-// Pending 待处理条数（运维观察与测试断言）。
+// Pending 待处理条数（运维观察与测试断言）。达死信上限的行不计入。
 func (q *PGIngestQueue) Pending() (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), ingestTimeout)
 	defer cancel()
 	var n int
 	if err := q.pool.QueryRow(ctx, `
-SELECT count(*) FROM ingest_queue WHERE processed_at IS NULL AND tenant_id=$1`,
-		q.tenant).Scan(&n); err != nil {
+SELECT count(*) FROM ingest_queue
+WHERE processed_at IS NULL AND attempts < $2 AND tenant_id=$1`,
+		q.tenant, maxIngestAttempts).Scan(&n); err != nil {
 		return 0, err
 	}
 	return n, nil
@@ -120,11 +151,14 @@ type IngestWorker struct {
 	interval   time.Duration
 	batch      int
 	autoCreate bool // 开关：false = 只入队不建单（影子期默认）
-	// rateLimit 建单限流（R1 建单风暴应对）：窗口内新建上限；超限不新建，
+	// rateLimit 建单限流（R1 建单风暴应对）：窗口内**新建**上限；超限不新建，
 	// 改更新"群体事件"聚合单（source_ref=burst:<窗口起点>），事后可回放。
+	// 只统计真正新建的单：去重刷新不占额度（否则重复推送的老告警会吃光额度，
+	// 把真正的新告警误折叠进聚合单）。
 	rateLimit  int
 	rateWindow time.Duration
-	created    map[int64]int // 窗口起点(unix) → 已建单数
+	curBucket  int64 // 当前窗口桶号；-1 = 尚未开始
+	created    int   // 当前窗口内已新建单数（只保留当前窗口，不随窗口数增长）
 	mu         sync.Mutex
 	logf       func(string, ...any)
 }
@@ -148,7 +182,7 @@ func NewIngestWorker(q *PGIngestQueue, s incident.Store, audit AuditLog, interva
 	}
 	return &IngestWorker{queue: q, store: s, audit: audit, interval: interval, batch: batch,
 		autoCreate: autoCreate, rateLimit: rateLimit, rateWindow: rateWindow,
-		created: map[int64]int{}, logf: logf}
+		curBucket: -1, logf: logf}
 }
 
 // Run 轮询消费，ctx 取消或开关关闭即退出（优雅停机）。
@@ -171,22 +205,45 @@ func (w *IngestWorker) Run(ctx context.Context) {
 	}
 }
 
-// drain 处理一批（单条失败记 attempts 由下轮重试，不阻塞其余）。
+// drain 处理一批：领取与落状态在同一事务内（行锁覆盖处理全程）。
+// 单条失败只累加 attempts 由下轮重试，不阻塞其余；单条 panic 被隔离为本条失败，
+// 不能让一个坏输入把整个消费循环带走（此前 process panic 会让 goroutine 静默
+// 死亡、队列永久停摆）。
 func (w *IngestWorker) drain() {
-	items, err := w.queue.Claim(w.batch)
+	n, err := w.queue.processBatch(w.batch, func(it Item) error {
+		perr := w.processSafely(it)
+		if perr != nil {
+			if it.Attempts+1 >= maxIngestAttempts {
+				// 死信可观测：达上限后该行不再被领取（attempts/last_error 留存）。
+				w.logf("ERROR: ingest item %d dead-lettered after %d attempts (origin=%s ref=%s): %v",
+					it.ID, it.Attempts+1, it.Origin, it.SourceRef, perr)
+				w.auditAppend(AuditEntry{IncidentID: string(it.Origin) + ":" + it.SourceRef,
+					Action: AuditIngestFailed, Actor: "system:" + string(it.Origin),
+					Detail: map[string]any{"queue_id": it.ID, "attempts": it.Attempts + 1, "error": perr.Error()}})
+			} else {
+				w.logf("WARNING: ingest item %d failed (attempt %d/%d): %v",
+					it.ID, it.Attempts+1, maxIngestAttempts, perr)
+			}
+		}
+		return perr
+	})
 	if err != nil {
-		w.logf("WARNING: ingest claim: %v", err)
+		w.logf("WARNING: ingest batch: %v", err)
 		return
 	}
-	for _, it := range items {
-		perr := w.process(it)
-		if perr != nil {
-			w.logf("WARNING: ingest item %d failed: %v", it.ID, perr)
-		}
-		if err := w.queue.Done(it.ID, perr); err != nil {
-			w.logf("WARNING: ingest done: %v", err)
-		}
+	if n > 0 {
+		w.logf("ingest: processed %d message(s)", n)
 	}
+}
+
+// processSafely 执行 process，把 panic 转换为本条失败（隔离坏输入）。
+func (w *IngestWorker) processSafely(it Item) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic while processing: %v", r)
+		}
+	}()
+	return w.process(it)
 }
 
 // process 单条：按 origin 解析载荷 → 幂等建/更新事件。
@@ -214,8 +271,14 @@ func (w *IngestWorker) processAlertmanager(it Item) error {
 	origin := it.Origin
 	actor := "system:" + string(origin)
 
-	// R1 建单风暴：窗口内超限 → 不新建，更新聚合单（保留可回放）。
-	ref, burst := w.applyRateLimit(it.SourceRef)
+	// 先判"这是新建还是刷新"：外部事件在两种实现下都以 `origin:sourceRef`
+	// 作为 incident_id，故 Get 一击即可（未命中 = 尚未建过单 = 本次会新建）。
+	// 刷新不占建单额度，避免重复推送的老告警吃光额度、把新告警误折叠。
+	_, gerr := w.store.Get(string(origin) + ":" + strings.TrimSpace(it.SourceRef))
+	willCreate := errors.Is(gerr, incident.ErrNotFound)
+
+	// R1 建单风暴：窗口内新建超限 → 不新建，更新聚合单（保留可回放）。
+	ref, burst := w.applyRateLimit(it.SourceRef, willCreate)
 	created, isNew, err := w.store.UpsertExternal(origin, ref, title, sev, actor, it.Payload)
 	if err != nil {
 		return err
@@ -250,21 +313,31 @@ func (w *IngestWorker) processAlertmanager(it Item) error {
 	return nil
 }
 
-// applyRateLimit 建单限流（R1）：窗口内新建数达上限后，后续消息折叠进
+// applyRateLimit 建单限流（R1）：窗口内**新建**数达上限后，后续消息折叠进
 // "群体事件"聚合单（source_ref=burst:<窗口起点>）——不丢消息、可回放，
-// 也不让看板被上千单淹没。返回实际使用的 source_ref 与是否命中限流。
-func (w *IngestWorker) applyRateLimit(sourceRef string) (string, bool) {
-	if w.rateLimit <= 0 {
+// 也不让看板被上千单淹没。
+//
+// count=false 表示本条只是刷新既有事件（去重命中），**不占额度**：此前把刷新
+// 也算进去，重复推送的老告警会把额度吃光，让真正的新告警被误折叠。
+// 桶只保留当前窗口（旧窗口直接丢弃），不随运行时长增长。
+func (w *IngestWorker) applyRateLimit(sourceRef string, count bool) (string, bool) {
+	// rateWindow < 1s 时整除为 0（除零 panic），视为不限流。
+	if w.rateLimit <= 0 || w.rateWindow < time.Second {
 		return sourceRef, false
 	}
-	bucket := time.Now().Unix() / int64(w.rateWindow.Seconds())
+	bucket := time.Now().Unix() / int64(w.rateWindow/time.Second)
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.created[bucket] < w.rateLimit {
-		w.created[bucket]++
+	if bucket != w.curBucket { // 窗口推进：重置计数
+		w.curBucket, w.created = bucket, 0
+	}
+	if !count {
 		return sourceRef, false
 	}
-	w.created[bucket]++
+	w.created++
+	if w.created <= w.rateLimit {
+		return sourceRef, false
+	}
 	return "burst:" + strconv.FormatInt(bucket, 10), true
 }
 

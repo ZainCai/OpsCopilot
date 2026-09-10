@@ -111,3 +111,48 @@ func TestNewAssemblyNilLoggerWithDB(t *testing.T) {
 		t.Fatalf("persistence = %v, want timescaledb", asm.Incidents.Persistence())
 	}
 }
+
+// TestIngestDeadLetter PG 门控：永久坏消息（unsupported origin）在 attempts
+// 达上限后不再被领取，也不再计入 Pending——否则它会每轮占用批量名额、
+// 每轮失败、永远刷日志。
+func TestIngestDeadLetter(t *testing.T) {
+	dsn := os.Getenv("OPS_TEST_PG_DSN")
+	if dsn == "" {
+		t.Skip("OPS_TEST_PG_DSN not set — dead-letter integration skipped")
+	}
+	t.Setenv("OPS_DB_DSN", dsn)
+	t.Setenv("OPS_INCIDENT_AUTOCREATE", "on")
+	asm, err := NewAssembly(newQuietLogger(), "tk")
+	if err != nil {
+		t.Fatalf("assembly: %v", err)
+	}
+	defer asm.Close()
+
+	ctx := context.Background()
+	ref := "deadletter-" + time.Now().Format("150405.000000")
+	// 直接插一行 origin 非法的消息（Enqueue 会做 jsonb 转换，故走 SQL）。
+	if _, err := asm.pool.Exec(ctx, `
+INSERT INTO ingest_queue (tenant_id, origin, source_ref, payload)
+VALUES ($1,'bogus',$2,'{}'::jsonb)`, DefaultTenant, ref); err != nil {
+		t.Fatalf("seed poison row: %v", err)
+	}
+	t.Cleanup(func() {
+		asm.pool.Exec(context.Background(),
+			`DELETE FROM ingest_queue WHERE tenant_id=$1 AND source_ref=$2`, DefaultTenant, ref)
+	})
+
+	for i := 0; i < maxIngestAttempts; i++ {
+		asm.Worker.drain()
+	}
+	if n, err := asm.Queue.Pending(); err != nil || n != 0 {
+		t.Fatalf("dead letter must not count as pending: n=%d err=%v", n, err)
+	}
+	// 达上限后不再被领取。
+	n, err := asm.Queue.processBatch(20, func(Item) error { return nil })
+	if err != nil {
+		t.Fatalf("claim after dead-letter: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("dead-lettered row must not be claimed again, claimed %d", n)
+	}
+}
