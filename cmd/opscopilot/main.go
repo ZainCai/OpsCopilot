@@ -131,6 +131,11 @@ func main() {
 		go asm.Worker.Run(runCtx)
 	}
 
+	// W11 链路 A 拉取侧：定时从数据源拉告警入队（未启用则 nil）。
+	if asm.Poller != nil {
+		go asm.Poller.Run(runCtx)
+	}
+
 	// credential 周期清扫（C9 收尾）：过期条目不再是"删除前一直占内存"。
 	// 周期 10 分钟——清扫是幂等原语，频率只需远小于凭证最小有效期。
 	go func() {
@@ -189,7 +194,12 @@ func main() {
 	} else {
 		logger.Printf("  ingest: OFF (set OPS_DB_DSN to enable external import queue)")
 	}
-	logger.Printf("  events: 双链路（人工建单 POST /api/v1/incidents ∥ 外部导入）+ 控制台事件页 /console")
+	if asm.Poller != nil {
+		logger.Printf("  alert pull: ON (source %s, origin %s)", asm.Poller.Source.Name(), asm.Poller.Origin)
+	} else {
+		logger.Printf("  alert pull: OFF (set OPS_PULL_ALERTS=on + OPS_PROM_URL to enable)")
+	}
+	logger.Printf("  events: 双链路（人工建单 POST /api/v1/incidents ∥ 外部导入 push/pull）+ SSE 实时推送 + 控制台事件页 /console")
 	logger.Printf("  not wired (W5+): sessionstore, /metrics, DB 真相源 upsert")
 	logger.Printf("POST %s (change events) | GET /healthz | listening on %s",
 		changeWebhookPath, addr)

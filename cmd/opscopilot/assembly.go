@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
@@ -50,6 +51,8 @@ type Assembly struct {
 	Queue *PGIngestQueue
 	// Worker 队列消费者（Run 由 main 以 runCtx 驱动；autoCreate off 时立即返回）。
 	Worker *IngestWorker
+	// Poller 链路 A 拉取侧：定时从数据源拉告警入队（nil = 未启用）。
+	Poller *AlertPoller
 	// Events 实时广播器（W11：控制台事件页 SSE 订阅源）。
 	Events *EventHub
 	// audit 审计日志（人工操作与外部自动动作统一留痕）。
@@ -167,10 +170,40 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 		asm.Queue = queue
 		asm.Ingest = &AlertmanagerWebhook{Owner: owner, Token: webhookToken, Tenant: DefaultTenant}
 		asm.Worker = NewIngestWorker(queue, incStore, audit, 0, 0, autoCreate, 0, 0, logger.Printf)
+		// W11 拉取侧：OPS_PULL_ALERTS=on 且配了源地址时启用（需 DB 队列）。
+		// 未配置即空转——不因"没接拉取源"而报错，骨架照常可用。
+		asm.Poller = buildAlertPoller(owner, logf)
 	} else {
 		logf("WARNING: external import disabled (set OPS_DB_DSN to enable ingest queue)")
 	}
 	return asm, nil
+}
+
+// buildAlertPoller 按环境变量装配拉取调度器（未启用返回 nil）。
+//
+//	OPS_PULL_ALERTS=on        启用（默认关；避免与 push 并存时重复导入）
+//	OPS_PROM_URL              源地址（复用连接器同款 env）
+//	OPS_PROM_TOKEN            可选 Bearer
+//	OPS_PULL_INTERVAL         轮询周期（默认 30s；非法值告警后取默认）
+func buildAlertPoller(owner *QueueOwner, logf func(string, ...any)) *AlertPoller {
+	if !strings.EqualFold(strings.TrimSpace(os.Getenv("OPS_PULL_ALERTS")), "on") {
+		return nil
+	}
+	url := strings.TrimSpace(os.Getenv("OPS_PROM_URL"))
+	if url == "" {
+		logf("WARNING: OPS_PULL_ALERTS=on but OPS_PROM_URL unset — alert pull disabled")
+		return nil
+	}
+	interval := 30 * time.Second
+	if raw := strings.TrimSpace(os.Getenv("OPS_PULL_INTERVAL")); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+			interval = d
+		} else {
+			logf("WARNING: invalid OPS_PULL_INTERVAL %q — using 30s", raw)
+		}
+	}
+	src := NewPrometheusAlertsSource(url, os.Getenv("OPS_PROM_TOKEN"))
+	return NewAlertPoller(src, owner, incident.OriginPrometheus, interval, logf)
 }
 
 // Handler 装配 HTTP 路由：

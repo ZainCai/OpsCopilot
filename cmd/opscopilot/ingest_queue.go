@@ -143,6 +143,9 @@ func NewIngestWorker(q *PGIngestQueue, s incident.Store, audit AuditLog, interva
 	if rateWindow <= 0 {
 		rateWindow = 5 * time.Minute
 	}
+	if logf == nil { // nil logger 容忍（测试/嵌入式场景不再空指针）
+		logf = func(string, ...any) {}
+	}
 	return &IngestWorker{queue: q, store: s, audit: audit, interval: interval, batch: batch,
 		autoCreate: autoCreate, rateLimit: rateLimit, rateWindow: rateWindow,
 		created: map[int64]int{}, logf: logf}
@@ -187,10 +190,11 @@ func (w *IngestWorker) drain() {
 }
 
 // process 单条：按 origin 解析载荷 → 幂等建/更新事件。
-// 一期只实现 alertmanager；未知 origin 报明确错误（不静默丢）。
+// push（alertmanager/webhook）与 pull（prometheus，见 pull_alerts.go）载荷
+// 同形态（amAlert），走同一解析路径——两条进入方式在 worker 处不分叉。
 func (w *IngestWorker) process(it Item) error {
 	switch it.Origin {
-	case incident.OriginAlertmanager, incident.OriginWebhook:
+	case incident.OriginAlertmanager, incident.OriginWebhook, incident.OriginPrometheus:
 		return w.processAlertmanager(it)
 	default:
 		return fmt.Errorf("unsupported origin %q", it.Origin)
