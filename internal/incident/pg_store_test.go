@@ -155,3 +155,58 @@ func TestPGStoreListFillClustersBatched(t *testing.T) {
 		t.Fatalf("B clusters = %v, want [%s]", got, ckB)
 	}
 }
+
+// TestPGStoreListStateFilterSemantics List 的 state 过滤改走绑定参数后语义
+// 必须不变（” = 全部），且 000007 建的 (tenant_id, created_at) 列表索引存在。
+func TestPGStoreListStateFilterSemantics(t *testing.T) {
+	s := pgStoreForTest(t)
+	ctx := context.Background()
+	stamp := time.Now().Format("150405.000000")
+	openID, doneID := "INC-LST-O-"+stamp, "INC-LST-R-"+stamp
+	cleanup := func() {
+		s.pool.Exec(ctx, `DELETE FROM incident WHERE incident_id LIKE 'INC-LST-%'`)
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+
+	if _, err := s.Create(openID, "list open", "info", "ops"); err != nil {
+		t.Fatalf("create open: %v", err)
+	}
+	if _, err := s.Create(doneID, "list resolved", "info", "ops"); err != nil {
+		t.Fatalf("create resolved: %v", err)
+	}
+	if _, err := s.Transition(doneID, StateResolved, "ops"); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	has := func(list []Incident, id string) bool {
+		for _, inc := range list {
+			if inc.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+	open := s.List(StateOpen)
+	if !has(open, openID) || has(open, doneID) {
+		t.Fatalf("StateOpen filter wrong (open=%v resolved=%v)", has(open, openID), has(open, doneID))
+	}
+	res := s.List(StateResolved)
+	if !has(res, doneID) || has(res, openID) {
+		t.Fatalf("StateResolved filter wrong")
+	}
+	all := s.List("")
+	if !has(all, openID) || !has(all, doneID) {
+		t.Fatal("empty state must mean ALL")
+	}
+
+	// 迁移 000007 必须已应用（列表按 created_at 排序，否则全表排序）。
+	var n int
+	if err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM pg_indexes WHERE indexname='idx_incident_tenant_created'`).Scan(&n); err != nil {
+		t.Fatalf("index probe: %v", err)
+	}
+	if n != 1 {
+		t.Fatal("index idx_incident_tenant_created missing — run migrations (000007)")
+	}
+}

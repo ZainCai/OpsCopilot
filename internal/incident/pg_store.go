@@ -213,14 +213,15 @@ UPDATE incident SET updated_at=now() WHERE id=$1`, rowID); err != nil {
 func (s *PGStore) List(state State) []Incident {
 	ctx, cancel := s.ctx()
 	defer cancel()
-	where := "TRUE"
-	if state != "" {
-		where = "state = '" + string(state) + "'" // 白名单枚举内插（调用方经 REST 已限枚举）
-	}
+	// state 走绑定参数而非字符串拼接：此前是 "state = '" + string(state) + "'"，
+	// 虽然经 REST 白名单挡住，但 incident.Store 是公开接口，防线只在调用方。
+	// `$2='' OR state=$2` 一次表达"空串=全部"。
 	rows, err := s.pool.Query(ctx, `
 SELECT incident_id, title, severity, state, created_at, updated_at, resolved_at,
        origin, source_ref, source_meta, created_by, merged_into, auto_close_policy
-FROM incident WHERE tenant_id=$1 AND `+where+` ORDER BY created_at`, s.tenantID)
+FROM incident
+WHERE tenant_id=$1 AND ($2 = '' OR state = $2)
+ORDER BY created_at`, s.tenantID, string(state))
 	if err != nil {
 		return nil
 	}
