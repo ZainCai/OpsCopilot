@@ -50,14 +50,20 @@ type Assembly struct {
 	Queue *PGIngestQueue
 	// Worker 队列消费者（Run 由 main 以 runCtx 驱动；autoCreate off 时立即返回）。
 	Worker *IngestWorker
+	// Events 实时广播器（W11：控制台事件页 SSE 订阅源）。
+	Events *EventHub
 	// audit 审计日志（人工操作与外部自动动作统一留痕）。
 	audit AuditLog
 	// pool DB 连接池（事件 Store / 导入队列 / 审计共享；生命周期归装配）。
 	pool *pgxpool.Pool
 }
 
-// Close 释放装配持有的 DB 连接池（共享池的唯一所有者是装配，见 NewAssembly）。
+// Close 释放装配持有的资源：先停实时推送（关闭 SSE 连接），再关 DB 池
+// （共享池的唯一所有者是装配，见 NewAssembly）。
 func (a *Assembly) Close() {
+	if a.Events != nil {
+		a.Events.Close() // 让已连接的 SSE 订阅者立即结束，不悬挂
+	}
 	if a.pool != nil {
 		a.pool.Close()
 	}
@@ -131,7 +137,12 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 			logf("incident persistence: timescaledb (shared pool: store+queue+audit)")
 		}
 	}
-	rest := NewRESTGateway(noiseEngine, semantic, incStore, webhookToken, audit)
+	// W11 实时推送：Hub + 事件 Store 装饰器（写成功即广播）。装饰必须早于
+	// REST 网关与 IngestWorker 构造——worker 的自动建单（链路 A）也要推给
+	// 控制台，否则"外部导入在页面上看不见"。
+	hub := NewEventHub()
+	incStore = NewPublishStore(incStore, hub)
+	rest := NewRESTGateway(noiseEngine, semantic, incStore, webhookToken, audit, hub)
 
 	asm := &Assembly{
 		Sink:      sink,
@@ -141,6 +152,7 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 		GRPC:      grpcServer,
 		REST:      rest,
 		Incidents: incStore,
+		Events:    hub,
 		audit:     audit,
 		pool:      pgPool,
 	}

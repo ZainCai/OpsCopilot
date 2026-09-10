@@ -74,6 +74,7 @@ body { font-family: var(--font-sans); background: var(--bg); color: var(--text);
             border-radius: 7px; font-size: 12px; font-family: var(--font-mono); }
 .env-chip.ok { background: color-mix(in srgb, var(--ok) 12%, transparent); color: var(--ok); }
 .env-chip.bad { background: color-mix(in srgb, var(--crit) 14%, transparent); color: var(--crit); }
+.env-chip.warn { background: color-mix(in srgb, var(--warn) 14%, transparent); color: var(--warn); }
 .env-chip .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
 .tb-meta { font-size: 11.5px; color: var(--text-3); font-family: var(--font-mono); }
 .select { height: 30px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
@@ -233,7 +234,7 @@ svg text { fill: var(--text); font-family: var(--font-mono); font-size: 11px; }
   <div class="tb-spacer"></div>
   <span class="env-chip" id="connChip"><span class="dot"></span><span id="connText">连接中</span></span>
   <span class="tb-meta" id="lastRefresh">未刷新</span>
-  <label class="toggle"><input type="checkbox" id="autoRefresh" checked> 30s 自动刷新</label>
+  <label class="toggle" title="总览页固定 30s 拉取；事件页优先 SSE 实时推送，仅在推送不可用时用本轮询兜底"><input type="checkbox" id="autoRefresh" checked> 30s 自动刷新</label>
   <button class="btn" id="btnRefresh" onclick="refreshAll()">刷新</button>
 </div>
 
@@ -316,6 +317,7 @@ svg text { fill: var(--text); font-family: var(--font-mono); font-size: 11px; }
         <input class="tok-input" id="tokenInput" type="password" placeholder="写操作 Token" autocomplete="off"
                title="写操作（建单/流转/合并）需携带共享密钥；留空则读操作可用、写操作将 401">
         <span class="panel-sub" id="authChip" style="display:none"></span>
+        <span class="env-chip warn" id="streamChip" title="实时推送状态"><span class="dot"></span><span id="streamText">连接中</span></span>
         <div class="seg" id="incStateSeg">
           <button class="seg-i on acc" data-v="active">活跃</button>
           <button class="seg-i" data-v="resolved">已解决</button>
@@ -658,7 +660,39 @@ function switchView(v) {
   $("view-overview").style.display = v === "overview" ? "" : "none";
   $("view-events").style.display = v === "events" ? "" : "none";
   document.querySelectorAll("#tbNav .tb-tab").forEach(b => b.classList.toggle("on", b.dataset.view === v));
-  if (v === "events") loadIncidents();
+  if (v === "events") { connectStream(); loadIncidents(); }
+}
+
+// ---- W11 实时推送（SSE）：事件变更即推，替代 30s 轮询 ----
+// 连上后由服务端把 create/update/resolve/merge 广播过来，事件页即时刷新；
+// 推送不可用（浏览器不支持 / 反代掐断 / 服务端未启用）时自动降级为轮询。
+let evtSource = null, sseReloadTimer = null, sseLive = false;
+
+function setStreamChip(state) {
+  const chip = $("streamChip"), txt = $("streamText");
+  if (!chip || !txt) return;
+  chip.className = "env-chip " + (state === "live" ? "ok" : state === "poll" ? "warn" : "bad");
+  txt.textContent = state === "live" ? "实时推送" : state === "poll" ? "轮询降级" : "重连中";
+  chip.title = state === "live" ? "SSE 实时推送已连接——事件变更即时显示"
+    : state === "poll" ? "实时推送不可用，已降级为 30s 轮询"
+    : "实时推送断开，正在自动重连…";
+}
+
+// 合并突发：一次变更后 300ms 内到达的事件折成一次刷新（避免刷屏）。
+function scheduleIncidentReload() {
+  if (sseReloadTimer) return;
+  sseReloadTimer = setTimeout(() => { sseReloadTimer = null; loadIncidents(); }, 300);
+}
+
+function connectStream() {
+  if (evtSource || !("EventSource" in window)) return;
+  try {
+    evtSource = new EventSource(API_BASE + "/api/v1/events/stream");
+  } catch (_) { evtSource = null; setStreamChip("poll"); return; }
+  evtSource.onopen = () => { sseLive = true; setStreamChip("live"); };
+  evtSource.addEventListener("incident", () => { sseLive = true; setStreamChip("live"); scheduleIncidentReload(); });
+  // EventSource 断线自动重连；重连期间降级轮询兜底，避免"卡死不更新"。
+  evtSource.onerror = () => { sseLive = false; setStreamChip("poll"); };
 }
 
 async function loadIncidents() {
@@ -867,11 +901,17 @@ $("tokenInput").oninput = () => setToken($("tokenInput").value.trim());
 probeAuth(); // 反代注入 / 未鉴权 → 自动隐藏输入框
 
 let timer = null;
+// 轮询 tick：事件页且实时推送在线 → 交给 SSE，不再轮询（这才是"轮询→SSE"）；
+// 其余情况（总览页 / SSE 不可用）照常拉取兜底。
+function pollTick() {
+  if (curView === "events" && sseLive) return;
+  refreshAll();
+}
 $("autoRefresh").onchange = () => {
   if (timer) { clearInterval(timer); timer = null; }
-  if ($("autoRefresh").checked) timer = setInterval(refreshAll, 30000);
+  if ($("autoRefresh").checked) timer = setInterval(pollTick, 30000);
 };
-if ($("autoRefresh").checked) timer = setInterval(refreshAll, 30000);
+if ($("autoRefresh").checked) timer = setInterval(pollTick, 30000);
 
 // 深链：?view=events 直接打开事件视图（书签/分享友好）。须在 refreshAll 前
 // 设定 curView，刷新方可落在正确视图；events 视图由 switchView 自行拉取，

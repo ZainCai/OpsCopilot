@@ -33,6 +33,8 @@ func TestConsoleServed(t *testing.T) {
 		"OpsCopilot 控制台", "api/v1/clusters", "api/v1/topology", "AGG_THRESHOLD",
 		// W9 双链路事件页：来源徽标 + 事件 API + 写操作端点。
 		"api/v1/incidents", "view-events", "originBadge", "/transition", "/merge",
+		// W11 实时推送：SSE 终结端 + 前端订阅 + 降级轮询。
+		"api/v1/events/stream", "EventSource", "streamChip", "sseLive",
 	} {
 		if !strings.Contains(body, marker) {
 			t.Fatalf("console.html missing marker %q", marker)

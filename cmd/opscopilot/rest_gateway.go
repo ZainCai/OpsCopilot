@@ -14,6 +14,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -45,11 +46,14 @@ type RESTGateway struct {
 	token string
 	// audit 审计日志（人工操作与外部自动动作统一留痕，二期）。
 	audit AuditLog
+	// hub 事件实时广播器（W11：GET /api/v1/events/stream 的订阅源）。
+	// 由装配层注入（经 publishStore 装饰器接到写路径）；nil = 实时推送关闭。
+	hub *EventHub
 }
 
-// NewRESTGateway 构造。
-func NewRESTGateway(noise *NoiseEngine, sem *SemanticModelServer, incidents incident.Store, token string, audit AuditLog) *RESTGateway {
-	return &RESTGateway{noise: noise, sem: sem, incidents: incidents, token: token, audit: audit}
+// NewRESTGateway 构造。hub 为事件广播器（W11 实时推送），可为 nil。
+func NewRESTGateway(noise *NoiseEngine, sem *SemanticModelServer, incidents incident.Store, token string, audit AuditLog, hub *EventHub) *RESTGateway {
+	return &RESTGateway{noise: noise, sem: sem, incidents: incidents, token: token, audit: audit, hub: hub}
 }
 
 // SetAudit 挂载审计（装配期可选）。
@@ -79,6 +83,8 @@ func (g *RESTGateway) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/incidents/{id}/merge", g.handleMergeIncident)
 	mux.HandleFunc("POST /api/v1/incidents/{id}/transition", g.handleTransitionIncident)
 	mux.HandleFunc("GET /api/v1/auth/status", g.handleAuthStatus)
+	// W11 实时推送：SSE 事件流（控制台事件页订阅）。
+	mux.Handle("GET /api/v1/events/stream", h)
 }
 
 // route 按 path 分发（CORS 包装层之下）。
@@ -90,6 +96,8 @@ func (g *RESTGateway) route(w http.ResponseWriter, r *http.Request) {
 		g.handleTopology(w, r)
 	case "/api/v1/changes":
 		g.handleChanges(w, r)
+	case "/api/v1/events/stream":
+		g.handleEventStream(w, r)
 	case "/api/v1/incidents":
 		if r.Method == http.MethodPost {
 			g.handleCreateIncident(w, r)
@@ -391,6 +399,67 @@ func (g *RESTGateway) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 		"write_authorized": ok,
 		"mode":             mode,
 	})
+}
+
+// handleEventStream GET /api/v1/events/stream —— 事件实时推送（SSE）。
+//
+// 控制台事件页据此把"30s 轮询"换成"变更即推"。事件名固定 incident，
+// data 为 SSEMessage（{type, incident}）JSON——前端按事件名订阅，无需
+// 每种 type 各挂一个监听。读路径、无鉴权（与其余 GET 一致；S1 下
+// loopback-only / 前置反代）。
+//
+// 连接管理：
+//   - 首帧发注释行 ": connected" 立即刷新，让客户端确定连接已建立；
+//   - 每 20s 发 ": ping" 心跳——穿过反代/代理的空闲超时，也便于客户端
+//     感知连接存活；
+//   - r.Context().Done() 触发（客户端断开/超时/服务停机）即退订返回。
+//
+// 慢客户端不阻塞写路径：Hub 缓冲满即丢该条（事件页是全量刷新语义，
+// 丢一帧下一帧自愈）。
+func (g *RESTGateway) handleEventStream(w http.ResponseWriter, r *http.Request) {
+	if g.hub == nil {
+		writeErr(w, http.StatusServiceUnavailable, "event stream disabled")
+		return
+	}
+	fl, ok := w.(http.Flusher)
+	if !ok {
+		writeErr(w, http.StatusInternalServerError, "streaming unsupported by server")
+		return
+	}
+	h := w.Header()
+	h.Set("Content-Type", "text/event-stream; charset=utf-8")
+	h.Set("Cache-Control", "no-store, must-revalidate")
+	h.Set("Connection", "keep-alive")
+	// 反代（nginx）默认缓冲响应，会攒够才下发——显式关闭，否则推送变"批量"。
+	h.Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, ": connected\n\n")
+	fl.Flush()
+
+	ch, cancel := g.hub.Subscribe()
+	defer cancel()
+
+	ka := time.NewTicker(20 * time.Second)
+	defer ka.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case msg, open := <-ch:
+			if !open { // Hub 关闭（停机）：结束连接
+				return
+			}
+			b, err := json.Marshal(msg)
+			if err != nil {
+				continue // 理论不可达；坏帧跳过，不断流
+			}
+			fmt.Fprintf(w, "event: incident\ndata: %s\n\n", b)
+			fl.Flush()
+		case <-ka.C:
+			fmt.Fprint(w, ": ping\n\n")
+			fl.Flush()
+		}
+	}
 }
 
 // handleTransitionIncident POST /api/v1/incidents/{id}/transition —— 事件状态流转
