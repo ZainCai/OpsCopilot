@@ -10,6 +10,10 @@
 | [ADR-004](ADR-004-redis-dual-instance.md) | Redis 双实例物理隔离（alert 持久化 / cache 可逐出）  | 已接受          |
 | [ADR-005](ADR-005-audit-separation.md)    | 审计存储与业务库分离（append-only + 哈希链）         | 已接受          |
 | [ADR-006](ADR-006-database-deployment.md) | 数据库部署策略 + **关键外部依赖清单**                | 已接受（法务确认收尾中） |
+| [ADR-007](ADR-007-topology-confidence.md) | 拓扑证据三级置信度，low 硬门禁不进因果推理 | 已接受 |
+| [ADR-008](ADR-008-external-incident-generations.md) | 外部事件按"代"演进：复发即新建，不重开旧单（M9） | 已接受 |
+| [ADR-009](ADR-009-listen-security-gate.md) | 监听×写密钥组合启动期 fail-fast 门禁 + CORS 白名单（D1/D2） | 已接受 |
+| [ADR-010](ADR-010-incident-archival.md) | 工单 resolved 满期归档（JSONB 快照），审计随单长留（D8） | 已接受 |
 
 ## 写新 ADR 时的检查清单
 
