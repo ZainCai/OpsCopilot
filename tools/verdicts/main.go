@@ -16,6 +16,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -29,6 +30,16 @@ type verdict struct {
 	Reason      string    `json:"reason"`
 }
 
+// resolveTenant 租户取值口径：flag/环境值 > "default"。
+// 空租户会让查询静默返回 0 行，进而让 evaluate.py 产生"静默段全 PASS"
+// 的假 100%（第七轮 H3）——必须兜底。
+func resolveTenant(v string) string {
+	if t := strings.TrimSpace(v); t != "" {
+		return t
+	}
+	return "default"
+}
+
 func main() {
 	var (
 		dsn    = flag.String("dsn", os.Getenv("OPS_DB_DSN"), "PG DSN（缺省读 OPS_DB_DSN）")
@@ -37,9 +48,7 @@ func main() {
 		tenant = flag.String("tenant", os.Getenv("OPS_TENANT"), "租户（缺省读 OPS_TENANT，再缺省 default）")
 	)
 	flag.Parse()
-	if *tenant == "" {
-		*tenant = "default" // 第七轮 H3：帮助文本承诺的兜底此前没实现，空租户会静默查 0 行
-	}
+	*tenant = resolveTenant(*tenant) // 第七轮 H3：空租户会静默查 0 行（假 100%）
 	if *dsn == "" {
 		fmt.Fprintln(os.Stderr, "no DSN (set OPS_DB_DSN or -dsn)")
 		os.Exit(2)

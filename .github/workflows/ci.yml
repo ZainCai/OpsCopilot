@@ -25,6 +25,8 @@ jobs:
             echo "请在本地执行: gofmt -w ."
             exit 1
           fi
+      - name: go vet
+        run: go vet ./...
       - name: Build
         run: go build ./...
       - name: Test
