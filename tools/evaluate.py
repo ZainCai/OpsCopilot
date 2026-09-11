@@ -95,12 +95,16 @@ def main():
     ap.add_argument("--verdicts-file", default="",
                     help="从 tools/verdicts 导出的 JSON 读判决（无 Docker 环境用；"
                          "设置后跳过 docker exec 取数）")
+    ap.add_argument("--cutoff", default="",
+                    help="评估截止时刻（ISO8601）：start > cutoff 的段一律不计——"
+                         "注入器停机后的空段不应参与打分（静默段会被误算 PASS）")
     args = ap.parse_args()
 
     global DOCKER
     DOCKER = args.docker
     book = fetch_answerbook(args.answerbook)
     verdicts = load_verdicts_file(args.verdicts_file) if args.verdicts_file else fetch_verdicts()
+    cutoff = parse_ts(args.cutoff) if args.cutoff else None
     segments = book["segments"]
     now = datetime.now(timezone.utc)
     # 只评已完结的段（end <= now），且只看最近 7 天。
@@ -114,6 +118,8 @@ def main():
         start, end = parse_ts(seg["start"]), parse_ts(seg["end"])
         if end > now or end < horizon:
             continue
+        if cutoff and start > cutoff:
+            continue  # 注入器已停机的时段：不打分（空静默段会虚增分数）
         sc = seg["scenario"]
         if sc == "C":  # 静默段：有判决即扣分
             total += 1

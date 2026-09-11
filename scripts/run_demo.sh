@@ -41,6 +41,12 @@ fi
 SCALE=1.0
 [ "${1:-}" = "--fast" ] && SCALE=0.1
 
+# 环境变量透传（D12=B 评估用）：租户与降噪窗口可由调用方覆盖——
+# 评估需要 窗口 < 静默段(300s)，否则上一段簇未 resolve、下一段告警并入
+# 旧簇是正确降噪行为，却会被 evaluate.py 误判 FAIL（22.7% 假象的另一根源）。
+export OPS_TENANT="${OPS_TENANT:-default}"
+export OPS_NOISE_WINDOW="${OPS_NOISE_WINDOW:-10m}"
+
 echo "building..."
 (cd "$ROOT" && go build -o "$OUT/faultinjector.exe" ./tools/faultinjector)
 (cd "$ROOT" && go build -o "$OUT/opscopilot.exe" ./cmd/opscopilot)
@@ -60,7 +66,6 @@ REDIS_ALERT_ADDR=127.0.0.1:6380 \
 REDIS_CACHE_ADDR=127.0.0.1:6381 \
 OPS_PROM_URL=http://127.0.0.1:19090 \
 OPS_WEBHOOK_TOKEN=dev \
-OPS_NOISE_WINDOW=10m \
 OPS_TOPOLOGY_EDGES="n1->n2,n2->n3" \
 OPS_DB_DSN="postgres://opscopilot:opscopilot@127.0.0.1:5432/opscopilot?sslmode=disable" \
 OPS_LISTEN_ADDR=127.0.0.1:8080 \
