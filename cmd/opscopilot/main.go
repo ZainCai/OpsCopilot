@@ -79,11 +79,13 @@ func main() {
 	if asm.Noise != nil {
 		noiseRDB = redis.NewClient(&redis.Options{Addr: os.Getenv("REDIS_ALERT_ADDR")})
 		redisSink := NewRedisClusterSink(noiseRDB, DefaultTenant)
+		var pgSink *PGClusterSink
 		if dsn := os.Getenv("OPS_DB_DSN"); dsn != "" {
-			pgSink, err := NewPGClusterSink(context.Background(), dsn, DefaultTenant)
+			sink, err := NewPGClusterSink(context.Background(), dsn, DefaultTenant)
 			if err != nil {
 				logger.Printf("WARNING: pg sink unavailable (redis mirror only): %v", err)
 			} else {
+				pgSink = sink
 				defer pgSink.Close()
 				asm.Noise.SetRecordSink(&multiRecordSink{a: redisSink, b: pgSink})
 				asm.Noise.SetVerdictSink(pgSink)
@@ -93,6 +95,8 @@ func main() {
 			asm.Noise.SetRecordSink(redisSink)
 			logger.Printf("noise persistence: redis mirror only (set OPS_DB_DSN for truth source)")
 		}
+		// W9-1 闸门接线在装配层（attachNoiseGate）：enforce 挂闸门 + 计数
+		// 真相源（共享池），shadow 只打日志。此处只负责簇恢复。
 		if recs, err := redisSink.LoadClusters(context.Background()); err != nil {
 			logger.Printf("noise cluster restore skipped (redis unreachable): %v", err)
 		} else if len(recs) > 0 {
@@ -220,9 +224,12 @@ func main() {
 		logger.Printf("  connectors: none (set OPS_PROM_URL / OPS_AZURE_SUBSCRIPTION_ID+OPS_AZURE_TOKEN to enable)")
 	}
 	if asm.Noise == nil {
-		logger.Printf("  noise: shadow mode OFF (OPS_NOISE_SHADOW=off)")
+		logger.Printf("  noise: OFF (OPS_NOISE_SHADOW=off)")
+	} else if asm.Noise.Mode() == ModeEnforce {
+		logger.Printf("  noise: enforce (WouldSuppress 真拦截 + 放行通知; window %s; 回退=OPS_NOISE_MODE=shadow)",
+			noiseWindowForLog())
 	} else {
-		logger.Printf("  noise: shadow mode ON (alerts annotated, NOT suppressed; window %s)", noiseWindowForLog())
+		logger.Printf("  noise: shadow (alerts annotated, NOT suppressed; window %s)", noiseWindowForLog())
 	}
 	if asm.Ingest != nil {
 		logger.Printf("  ingest: ON (POST /api/v1/ingest/{alertmanager,webhook}; auto-create %s)",
@@ -236,7 +243,7 @@ func main() {
 		logger.Printf("  alert pull: OFF (set OPS_PULL_ALERTS=on + OPS_PROM_URL to enable)")
 	}
 	logger.Printf("  events: 双链路（人工建单 POST /api/v1/incidents ∥ 外部导入 push/pull）+ SSE 实时推送 + 控制台事件页 /console")
-	logger.Printf("  not wired (W5+/M2): rca, notify, sessionstore, /metrics（预留件，见 README「预留未接线的组件」）")
+	logger.Printf("  not wired (M2): rca, sessionstore, /metrics（预留件，见 README「预留未接线的组件」；notify 闸门已随 W9-1 enforce 接线）")
 	logger.Printf("POST %s (change events) | GET /healthz | listening on %s",
 		changeWebhookPath, addr)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

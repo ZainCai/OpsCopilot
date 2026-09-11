@@ -14,6 +14,7 @@ import (
 
 	"opscopilot/internal/connector"
 	"opscopilot/internal/noise"
+	"opscopilot/internal/notify"
 )
 
 // 影子降噪环境变量。
@@ -23,6 +24,19 @@ const (
 	// envNoiseShadow 影子开关："off" 关闭采集侧降噪处理（默认开）。
 	// 关闭 = 完全不处理（连影子判决都不产生），回到 W3 只计数行为。
 	envNoiseShadow = "OPS_NOISE_SHADOW"
+	// envNoiseMode 降噪模式（W9-1 转正，ADR-011）：
+	//   shadow（默认）——只标注不拦截，告警全量放行（影子纪律）；
+	//   enforce —— WouldSuppress 判决交给 Gate 真拦截 + 放行通知；
+	// 非法值启动失败（与 OPS_NOISE_WINDOW 同纪律：静默回退会让运维
+	// 以为配置生效了）。判决落库两种模式都在跑——enforce 首周
+	// shadow 双跑对比的数据基础（ADR-011）。
+	envNoiseMode = "OPS_NOISE_MODE"
+)
+
+// 降噪模式常量。
+const (
+	ModeShadow  = "shadow"
+	ModeEnforce = "enforce"
 )
 
 // defaultNoiseWindow 影子期默认窗口：30s 采集轮询下，10 分钟足以覆盖
@@ -53,6 +67,17 @@ type NoiseEngine struct {
 	// 随历史线性增长——按签名去重，只有变化过的簇才写。Restore 后清空
 	// （重建自存储侧，签名必须重新建立）。
 	persistedSig map[string]string
+	// enforce 转正模式（W9-1，ADR-011）：true = WouldSuppress 判决交
+	// Gate 真拦截、放行项发通知；false = 影子（默认，不碰 Gate）。
+	enforce bool
+	// gate 通知闸门（enforce 模式的执行件；shadow 模式恒 nil）。
+	// Admit 在锁外调用：渠道 Send 自带超时（Notifier 契约），不能拖住
+	// 引擎锁——与落库 IO 同一锁边界纪律。
+	gate *notify.Gate
+	// gateStats Gate 计数真相源出口（nil = 只累计内存，重启清零）。
+	gateStats GateStatsSink
+	// gateFailures 计数持久化失败累计（尽力而为，不中断告警链路）。
+	gateFailures int
 }
 
 // DefaultTenant M1 单租户缺省值（alert_cluster.tenant_id 对齐）。
@@ -84,6 +109,15 @@ func NewNoiseEngine(sink *TopologySink, logger connector.Logger) (*NoiseEngine, 
 		}
 		window = d
 	}
+	mode := ModeShadow
+	if raw := strings.TrimSpace(os.Getenv(envNoiseMode)); raw != "" {
+		switch strings.ToLower(raw) {
+		case ModeShadow, ModeEnforce:
+			mode = strings.ToLower(raw)
+		default:
+			return nil, &invalidNoiseModeError{raw: raw}
+		}
+	}
 	return &NoiseEngine{
 		shadow:       noise.NewShadow(window, nil), // 域函数按批经 SetDomain 注入
 		sink:         sink,
@@ -91,6 +125,7 @@ func NewNoiseEngine(sink *TopologySink, logger connector.Logger) (*NoiseEngine, 
 		logger:       logger,
 		tenant:       DefaultTenant,
 		persistedSig: make(map[string]string),
+		enforce:      mode == ModeEnforce,
 	}, nil
 }
 
@@ -131,6 +166,42 @@ func (e *invalidNoiseWindowError) Error() string {
 	return "noise: invalid " + envNoiseWindow + " " + e.raw + ": " + e.err.Error()
 }
 
+type invalidNoiseModeError struct{ raw string }
+
+func (e *invalidNoiseModeError) Error() string {
+	return "noise: invalid " + envNoiseMode + " " + e.raw + ": must be \"shadow\" or \"enforce\""
+}
+
+// GateStatsSink Gate 拦截/放行计数的真相源出口（R6-6：转正后拦截数是
+// 核心运维指标，重启不得清零）。实现必须幂等——同租户重复 Save 结果
+// 不变（覆盖写累计值）。nil = 只累计内存。
+type GateStatsSink interface {
+	SaveGateStats(tenant string, s notify.Stats) error
+	LoadGateStats(tenant string) (notify.Stats, error)
+}
+
+// SetGate 挂载通知闸门（W9-1，enforce 模式执行件）。传 nil 卸载。
+// 挂载时若配了真相源出口，先恢复历史累计（进程重启不清零）。
+// 影子模式下闸门不会被调用，挂了也无副作用——但装配层应只在
+// enforce 下挂载，让"配置意图"与"运行时行为"可从装配代码直接对读。
+func (n *NoiseEngine) SetGate(g *notify.Gate, s GateStatsSink) {
+	if n == nil {
+		return
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.gate = g
+	n.gateStats = s
+	if g != nil && s != nil {
+		if st, err := s.LoadGateStats(n.tenant); err != nil {
+			n.logf("WARNING: gate stats restore skipped (starting from zero): %v", err)
+		} else if st.Suppressed > 0 || st.Dispatched > 0 {
+			g.SetStats(st)
+			n.logf("gate stats restored: suppressed=%d dispatched=%d", st.Suppressed, st.Dispatched)
+		}
+	}
+}
+
 // batchView 一批采集的拓扑视图：因果邻接表 + instance→节点 Key 反查索引。
 type batchView struct {
 	adj      map[string][]string
@@ -155,6 +226,7 @@ func (n *NoiseEngine) ProcessAlerts(alerts []connector.Alert) {
 
 	var suppressed, merged, created int
 	var verdicts []noise.VerdictRecord
+	var decisions []notify.Decision
 	for _, a := range alerts {
 		e := n.toEvent(a, view)
 		v := n.shadow.Process(e)
@@ -172,6 +244,17 @@ func (n *NoiseEngine) ProcessAlerts(alerts []connector.Alert) {
 		if v.ClusterCreated {
 			created++
 		}
+		if n.enforce && n.gate != nil {
+			// enforce 模式（ADR-011）：每条判决都过闸门——
+			// WouldSuppress=true 拦截计数；false 放行并全渠道通知。
+			// 判决照常落库：enforce 首周与影子基线对比的数据基础。
+			decisions = append(decisions, notify.Decision{
+				ClusterKey:    v.ClusterKey,
+				Severity:      v.Severity,
+				Title:         v.Summary,
+				WouldSuppress: v.WouldSuppress,
+			})
+		}
 	}
 	n.logf("shadow verdict: %d alerts (new %d, dedup %d, merged %d) — cumulative converge %d/%d",
 		len(alerts), created, suppressed, merged, n.converged, n.total)
@@ -184,6 +267,7 @@ func (n *NoiseEngine) ProcessAlerts(alerts []connector.Alert) {
 	if n.verdicts != nil {
 		vs = n.verdicts
 	}
+	gate, gs := n.gate, n.gateStats
 	n.mu.Unlock()
 
 	if len(dirty) > 0 {
@@ -192,6 +276,40 @@ func (n *NoiseEngine) ProcessAlerts(alerts []connector.Alert) {
 	if vs != nil {
 		n.persistVerdicts(vs, verdicts)
 	}
+	if len(decisions) > 0 && gate != nil {
+		n.admitDecisions(gate, gs, decisions)
+	}
+}
+
+// admitDecisions enforce 模式闸门执行（锁外，与落库 IO 同一锁边界纪律：
+// 渠道 Send 自带超时，同步调用不 go 出去——异步会丢"放行失败"的
+// 可观察性，且渠道间顺序没有契约值得保）。
+// 拦截/放行计数持久化：每批批后保存累计值（覆盖写，幂等）；失败只
+// 计数+日志，下一批覆盖写自然补齐（累计值语义下无脏写问题）。
+func (n *NoiseEngine) admitDecisions(gate *notify.Gate, gs GateStatsSink, decisions []notify.Decision) {
+	var admitted int
+	for _, d := range decisions {
+		ok, err := gate.Admit(d)
+		if err != nil {
+			// 空判决（无簇无标题）或全渠道失败：计数为闸门异常，
+			// 不中断后续告警的闸门判定。
+			n.gateFailures++
+			n.logf("WARNING: gate admit failed (cumulative %d): %v", n.gateFailures, err)
+			continue
+		}
+		if ok {
+			admitted++
+		}
+	}
+	st := gate.Stats()
+	if gs != nil {
+		if err := gs.SaveGateStats(n.tenant, st); err != nil {
+			n.gateFailures++
+			n.logf("WARNING: gate stats persist failed (cumulative %d): %v", n.gateFailures, err)
+		}
+	}
+	n.logf("enforce gate: %d decisions (admitted %d, suppressed %d) — cumulative suppressed=%d dispatched=%d",
+		len(decisions), admitted, len(decisions)-admitted, st.Suppressed, st.Dispatched)
 }
 
 // persistVerdicts 逐告警判决落库（W6-1，锁外）。失败只计数+日志——
@@ -366,6 +484,17 @@ func (n *NoiseEngine) Stats() (total, converged int) {
 
 // Enabled 影子降噪是否启用。
 func (n *NoiseEngine) Enabled() bool { return n != nil && n.enabled }
+
+// Mode 降噪模式（shadow / enforce）。nil 引擎（整体关闭）返回空串。
+func (n *NoiseEngine) Mode() string {
+	if n == nil {
+		return ""
+	}
+	if n.enforce {
+		return ModeEnforce
+	}
+	return ModeShadow
+}
 
 func (n *NoiseEngine) logf(format string, args ...interface{}) {
 	if n.logger != nil {

@@ -194,6 +194,8 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 
 	// W9 双链路链路 A（外部导入）：入队通道需要 DB 队列（持久化/可积压/可重放）。
 	// 无 DB 时不注册队列——入队端点显式 503（见 Handler），比 404 可诊断。
+	// W9-1 转正（ADR-011）：闸门接线也在装配层（enforce 才挂，计数用共享池）。
+	attachNoiseGate(noiseEngine, pgPool, logf)
 	if pgPool != nil {
 		queue := NewPGIngestQueue(pgPool, DefaultTenant)
 		owner := &QueueOwner{}

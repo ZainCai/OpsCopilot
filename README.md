@@ -92,6 +92,7 @@ migrate -path migrations -database "postgres://opscopilot:opscopilot@localhost:5
 | `OPS_DB_MAX_CONNS` | `16` | **D7**：事件 Store + 导入队列 + 审计共池上限 |
 | `OPS_INCIDENT_RETENTION` | `90d` | **D8**：resolved 事件归档保留期（`90d`/`2160h`/`off`）；归档含事件+簇+审计 |
 | `OPS_NOISE_WINDOW` | `10m` | 影子降噪去重/聚类窗口；**评估时须 < 静默段 300s**（如 `4m`），否则打分失真 |
+| `OPS_NOISE_MODE` | `shadow` | **ADR-011 转正模式**：`shadow` 只标注不拦截（行为同 M1）；`enforce` 噪声判决真拦截 + 放行项发通知；非法值启动失败。回退 = 改回 shadow 重启 |
 
 其余：`OPS_NOISE_SHADOW`、`OPS_INCIDENT_AUTOCREATE`、`OPS_PULL_ALERTS`、`OPS_PULL_INTERVAL`、`OPS_PROM_URL`、`OPS_TOPOLOGY_EDGES` 等见 `.env.example` 注释。
 
@@ -128,7 +129,7 @@ curl -X POST http://127.0.0.1:8080/api/v1/changes \
 | 包 | 行数 | 用途 | 计划接线阶段 |
 |---|---|---|---|
 | `internal/rca` | 124 | 根因分析（证据窗口、因果子图消费方） | M2 |
-| `internal/notify` | 164 | 通知渠道（影子转正的前置件，见 TODO） | M2（影子转正前） |
+| `internal/notify` | 164 | 通知闸门/渠道（**Gate 已随 W9-1 enforce 接线**，Console 渠道；真实渠道 W9-2） | 渠道扩展 W9-2 |
 | `internal/sessionstore` | 61 | 会话状态（Redis 会话存储） | W5+ |
 
 历史审核报告在 `docs/reviews/`（原堆在仓库根，D11 决策 A 归档）；M2 候选清单与双链路方案在 `docs/`。

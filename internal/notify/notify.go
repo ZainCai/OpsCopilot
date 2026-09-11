@@ -162,3 +162,13 @@ func (g *Gate) Stats() Stats {
 	defer g.mu.Unlock()
 	return Stats{Suppressed: g.suppressed, Dispatched: g.dispatched}
 }
+
+// SetStats 恢复累计计数（W9-1 转正：进程重启后从真相源拉平，R6-6——
+// 拦截数是核心运维指标，重启清零会让"降噪省了多少"永远从零看起）。
+// 只允许启动期调用一次；运行中调用会破坏单调累计语义（调用方责任）。
+func (g *Gate) SetStats(s Stats) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.suppressed = s.Suppressed
+	g.dispatched = s.Dispatched
+}
