@@ -86,6 +86,14 @@ migrate -path migrations -database "postgres://opscopilot:opscopilot@localhost:5
 | `REDIS_CACHE_ADDR` | 无（必填） | 缓存实例地址，必须与 alert 物理分离 |
 | `OPS_LISTEN_ADDR` | `127.0.0.1:8080` | HTTP 监听地址；**默认只绑回环**（S1），容器/对外部署需显式 `0.0.0.0:8080`（compose 已配） |
 | `OPS_WEBHOOK_TOKEN` | 空（无鉴权） | 变更 webhook 共享密钥；非回环暴露前必须设置 |
+| `OPS_ALLOW_UNAUTHENTICATED` | `off` | **D1 门禁豁免**：非回环监听且无 token 时启动失败；仅限本机联调显式开启 |
+| `OPS_CORS_ORIGIN` | 空（仅同源） | **D2**：跨源放行白名单；`*` 与非法形态启动失败；`null` 供 file:// 调试 |
+| `OPS_TENANT` | `default` | 租户 ID（事件/簇/审计/队列共用）；评估环境用独立租户隔离数据 |
+| `OPS_DB_MAX_CONNS` | `16` | **D7**：事件 Store + 导入队列 + 审计共池上限 |
+| `OPS_INCIDENT_RETENTION` | `90d` | **D8**：resolved 事件归档保留期（`90d`/`2160h`/`off`）；归档含事件+簇+审计 |
+| `OPS_NOISE_WINDOW` | `10m` | 影子降噪去重/聚类窗口；**评估时须 < 静默段 300s**（如 `4m`），否则打分失真 |
+
+其余：`OPS_NOISE_SHADOW`、`OPS_INCIDENT_AUTOCREATE`、`OPS_PULL_ALERTS`、`OPS_PULL_INTERVAL`、`OPS_PROM_URL`、`OPS_TOPOLOGY_EDGES` 等见 `.env.example` 注释。
 
 ### 变更事件 webhook
 

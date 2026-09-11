@@ -134,10 +134,7 @@ func (g *RESTGateway) route(w http.ResponseWriter, r *http.Request) {
 	case "/api/v1/events/stream":
 		g.handleEventStream(w, r)
 	case "/api/v1/incidents":
-		if r.Method == http.MethodPost {
-			g.handleCreateIncident(w, r)
-			return
-		}
+		// POST /api/v1/incidents 由 mux 精确模式（method+path）接管，不会进到这里。
 		g.handleIncidents(w, r)
 	default:
 		// /api/v1/clusters/{key} 与 /api/v1/incidents/{id}：路径参数经 PathValue 取。

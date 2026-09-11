@@ -111,10 +111,6 @@ func (g *RESTGateway) handleTopology(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// handleCreateIncident POST /api/v1/incidents —— 链路 B：人工建单。
-// 写路径：必须携带共享密钥（复用 ChangeWebhook 的鉴权件，R6 应对），
-// 且 origin 恒为 manual、auto_close_policy 恒为 manual_only（R2：人工单
-// 不允许外部恢复自动关闭）。
 func (g *RESTGateway) handleChanges(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	resp, err := g.sem.GetRecentChanges(r.Context(), &pb.GetRecentChangesRequest{
