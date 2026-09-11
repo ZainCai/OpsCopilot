@@ -23,7 +23,14 @@ func checkListenSecurity(addr, token string, allowUnauthenticated bool) error {
 	if err != nil {
 		host = strings.TrimSpace(addr) // 形如只写了 host：按原样判断
 	}
-	if host == "" || isLoopbackHost(host) {
+	if host == "" {
+		// `:8080` 形式：http.Server 会监听**全部网络接口**（IPv4+IPv6 通配），
+		// 等同 0.0.0.0——绝不是"只绑本机"。第七轮 H1：此前被当回环放行，
+		// D1 门禁可被此写法整段绕过。
+		return fmt.Errorf(
+			"listening on %q would bind all interfaces; without OPS_WEBHOOK_TOKEN this exposes unauthenticated write endpoints", addr)
+	}
+	if isLoopbackHost(host) {
 		return nil // 回环 = 只有本机能访问，安全默认
 	}
 	return fmt.Errorf(
