@@ -27,10 +27,30 @@ import (
 // ingestTimeout 单条 SQL 超时。
 const ingestTimeout = 5 * time.Second
 
-// batchTimeout 一批"领取→处理→落状态"的整体超时。批量处理含 N 次建单/更新，
-// 用单语句的 5s 会误杀正常的批量（20 条 × 每条数十毫秒）。30s 足够且不至于
-// 让一个卡死的批次永久占着行锁。
-const batchTimeout = 30 * time.Second
+// batchTimeoutFor 一批"领取→处理→落状态"的整体超时，与批量规模对齐。
+//
+// 第七轮 M-2：固定 30s 会在 DB 慢时让 Commit 失败整批回滚，而批内 store 写
+// （UpsertExternal 等）走独立连接**已提交、不会回滚** → 下轮重放。幂等挡住了
+// 重复建单，但重放会重复走 ExternalActive/applyRateLimit，极端下把重放计成
+// 新建、提前折叠进 burst 单。单条最坏路径 ≈ ExternalActive + UpsertExternal
+// （+ 恢复语 Transition）三次 5s 语句超时 ≈ 15s，故超时随批量线性放大。
+//
+// 注意：整批一个事务的前提是**单 worker**（多 worker 也安全——FOR UPDATE
+// SKIP LOCKED 各领各的——但"行锁覆盖处理全程"的互斥语义只在单连接池内成立）。
+// 多实例部署时需改为按条短事务（列入 M2）。
+func batchTimeoutFor(batch int) time.Duration {
+	if batch <= 0 {
+		batch = 20
+	}
+	d := time.Duration(batch) * 15 * time.Second
+	if d < 30*time.Second {
+		d = 30 * time.Second
+	}
+	if d > 10*time.Minute {
+		d = 10 * time.Minute
+	}
+	return d
+}
 
 // maxIngestAttempts 单条消息的最大处理次数。达上限后不再被领取（死信），
 // 否则一条永久坏消息会每轮占用批量名额、每轮失败、刷爆日志。
@@ -82,7 +102,7 @@ type Item struct {
 // 失败语义：单条失败只累加 attempts（事务照常提交），不因一条坏消息回滚整批；
 // 达 maxIngestAttempts 后该行不再被领取（死信，attempts/last_error 留存可查）。
 func (q *PGIngestQueue) processBatch(limit int, process func(Item) error) (int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), batchTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), batchTimeoutFor(limit))
 	defer cancel()
 	tx, err := q.pool.Begin(ctx)
 	if err != nil {
