@@ -136,6 +136,15 @@ type NoiseSection struct {
 	// DedupWindow L2 事件相似度的时间邻近窗口（原 cmd 常量 dedupWindow，
 	// #10 魔法数字）。归入降噪组：与告警去重同一语义。
 	DedupWindow time.Duration // OPS_DEDUP_WINDOW，默认 30m
+	// ---- 判决异步落库队列（优化方案 #8）----
+	// ProcessAlerts 生成判决后投递到带缓冲 channel，独立 writer goroutine
+	// 攒批落库（Redis 镜像 + PG 真相源，沿用现有 sink 接口）；采集/判决
+	// goroutine 投递即返回，慢 DB 不再占死采集节拍。红线是判决不丢：
+	// 队满先阻塞投递（宁慢不丢），超时才退化同步写 + WARN + 计数。
+	WriteQueueSize           int           // OPS_NOISE_WRITEQ_SIZE 队列缓冲判决条数，默认 10000
+	WriteQueueBatch          int           // OPS_NOISE_WRITEQ_BATCH writer 单批落库条数阈值，默认 200
+	WriteQueueFlush          time.Duration // OPS_NOISE_WRITEQ_FLUSH writer 定时刷批周期（不满一批的最长滞留），默认 2s
+	WriteQueueEnqueueTimeout time.Duration // OPS_NOISE_WRITEQ_ENQUEUE_TIMEOUT 队满阻塞投递超时（超时退化同步写），默认 5s
 }
 
 // PullSection 链路 A 拉取侧（W11）。源地址/令牌复用 ConnectorSection 的
@@ -285,6 +294,16 @@ const (
 	DefaultNoiseWindow = 10 * time.Minute
 	DefaultDedupWindow = 30 * time.Minute
 
+	// 判决异步落库队列默认值（优化方案 #8）。取值依据："正常规模几乎不触发
+	// 异步退化路径"——百台级一轮数百告警、30s 节拍， writer 每 2s 刷一批
+	// （单条判决写 PG 毫秒级），健康 DB 下队列深度常态≈0；10000 条缓冲 ≈
+	// 50 个满批，等价于 DB 完全停摆近半分钟仍不触背压，而阻塞超时 5s 对齐
+	// PG 语句超时（pgSinkTimeout）——真到退化路径时同步写也自带同一上界。
+	DefaultNoiseWriteQSize           = 10000
+	DefaultNoiseWriteQBatch          = 200
+	DefaultNoiseWriteQFlush          = 2 * time.Second
+	DefaultNoiseWriteQEnqueueTimeout = 5 * time.Second
+
 	// Noise 模式枚举。
 	NoiseModeShadow  = "shadow"
 	NoiseModeEnforce = "enforce"
@@ -343,6 +362,10 @@ func Defaults() *Config {
 	c.Noise.Window = DefaultNoiseWindow
 	c.Noise.Mode = NoiseModeShadow
 	c.Noise.DedupWindow = DefaultDedupWindow
+	c.Noise.WriteQueueSize = DefaultNoiseWriteQSize
+	c.Noise.WriteQueueBatch = DefaultNoiseWriteQBatch
+	c.Noise.WriteQueueFlush = DefaultNoiseWriteQFlush
+	c.Noise.WriteQueueEnqueueTimeout = DefaultNoiseWriteQEnqueueTimeout
 	c.Pull.Interval = DefaultPullInterval
 	c.Ingest.Interval = DefaultIngestInterval
 	c.Ingest.Batch = DefaultIngestBatch

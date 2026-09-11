@@ -81,8 +81,10 @@ func TestMetricsLatencyInstrumentation(t *testing.T) {
 	}
 	defer asm.pool.Close()
 	// 判决落库出口在 main 里接线（main.go: asm.Noise.SetVerdictSink(pgSink)）——
-	// 本测试复现同一接线，否则"fired → verdict 落库"没有落库时刻可打点。
+	// 本测试复现同一接线，否则"fired → verdict"链路不执行。
+	// 先接线再登记 drain：t.Cleanup 逆序执行，保证 writer 在 pgSink 池关闭前退出。
 	asm.Noise.SetVerdictSink(pgSink)
+	t.Cleanup(asm.Noise.StopVerdictWriter) // 优化方案 #8：异步落库先 drain
 
 	now := time.Now()
 	// 5 个互不相邻的节点 → 5 个独立故障域（reachable 只在 a==b 或图上可达时为真）。
@@ -206,9 +208,11 @@ func TestMetricsSkipsAlertsWithoutStartsAt(t *testing.T) {
 		t.Fatalf("assembly: %v", err)
 	}
 	defer asm.pool.Close()
-	// 必须接线判决落库出口：否则 persistVerdicts 整个不执行，
+	// 必须接线判决落库出口：否则判决分发（submitVerdicts）整个不执行，
 	// "观测数为 0" 会因**没跑落库**而空过——测不到 startsAt 缺失这条路径。
+	// 先接线再登记 drain（Cleanup 逆序：writer 先退、池后关）。
 	asm.Noise.SetVerdictSink(pgSink)
+	t.Cleanup(asm.Noise.StopVerdictWriter) // 优化方案 #8：异步落库先 drain
 
 	now := time.Now()
 	if err := asm.Sink.IngestDiscover(context.Background(), &connector.DiscoverResult{Nodes: []connector.ResourceNode{

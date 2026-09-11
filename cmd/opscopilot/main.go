@@ -216,6 +216,12 @@ func main() {
 		<-sig
 		logger.Printf("shutdown signal received, draining...")
 		runCancel()
+		// 优化方案 #8：判决异步落库队列先 drain（writer 落完存量判决；在途
+		// 新批次自动走同步兜底）。必须在关闭 Redis 镜像与共享池之前——
+		// runCtx 取消后采集循环退出，这里等的只是队列里的尾巴。
+		if asm.Noise != nil {
+			asm.Noise.StopVerdictWriter()
+		}
 		// SSE 是长连接：http.Server.Shutdown 只等"连接变空闲"，**不会**取消
 		// 在途请求的 ctx。若先 Shutdown，每个在线控制台的 SSE 连接都要等到
 		// ctx 超时才退出 → 停机固定拖满 10s。故先关广播器：Hub 一关，SSE

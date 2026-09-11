@@ -294,6 +294,60 @@ func TestMemLimitKeys(t *testing.T) {
 	})
 }
 
+// TestNoiseWriteQueueKeys OPS_NOISE_WRITEQ_* 组（优化方案 #8 判决异步落库）：
+// 缺失 = 保守默认（正常规模几乎不触发队满退化路径）、合法覆盖逐项生效、
+// 非法值汇入统一聚合报错（fail-fast，#2 通道）。
+func TestNoiseWriteQueueKeys(t *testing.T) {
+	t.Run("defaults-conservative", func(t *testing.T) {
+		c, err := LoadFrom(envMap(redisEnv("127.0.0.1:6380", "127.0.0.1:6381")))
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		want := Defaults().Noise
+		if c.Noise.WriteQueueSize != want.WriteQueueSize || c.Noise.WriteQueueBatch != want.WriteQueueBatch ||
+			c.Noise.WriteQueueFlush != want.WriteQueueFlush || c.Noise.WriteQueueEnqueueTimeout != want.WriteQueueEnqueueTimeout {
+			t.Fatalf("writeq defaults drifted: %+v", c.Noise)
+		}
+		// 保守性约束（#8 要求）：队列容量至少能缓冲数十个满批——正常节拍
+		// （百条/30s + 单批毫秒级落库）下 DB 短暂停摆也不触退化路径。
+		if want.WriteQueueSize < 20*want.WriteQueueBatch {
+			t.Fatalf("WriteQueueSize(%d) must buffer >=20 full batches (batch=%d) to keep degradation rare",
+				want.WriteQueueSize, want.WriteQueueBatch)
+		}
+	})
+	t.Run("overrides", func(t *testing.T) {
+		env := redisEnv("127.0.0.1:6380", "127.0.0.1:6381")
+		env[EnvNoiseWriteQSize] = "50"
+		env[EnvNoiseWriteQBatch] = "10"
+		env[EnvNoiseWriteQFlush] = "500ms"
+		env[EnvNoiseWriteQEnqueueTimeout] = "2s"
+		c, err := LoadFrom(envMap(env))
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if c.Noise.WriteQueueSize != 50 || c.Noise.WriteQueueBatch != 10 ||
+			c.Noise.WriteQueueFlush != 500*time.Millisecond || c.Noise.WriteQueueEnqueueTimeout != 2*time.Second {
+			t.Fatalf("writeq overrides not applied: %+v", c.Noise)
+		}
+	})
+	t.Run("invalid-aggregate", func(t *testing.T) {
+		env := redisEnv("127.0.0.1:6380", "127.0.0.1:6381")
+		env[EnvNoiseWriteQSize] = "0"    // 非正 → 拒绝
+		env[EnvNoiseWriteQBatch] = "abc" // 非整数 → 拒绝
+		env[EnvNoiseWriteQFlush] = "-3s" // 非正 duration → 拒绝
+		_, err := LoadFrom(envMap(env))
+		var agg *Error
+		if !errors.As(err, &agg) || len(agg.Errs) != 3 {
+			t.Fatalf("want 3 aggregated errors, got %v", err)
+		}
+		for _, key := range []string{EnvNoiseWriteQSize, EnvNoiseWriteQBatch, EnvNoiseWriteQFlush} {
+			if !strings.Contains(err.Error(), key) {
+				t.Errorf("aggregate must mention %s: %v", key, err)
+			}
+		}
+	})
+}
+
 // TestValidateCORSOrigin 跨源白名单规则（原 SetCORSOrigin 校验上移）：
 // 空=同源放行、"null" 与 scheme://host 合法、"*"/畸形值拒绝。
 func TestValidateCORSOrigin(t *testing.T) {

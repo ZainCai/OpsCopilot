@@ -79,6 +79,13 @@ type NoiseEngine struct {
 	// m 延迟/计数打点集（W9-4；nil = 不打点）。nil 安全：所有打点方法
 	// 自带判空，指标缺失不得影响告警链路。
 	m *AppMetrics
+	// vq 判决异步落库队列（优化方案 #8；n.mu 保护引用）。nil = 未启动，
+	// ProcessAlerts 走原同步落库路径——行为兼容：不调 StartVerdictWriter
+	// 的测试/嵌入式用法与 #8 之前完全一致。
+	vq *verdictWriter
+	// vqSpec 队列参数快照（构造注入，StartVerdictWriter 消费；#2 通道：
+	// 唯一装载点在 internal/config，这里只存解析好的值）。
+	vqSpec config.NoiseSection
 }
 
 // NewNoiseEngine 按显式参数构造（#2：env 读取与非法值 fail-fast 已在
@@ -100,6 +107,7 @@ func NewNoiseEngine(sink *TopologySink, logger connector.Logger, tenant string, 
 		tenant:   tenant,
 		enforce:  spec.Mode == ModeEnforce,
 		sigGuard: memguard.New("noise_sigcache", mem.NoiseSigCache, mem.WarnRatio),
+		vqSpec:   spec,
 	}
 	n.shadow = noise.NewShadowWithLimits(spec.Window, nil, // 域函数按批经 SetDomain 注入
 		memguard.New("noise_dedup", mem.NoiseDedup, mem.WarnRatio),
@@ -141,6 +149,7 @@ func (n *NoiseEngine) SetRecordSink(rs noise.RecordSink) {
 }
 
 // SetVerdictSink 挂载逐告警判决落库出口（W6-1）。传 nil 卸载。
+// 异步队列已启动时同步更新 writer 持有的出口引用（#8）。
 func (n *NoiseEngine) SetVerdictSink(vs noise.VerdictSink) {
 	if n == nil {
 		return
@@ -148,6 +157,9 @@ func (n *NoiseEngine) SetVerdictSink(vs noise.VerdictSink) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.verdicts = vs
+	if n.vq != nil {
+		n.vq.setSink(vs)
+	}
 }
 
 // GateStatsSink Gate 拦截/放行计数的真相源出口（R6-6：转正后拦截数是
@@ -210,8 +222,14 @@ type pendingDecision struct {
 // 拓扑视为不变。
 //
 // 锁边界（第四轮扫描 F3）：mu 保护处理段（快照/判决/签名比对），
-// **不持有落库 IO**——慢存储不能拖住 Stats()；同时落库保持同步
-// （不 go 出去）：异步会让批 N+1 先写、批 N 后写，旧数据覆盖新数据。
+// **不持有落库 IO**——慢存储不能拖住 Stats()。
+//
+// 落库路径（优化方案 #8 后）：
+//   - 簇快照仍同步：快照是"最新覆盖"语义，异步会让批 N+1 先写、批 N
+//     后写（旧数据覆盖新数据），必须保持调用方 goroutine 内串行；
+//   - 判决（append-only）投递到带缓冲队列（vq），单 writer 攒批落库——
+//     慢 DB 不再占死采集 goroutine。队列未启动（测试/嵌入式）或投递
+//     退化（队满超时/停机 drain 中）时回落同步写，判决不丢是红线。
 func (n *NoiseEngine) ProcessAlerts(alerts []connector.Alert) {
 	if n == nil || len(alerts) == 0 {
 		return
@@ -276,6 +294,7 @@ func (n *NoiseEngine) ProcessAlerts(alerts []connector.Alert) {
 	if n.verdicts != nil {
 		vs = n.verdicts
 	}
+	q := n.vq // 异步判决队列（#8；nil = 未启动，走同步落库）
 	gate, gs := n.gate, n.gateStats
 	n.mu.Unlock()
 
@@ -283,7 +302,7 @@ func (n *NoiseEngine) ProcessAlerts(alerts []connector.Alert) {
 		n.persistClusters(dirty)
 	}
 	if vs != nil {
-		n.persistVerdicts(vs, verdicts, fired)
+		n.submitVerdicts(q, vs, verdicts, fired)
 	}
 	if len(pending) > 0 && gate != nil {
 		n.admitDecisions(gate, gs, pending)
@@ -315,7 +334,7 @@ func (n *NoiseEngine) admitDecisions(gate *notify.Gate, gs GateStatsSink, decisi
 			if !p.fired.IsZero() {
 				n.m.ObserveNotifyLatency(time.Since(p.fired))
 			} else {
-				// 缺发射时刻：留痕（口径同上，见 persistVerdicts）。
+				// 缺发射时刻：留痕（口径同上，见 submitVerdicts）。
 				n.m.CountLatencySkipped("notify")
 			}
 		}
@@ -331,25 +350,46 @@ func (n *NoiseEngine) admitDecisions(gate *notify.Gate, gs GateStatsSink, decisi
 		len(decisions), admitted, len(decisions)-admitted, st.Suppressed, st.Dispatched)
 }
 
-// persistVerdicts 逐告警判决落库（W6-1，锁外）。失败只计数+日志——
-// 评估数据缺行会让准确率分母偏小，运维通过 verdictFailures 观察丢失面。
+// submitVerdicts 判决落库分发（W6-1，锁外）——优化方案 #8 的入口：
+//  1. 先按**判决生成时刻**观测 fired→verdict 延迟（口径见 metrics.go 与
+//     docs/W9-4 §9：异步化后"落库完成时刻"不再由采集 goroutine 掌握，
+//     分位口径收敛为"判决生成"，落库滞后由队列深度/队满计数观察）；
+//  2. 队列在跑 → 投递即返回；队满超时/停机 drain 中的判决同步兜底；
+//     队列未启动 → 整批同步落库（#8 之前的原行为）。
 //
-// W9-4：落库**成功后**观测"发射 → 判决落库完成"延迟（M1 报告点名的口径）。
-// fired 与 verdicts 平行等长；某条 fired 为零值（上游没给 startsAt）即跳过。
-func (n *NoiseEngine) persistVerdicts(vs noise.VerdictSink, verdicts []noise.VerdictRecord, fired []time.Time) {
+// fired 与 verdicts 平行等长；某条 fired 为零值（上游没给 startsAt）
+// 跳过观测但必须留痕（CountLatencySkipped），否则"processed 多、观测少"
+// 会被误读成丢样本。
+func (n *NoiseEngine) submitVerdicts(q *verdictWriter, vs noise.VerdictSink,
+	verdicts []noise.VerdictRecord, fired []time.Time) {
+	for i := range verdicts {
+		if i < len(fired) && !fired[i].IsZero() {
+			n.m.ObserveVerdictLatency(time.Since(fired[i]))
+		} else {
+			// 缺发射时刻（上游没给 startsAt）：观测不了但必须留痕——否则
+			// "processed 多、观测少"会被误读成丢样本。
+			n.m.CountLatencySkipped("verdict")
+		}
+	}
+	if q != nil {
+		if rest := n.enqueueVerdicts(q, verdicts); len(rest) > 0 {
+			n.persistVerdicts(vs, rest) // 退化路径：同步兜底，判决不丢
+		}
+		return
+	}
+	n.persistVerdicts(vs, verdicts)
+}
+
+// persistVerdicts 同步落库路径（队列未启用，或投递退化时的兜底）。
+// 失败只计数+日志——评估数据缺行会让准确率分母偏小，运维通过
+// verdictFailures（/metrics 镜像为 opscopilot_noise_write_dropped_total）
+// 观察丢失面。延迟打点不在此处（#8 后统一在 submitVerdicts 生成时刻）。
+func (n *NoiseEngine) persistVerdicts(vs noise.VerdictSink, verdicts []noise.VerdictRecord) {
 	failed := 0
-	for i, rec := range verdicts {
+	for _, rec := range verdicts {
 		if err := vs.SaveVerdict(rec); err != nil {
 			failed++
 			n.verdictFailures.Add(1)
-			continue // 失败的行没有"落库时刻"，打点会低估
-		}
-		if i < len(fired) && !fired[i].IsZero() {
-			n.m.ObserveVerdictLatency(time.Since(fired[i]))
-		} else if i < len(fired) {
-			// 上游没给发射时刻：观测不了，但必须留痕——否则
-			// "processed 多、观测少"会被误读成丢样本。
-			n.m.CountLatencySkipped("verdict")
 		}
 	}
 	if failed > 0 {

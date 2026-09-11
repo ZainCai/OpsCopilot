@@ -16,7 +16,9 @@
 >   （v1.2 C2 / G1"缺一拒绝启动"）不因收敛放松；两地址归一化后相同
 >   （`localhost` ≡ `127.0.0.1`、大小写/空白不敏感）同样拒绝启动。
 
-统计：**44 个运行时 env 键**（`OPS_*` 42 + `REDIS_*` 2），13 组。
+统计：**48 个运行时 env 键**（`OPS_*` 46 + `REDIS_*` 2），13 组。
+（优化方案 #8 新增 `OPS_NOISE_WRITEQ_*` 判决异步落库队列 4 键；#8 同时把
+`fired→verdict` 打点口径改为"判决生成"，见 docs/W9-4 §9。）
 （优化方案 #6 新增 `OPS_MEMLIMIT_*` 组 9 键：无界内存结构的容量上限 + 告警水位。）
 另有 1 个测试门控键与 2 个独立 CLI 工具的键，见文末附录 B/C。
 
@@ -43,31 +45,35 @@
 | 17 | `OPS_NOISE_WINDOW` | 降噪 | 正 duration | `10m` | 启动失败（原行为，实现移入 config） | `config.Noise.Window` → `noise.NewShadow` |
 | 18 | `OPS_NOISE_MODE` | 降噪 | 枚举 | `shadow` | 白名单 `shadow|enforce`（大小写不敏感），白名单外 → 启动失败（原行为，实现移入 config） | `config.Noise.Mode` → `NewNoiseEngine.enforce`、`attachNoiseGate` |
 | 19 | `OPS_DEDUP_WINDOW` | 降噪 | 正 duration | `30m`（**原 rest_gateway.go 常量 dedupWindow，#10**） | **启动失败**（新增 env 通道） | `RESTGateway.limits.DedupWindow`（L2 相似度，`rest_incidents.go`） |
-| 20 | `OPS_PULL_ALERTS` | 拉取链路 | on/off | `off` | 非 on/off → **启动失败** | `cfg.Pull.Enabled` → `buildAlertPoller`（on 但缺 `OPS_PROM_URL` 仍是 WARNING+禁用，非配置非法） |
-| 21 | `OPS_PULL_INTERVAL` | 拉取链路 | 正 duration | `30s` | 原"WARNING 后取 30s"→ **启动失败** | `cfg.Pull.Interval` → `AlertPoller` |
-| 22 | `OPS_INCIDENT_AUTOCREATE` | ingest 队列 | on/off | `off`（影子期） | 非 on/off → **启动失败** | `cfg.Ingest.AutoCreate` → `IngestWorker`（off = 只排队不建单） |
-| 23 | `OPS_INGEST_INTERVAL` | ingest 队列 | 正 duration | `5s`（原构造函数写死默认） | **启动失败**（新增 env 通道） | `IngestWorker` 消费轮询 |
-| 24 | `OPS_INGEST_BATCH` | ingest 队列 | 正整数 | `20`（同上） | **启动失败** | `IngestWorker.batch` / 批超时规模因子 |
-| 25 | `OPS_INGEST_RATE_LIMIT` | ingest 队列 | 正整数 | `50`（**原 ingest_queue.go 魔法数字 burst 上限，#10**） | **启动失败** | `IngestWorker.applyRateLimit`（R1 风暴折叠聚合单） |
-| 26 | `OPS_INGEST_RATE_WINDOW` | ingest 队列 | 正 duration | `5m`（同上魔法数字） | **启动失败** | 同上（窗口桶长） |
-| 27 | `OPS_INGEST_BATCH_TIMEOUT_PER_ITEM` | ingest 队列 | 正 duration | `15s`（**原 batchTimeoutFor 写死 15s/条，第七轮 M-2 口径，#10**） | **启动失败** | `PGIngestQueue.batchPerItem`（整批超时 = 批量 × 本值，下限 30s、封顶 10m 仍为代码口径） |
-| 28 | `OPS_INGEST_ALERT_BODY_LIMIT` | ingest 队列 | 正整数（字节） | `4194304`（4MiB；**原 `amWebhookBodyLimit` 与 `pullBodyLimit` 两处重复定义，#10 合并为单一定义 `config.DefaultAlertBodyLimit`**） | **启动失败** | `AlertmanagerWebhook.BodyLimit`（入站请求体）与 `PrometheusAlertsSource.BodyLimit`（拉取响应体）共用 |
-| 29 | `OPS_ESCALATION` | 通知与升级 | on/off | `off` | 非 on/off → **启动失败** | `cfg.Notify.EscalationEnabled` → `buildEscalationPoller` |
-| 30 | `OPS_ESCALATION_AFTER` | 通知与升级 | 正 duration | `15m` | 原"WARNING 后取默认"→ **启动失败** | `EscalationPoller.after` |
-| 31 | `OPS_ESCALATION_INTERVAL` | 通知与升级 | 正 duration | `60s` | 同上 → **启动失败** | `EscalationPoller.interval`（扫描周期） |
-| 32 | `OPS_INCIDENT_RETENTION` | 保留与归档 | 保留窗（duration/`<N>d`/off） | `90d` | 非法 → 启动失败（原行为，解析移入 `config.ParseRetention` 唯一实现） | `RetentionSweeper`（D8：resolved 满期归档，含死信 7d 清理） |
-| 33 | `OPS_TOPOLOGY_EDGES` | 拓扑与变更 | 边声明 `src->dst,...` | 空 = 无静态边 | 段格式非法 → 启动失败（`parseStaticEdges` 留在 cmd，仍 fail-fast） | `main.go` → `Sink.AttachStaticEdges` |
-| 34 | `OPS_CHANGE_RETENTION` | 拓扑与变更 | 保留窗（duration/`<N>d`/off） | `7d` | 非法 → 启动失败（原 `NewChangePrunerFromEnv` 报错，统一进 Load 聚合） | `ChangePruner` 保留窗 **与** `assembly.go` PG 回放窗口（两侧同窗，优化方案 #4） |
-| 35 | `OPS_CHANGE_PRUNE_INTERVAL` | 拓扑与变更 | 正 duration | `1h` | 非法 → 启动失败（原行为，移入 Load） | `ChangePruner` 周期 |
-| 36 | `OPS_MEMLIMIT_WARN_RATIO` | 内存有界化 | 比例浮点 (0,1] | `0.8` | 非数字/越界 → **启动失败** | `pkg/memguard.Guard` 告警水位（规模达 上限×比例 先打 WARN，不等淘汰） |
-| 37 | `OPS_MEMLIMIT_TOPOLOGY_NODES` | 内存有界化 | 正整数 | `100000` | **启动失败** | `topology.NewBuilderWithLimits`（节点按最久未活跃淘汰；上限保守——过度淘汰伤降噪故障域与 RCA as_of 取证） |
-| 38 | `OPS_MEMLIMIT_TOPOLOGY_EDGES` | 内存有界化 | 正整数 | `400000`（节点×4） | **启动失败** | 同上（边独立上限兜底；节点淘汰连带删边一并计数） |
-| 39 | `OPS_MEMLIMIT_INCIDENTS` | 内存有界化 | 正整数 | `50000` | **启动失败** | `incident.NewMemStoreWithLimits`（**仅 DB 缺席降级路径**；resolved 最先出局，其次最久未活跃） |
-| 40 | `OPS_MEMLIMIT_ESCALATION_LEDGER` | 内存有界化 | 正整数 | `100000` | **启动失败** | `newMemEscalationLedgerWithLimits`（无 DB 时升级台账按认领最早淘汰） |
-| 41 | `OPS_MEMLIMIT_NOISE_DEDUP` | 内存有界化 | 正整数 | `200000` | **启动失败** | `noise.NewDedupWithLimits`（窗口清扫挡不住窗口内唯一指纹洪峰；逐条 fail-open=再放行一次） |
-| 42 | `OPS_MEMLIMIT_NOISE_CLUSTERS` | 内存有界化 | 正整数 | `50000` | **启动失败** | `noise.NewClustererWithLimits`（活跃+历史总量；resolved 最先出局——真相源在 alert_cluster/Redis 镜像，可 Restore 重建） |
-| 43 | `OPS_MEMLIMIT_NOISE_SIGCACHE` | 内存有界化 | 正整数 | `50000` | **启动失败** | `NoiseEngine.persistedSig` 孤儿键超限 GC（簇消失后的签名条目永久无用） |
-| 44 | `OPS_MEMLIMIT_AUDIT` | 内存有界化 | 正整数 | `50000` | **启动失败** | `NewMemAuditLogWithLimits`（无 DB 时审计尾部截断丢最旧） |
+| 20 | `OPS_NOISE_WRITEQ_SIZE` | 降噪 | 正整数 | `10000`（≈50 个满批，**优化方案 #8 新增 env**） | **启动失败** | 判决异步落库队列缓冲条数（`NoiseEngine.StartVerdictWriter` → `verdictWriter.ch`；深度 gauge `opscopilot_noise_writequeue_depth`） |
+| 21 | `OPS_NOISE_WRITEQ_BATCH` | 降噪 | 正整数 | `200`（同上） | **启动失败** | writer 攒批阈值（攒满即刷；单 writer 串行落现有 VerdictSink，不改 sink 语义） |
+| 22 | `OPS_NOISE_WRITEQ_FLUSH` | 降噪 | 正 duration | `2s`（同上） | **启动失败** | writer 定时刷批周期（不满一批的最长滞留） |
+| 23 | `OPS_NOISE_WRITEQ_ENQUEUE_TIMEOUT` | 降噪 | 正 duration | `5s`（同上；对齐 PG 语句超时 pgSinkTimeout） | **启动失败** | 队满阻塞投递超时（宁慢不丢；超时退化同步写 + WARN + `opscopilot_noise_writequeue_full_total`） |
+| 24 | `OPS_PULL_ALERTS` | 拉取链路 | on/off | `off` | 非 on/off → **启动失败** | `cfg.Pull.Enabled` → `buildAlertPoller`（on 但缺 `OPS_PROM_URL` 仍是 WARNING+禁用，非配置非法） |
+| 25 | `OPS_PULL_INTERVAL` | 拉取链路 | 正 duration | `30s` | 原"WARNING 后取 30s"→ **启动失败** | `cfg.Pull.Interval` → `AlertPoller` |
+| 26 | `OPS_INCIDENT_AUTOCREATE` | ingest 队列 | on/off | `off`（影子期） | 非 on/off → **启动失败** | `cfg.Ingest.AutoCreate` → `IngestWorker`（off = 只排队不建单） |
+| 27 | `OPS_INGEST_INTERVAL` | ingest 队列 | 正 duration | `5s`（原构造函数写死默认） | **启动失败**（新增 env 通道） | `IngestWorker` 消费轮询 |
+| 28 | `OPS_INGEST_BATCH` | ingest 队列 | 正整数 | `20`（同上） | **启动失败** | `IngestWorker.batch` / 批超时规模因子 |
+| 29 | `OPS_INGEST_RATE_LIMIT` | ingest 队列 | 正整数 | `50`（**原 ingest_queue.go 魔法数字 burst 上限，#10**） | **启动失败** | `IngestWorker.applyRateLimit`（R1 风暴折叠聚合单） |
+| 30 | `OPS_INGEST_RATE_WINDOW` | ingest 队列 | 正 duration | `5m`（同上魔法数字） | **启动失败** | 同上（窗口桶长） |
+| 31 | `OPS_INGEST_BATCH_TIMEOUT_PER_ITEM` | ingest 队列 | 正 duration | `15s`（**原 batchTimeoutFor 写死 15s/条，第七轮 M-2 口径，#10**） | **启动失败** | `PGIngestQueue.batchPerItem`（整批超时 = 批量 × 本值，下限 30s、封顶 10m 仍为代码口径） |
+| 32 | `OPS_INGEST_ALERT_BODY_LIMIT` | ingest 队列 | 正整数（字节） | `4194304`（4MiB；**原 `amWebhookBodyLimit` 与 `pullBodyLimit` 两处重复定义，#10 合并为单一定义 `config.DefaultAlertBodyLimit`**） | **启动失败** | `AlertmanagerWebhook.BodyLimit`（入站请求体）与 `PrometheusAlertsSource.BodyLimit`（拉取响应体）共用 |
+| 33 | `OPS_ESCALATION` | 通知与升级 | on/off | `off` | 非 on/off → **启动失败** | `cfg.Notify.EscalationEnabled` → `buildEscalationPoller` |
+| 34 | `OPS_ESCALATION_AFTER` | 通知与升级 | 正 duration | `15m` | 原"WARNING 后取默认"→ **启动失败** | `EscalationPoller.after` |
+| 35 | `OPS_ESCALATION_INTERVAL` | 通知与升级 | 正 duration | `60s` | 同上 → **启动失败** | `EscalationPoller.interval`（扫描周期） |
+| 36 | `OPS_INCIDENT_RETENTION` | 保留与归档 | 保留窗（duration/`<N>d`/off） | `90d` | 非法 → 启动失败（原行为，解析移入 `config.ParseRetention` 唯一实现） | `RetentionSweeper`（D8：resolved 满期归档，含死信 7d 清理） |
+| 37 | `OPS_TOPOLOGY_EDGES` | 拓扑与变更 | 边声明 `src->dst,...` | 空 = 无静态边 | 段格式非法 → 启动失败（`parseStaticEdges` 留在 cmd，仍 fail-fast） | `main.go` → `Sink.AttachStaticEdges` |
+| 38 | `OPS_CHANGE_RETENTION` | 拓扑与变更 | 保留窗（duration/`<N>d`/off） | `7d` | 非法 → 启动失败（原 `NewChangePrunerFromEnv` 报错，统一进 Load 聚合） | `ChangePruner` 保留窗 **与** `assembly.go` PG 回放窗口（两侧同窗，优化方案 #4） |
+| 39 | `OPS_CHANGE_PRUNE_INTERVAL` | 拓扑与变更 | 正 duration | `1h` | 非法 → 启动失败（原行为，移入 Load） | `ChangePruner` 周期 |
+| 40 | `OPS_MEMLIMIT_WARN_RATIO` | 内存有界化 | 比例浮点 (0,1] | `0.8` | 非数字/越界 → **启动失败** | `pkg/memguard.Guard` 告警水位（规模达 上限×比例 先打 WARN，不等淘汰） |
+| 41 | `OPS_MEMLIMIT_TOPOLOGY_NODES` | 内存有界化 | 正整数 | `100000` | **启动失败** | `topology.NewBuilderWithLimits`（节点按最久未活跃淘汰；上限保守——过度淘汰伤降噪故障域与 RCA as_of 取证） |
+| 42 | `OPS_MEMLIMIT_TOPOLOGY_EDGES` | 内存有界化 | 正整数 | `400000`（节点×4） | **启动失败** | 同上（边独立上限兜底；节点淘汰连带删边一并计数） |
+| 43 | `OPS_MEMLIMIT_INCIDENTS` | 内存有界化 | 正整数 | `50000` | **启动失败** | `incident.NewMemStoreWithLimits`（**仅 DB 缺席降级路径**；resolved 最先出局，其次最久未活跃） |
+| 44 | `OPS_MEMLIMIT_ESCALATION_LEDGER` | 内存有界化 | 正整数 | `100000` | **启动失败** | `newMemEscalationLedgerWithLimits`（无 DB 时升级台账按认领最早淘汰） |
+| 45 | `OPS_MEMLIMIT_NOISE_DEDUP` | 内存有界化 | 正整数 | `200000` | **启动失败** | `noise.NewDedupWithLimits`（窗口清扫挡不住窗口内唯一指纹洪峰；逐条 fail-open=再放行一次） |
+| 46 | `OPS_MEMLIMIT_NOISE_CLUSTERS` | 内存有界化 | 正整数 | `50000` | **启动失败** | `noise.NewClustererWithLimits`（活跃+历史总量；resolved 最先出局——真相源在 alert_cluster/Redis 镜像，可 Restore 重建） |
+| 47 | `OPS_MEMLIMIT_NOISE_SIGCACHE` | 内存有界化 | 正整数 | `50000` | **启动失败** | `NoiseEngine.persistedSig` 孤儿键超限 GC（簇消失后的签名条目永久无用） |
+| 48 | `OPS_MEMLIMIT_AUDIT` | 内存有界化 | 正整数 | `50000` | **启动失败** | `NewMemAuditLogWithLimits`（无 DB 时审计尾部截断丢最旧） |
 
 > #6 指标（非 env，登记于此便于对照）：每个有界结构两项——
 > `opscopilot_mem_entries{store="builder|builder_edges|incidents|escalation_ledger|noise_dedup|noise_clusters|noise_sigcache|audit"}`（gauge）

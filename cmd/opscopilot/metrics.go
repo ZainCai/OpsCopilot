@@ -6,13 +6,20 @@
 //
 // 两个直方图（都是"越小越好"的秒级延迟）：
 //
-//	opscopilot_alert_fired_to_verdict_seconds —— 告警发射 → 判决**落库完成**
-//	    口径 = verdict_written_at − alert_fired_at（M1 报告点名的那个）
+//	opscopilot_alert_fired_to_verdict_seconds —— 告警发射 → 判决**生成**
+//	    口径 = 判决生成（投递落库队列）时刻 − alert_fired_at
+//	    ⚠️ 优化方案 #8（异步落库）起口径从"落库完成"改为"判决生成"——
+//	    异步化后落库完成时刻移交 writer goroutine，采集侧继续观测"生成"
+//	    才能保证打点不失真（详见 docs/W9-4 §9 口径变更注记）。落库滞后
+//	    改由 opscopilot_noise_writequeue_depth / _writequeue_full_total /
+//	    _write_dropped_total 观察。
 //	opscopilot_alert_fired_to_notify_seconds  —— 告警发射 → 通知**送达完成**
-//	    只在 enforce 模式、且该判决被放行时观测（影子模式无通知，自然无样本）
+//	    只在 enforce 模式、且该判决被放行时观测（影子模式无通知，自然无样本）；
+//	    Admit 返回 = 全渠道 Send 完成，通知路径未异步化，口径不变。
 //
-// 为什么"落库完成"而不是"内存判决"：M1 报告要的是可对账的落库时刻；
-// 且落库是链路里最慢的一环（同步 IO），用内存时刻会系统性低估。
+// 为什么 #8 之前取"落库完成"：M1 报告要的是可对账的落库时刻；且落库是
+// 链路里最慢的一环（同步 IO），用内存时刻会系统性低估。异步化后该前提
+// 不再成立（落库不在采集 goroutine 的关键路径上），口径随之切换并注记。
 //
 // 诚实边界（写在这里也写进报告）：
 //   - `alert_fired_at` 取上游 alert 的 startsAt/activeAt。若源侧告警已积压
@@ -50,10 +57,16 @@ type AppMetrics struct {
 
 	// AlertsProcessed 进入降噪引擎的告警条数（含被去重/并簇的）。
 	AlertsProcessed *metrics.Counter
-	// AlertsToVerdict 告警发射 → 判决落库完成的延迟。
+	// AlertsToVerdict 告警发射 → 判决生成（投递落库队列）的延迟。
+	// 口径变更注记见文件头与 docs/W9-4 §9（优化方案 #8）。
 	AlertsToVerdict *metrics.Histogram
 	// AlertsToNotify 告警发射 → 通知送达完成的延迟（仅 enforce + 放行）。
 	AlertsToNotify *metrics.Histogram
+	// WriteQueueFull 判决落库队列写满触发阻塞投递（backpressure）的次数
+	// （优化方案 #8；阻塞后成功与超时退化同步写都计它——"退化路径被
+	// 触发过"本身就是运维要知道的事实）。队列深度与丢弃数两个 gauge 由
+	// StartVerdictWriter 挂成 GaugeFunc（镜像运行时状态，不重复记账）。
+	WriteQueueFull *metrics.Counter
 	// Verdicts 按判决原因分桶（标签固定，编译期确定维度集合）。
 	Verdicts map[string]*metrics.Counter
 	// LatencySkipped 因上游未给发射时刻（startsAt/activeAt 皆空）而未参与
@@ -88,9 +101,11 @@ func NewAppMetrics() *AppMetrics {
 		reg:             reg,
 		AlertsProcessed: reg.Counter("opscopilot_alerts_processed_total", "Alerts passed through the shadow noise engine", nil),
 		AlertsToVerdict: reg.Histogram("opscopilot_alert_fired_to_verdict_seconds",
-			"Latency from alert fired (startsAt) to verdict persisted (M1 exit criterion 3)", nil, latencyBuckets, latencyWindow),
+			"Latency from alert fired (startsAt) to verdict generated (queue submit; persistence is async since opt #8, see docs/W9-4)", nil, latencyBuckets, latencyWindow),
 		AlertsToNotify: reg.Histogram("opscopilot_alert_fired_to_notify_seconds",
 			"Latency from alert fired (startsAt) to notification delivered (enforce mode, admitted only)", nil, latencyBuckets, latencyWindow),
+		WriteQueueFull: reg.Counter("opscopilot_noise_writequeue_full_total",
+			"Times the async verdict write queue was full and a blocking (backpressure) enqueue was attempted", nil),
 		Verdicts:       make(map[string]*metrics.Counter, len(verdictReasons)),
 		LatencySkipped: make(map[string]*metrics.Counter, len(latencyStages)),
 	}
@@ -150,12 +165,20 @@ func (m *AppMetrics) CountLatencySkipped(stage string) {
 	}
 }
 
-// ObserveVerdictLatency 记录"发射 → 判决落库"延迟。
+// ObserveVerdictLatency 记录"发射 → 判决生成"延迟（口径见文件头 #8 注记）。
 func (m *AppMetrics) ObserveVerdictLatency(d time.Duration) {
 	if m == nil {
 		return
 	}
 	m.AlertsToVerdict.Observe(d.Seconds())
+}
+
+// CountWriteQueueFull 记一次"队列满 → 阻塞投递"backpressure 事件。
+func (m *AppMetrics) CountWriteQueueFull() {
+	if m == nil {
+		return
+	}
+	m.WriteQueueFull.Inc()
 }
 
 // ObserveNotifyLatency 记录"发射 → 通知送达"延迟。
