@@ -272,3 +272,16 @@ func TestListPageCursorPagination(t *testing.T) {
 		t.Fatalf("stats = %+v, want active 4 / resolved 1", page.Stats)
 	}
 }
+
+// TestUpsertExternalRejectsHashSourceRef 第七轮 H2：'#' 是复发代际后缀分隔符，
+// sourceRef 含 '#' 会与"别的告警的 gen1"得到同一 incident_id（跨告警串单）。
+func TestUpsertExternalRejectsHashSourceRef(t *testing.T) {
+	s := NewMemStore()
+	if _, _, err := s.UpsertExternal(OriginWebhook, "fp#2", "t", "critical", "system", "{}"); err == nil {
+		t.Fatal("sourceRef containing '#' must be rejected")
+	}
+	// 正常 ref 不受影响。
+	if _, _, err := s.UpsertExternal(OriginWebhook, "fp-2", "t", "critical", "system", "{}"); err != nil {
+		t.Fatalf("normal ref: %v", err)
+	}
+}

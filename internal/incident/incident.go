@@ -461,6 +461,12 @@ func (s *MemStore) UpsertExternal(origin Origin, sourceRef, title, severity, cre
 	if strings.TrimSpace(sourceRef) == "" {
 		return nil, false, errors.New("incident: source_ref is required for external upsert")
 	}
+	if strings.Contains(sourceRef, "#") {
+		// '#' 是 M9 复发代际后缀的分隔符（externalIncidentID）：含 '#' 的
+		// sourceRef 会让"ref=a 的 gen2"与"ref=a#2 的 gen1"得到同一 incident_id，
+		// 造成跨告警串单（第七轮 H2）。存量数据已查证为 0 行，可直接拒绝。
+		return nil, false, errors.New("incident: source_ref must not contain '#'")
+	}
 	if strings.TrimSpace(title) == "" {
 		return nil, false, errors.New("incident: title is required")
 	}
