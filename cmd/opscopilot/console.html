@@ -338,11 +338,12 @@ svg text { fill: var(--text); font-family: var(--font-mono); font-size: 11px; }
       </div>
       <div class="tbl-wrap">
         <table class="tbl">
-          <thead><tr><th>时间</th><th>结论</th><th>指纹</th><th>簇</th></tr></thead>
+          <thead><tr><th>级别</th><th>标题</th><th>服务/模块</th><th>错误码</th><th>时间</th></tr></thead>
           <tbody id="alertRows"></tbody>
         </table>
       </div>
     </div>
+    <div id="alertDetail" class="detail" style="display:none"></div>
   </div>
   <div id="view-events" style="display:none">
     <div class="page-head">
@@ -718,24 +719,53 @@ const reasonBadge = (r) => {
   const m = REASON_BADGE[r];
   return m ? `<span class="chip ${m[1]}">${m[0]}</span> <span class="faint mono">${esc(r)}</span>` : `<span class="chip">${esc(r)}</span>`;
 };
+let alertCache = [];
+const levelSev = { "紧急": "critical", "重要": "warning", "一般": "info" };
 async function loadAlerts() {
   msg($("alertMsg"), "loading", "加载告警…");
   try {
     const data = await fetchJSON("/api/v1/alerts?limit=200");
-    const list = data.alerts || [];
-    $("alertCount").textContent = list.length + " 条（最新）";
-    $("alertRows").innerHTML = list.map(a => `
-      <tr>
+    alertCache = data.alerts || [];
+    $("alertCount").textContent = alertCache.length + " 条（最新）";
+    $("alertRows").innerHTML = alertCache.map((a, i) => `
+      <tr class="rowlink" data-i="${i}">
+        <td><span class="sev sev--${levelSev[a.level] || "info"}">${esc(a.level || "一般")}</span></td>
+        <td>${esc(a.title || "-")}</td>
+        <td class="mono">${esc((a.service || "").length > 34 ? a.service.slice(0, 33) + "…" : a.service || "—")}</td>
+        <td class="mono">${esc(a.error_code || "—")}</td>
         <td class="time">${timeAgo(a.occurred_at)}</td>
-        <td>${reasonBadge(a.reason)}</td>
-        <td class="mono">${esc(a.fingerprint)}</td>
-        <td class="mono">${a.cluster_key ? esc(a.cluster_key) : '<span class="faint">—</span>'}</td>
       </tr>`).join("") || emptyState("暂无影子判决", "降噪引擎影子模式下每次告警处理都会在此留痕（需 OPS_DB_DSN）");
+    $("alertRows").querySelectorAll("tr.rowlink").forEach(tr => {
+      tr.onclick = () => {
+        $("alertRows").querySelectorAll("tr").forEach(r => r.classList.remove("sel"));
+        tr.classList.add("sel");
+        showAlertDetail(alertCache[+tr.dataset.i]);
+      };
+    });
     msg($("alertMsg"), "", "");
   } catch (e) {
     $("alertRows").innerHTML = emptyState("加载失败", e.message);
     msg($("alertMsg"), "err", "加载失败：" + e.message);
   }
+}
+
+// 告警详情：结构化排障视图（摘要/指标阈值/影响/建议措施），对齐原型 incident.jsx 的证据分区。
+function showAlertDetail(a) {
+  const box = $("alertDetail");
+  box.style.display = "block";
+  const steps = (a.steps || []).map((s, i) => `<li>${esc(s)}</li>`).join("");
+  const kv = (k, v) => `<div class="kv"><span class="k">${esc(k)}</span><span class="v">${v}</span></div>`;
+  box.innerHTML = `
+    <div class="dt">${esc(a.level || "一般")} · ${esc(a.title || "-")} <span class="faint mono">${esc(a.error_code || "")}</span></div>
+    ${kv("简要摘要", esc(a.summary || "—"))}
+    ${kv("结论", reasonBadge(a.reason))}
+    ${kv("指标与阈值", `<span class="mono">${esc(a.metric || "—")}</span> <span class="faint">阈值</span> <span class="mono">${esc(a.threshold || "—")}</span>`)}
+    ${kv("影响范围", esc(a.impact || "—"))}
+    ${kv("触发时间", `<span class="time">${timeAgo(a.occurred_at)}</span> <span class="faint mono">${esc(a.occurred_at || "")}</span>`)}
+    ${kv("关联簇", a.cluster_key ? `<span class="mono">${esc(a.cluster_key)}</span>` : '<span class="faint">—</span>')}
+    <div class="kv"><span class="k">建议措施</span><span class="v"><ol style="margin:0; padding-left:18px">${steps || "<li>—</li>"}</ol></span></div>
+    ${kv("指纹", `<span class="mono">${esc(a.fingerprint || "")}</span>`)}`;
+  box.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
 // ---- W11 实时推送（SSE）：事件变更即推，替代 30s 轮询 ----

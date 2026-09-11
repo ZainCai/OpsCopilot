@@ -270,7 +270,8 @@ func TestAlertsEndpointPG(t *testing.T) {
 	})
 	if _, err := asm.pool.Exec(ctx, `
 INSERT INTO alert_event (tenant_id, cluster_key, fingerprint, source, occurred_at, payload)
-VALUES ($1, 'c:alertstest', $2, 'shadow', now(), '{"reason":"new-incident"}'::jsonb)`,
+VALUES ($1, 'c:alertstest', $2, 'shadow', now(),
+  '{"reason":"new-incident","summary":"HighDiskUsage","severity":"critical","node_key":"prometheus://nodes/n1"}'::jsonb)`,
 		DefaultTenant, fp); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
