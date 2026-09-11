@@ -45,15 +45,17 @@ const (
 )
 
 // ChangePruner 变更事件库的周期清理器。
+// 持 ChangeBackend 接口：PG 持久化后端（优化方案 #4）的 PruneBefore
+// 同时清内存与 change_record，这里无需感知后端。
 type ChangePruner struct {
-	store     *topology.ChangeStore
+	store     topology.ChangeBackend
 	retention time.Duration
 	interval  time.Duration
 	logf      func(string, ...any)
 }
 
 // NewChangePruner 构造。retention<=0 或 interval<=0 表示未启用（Run 立即返回）。
-func NewChangePruner(store *topology.ChangeStore, retention, interval time.Duration, logf func(string, ...any)) *ChangePruner {
+func NewChangePruner(store topology.ChangeBackend, retention, interval time.Duration, logf func(string, ...any)) *ChangePruner {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
@@ -67,7 +69,7 @@ func NewChangePruner(store *topology.ChangeStore, retention, interval time.Durat
 //
 // 两者任一非法即返回错误（fail-fast，与保留策略解析同纪律：静默回退会让
 // 运维以为配置生效了）。
-func NewChangePrunerFromEnv(store *topology.ChangeStore, logf func(string, ...any)) (*ChangePruner, error) {
+func NewChangePrunerFromEnv(store topology.ChangeBackend, logf func(string, ...any)) (*ChangePruner, error) {
 	retention, on, err := ParseRetentionDefault(os.Getenv(envChangeRetention), changeRetentionDefault)
 	if err != nil {
 		return nil, err

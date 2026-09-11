@@ -4,7 +4,9 @@
 //   - topology.Builder：拓扑图唯一归属（多轮发现共享同一张图）；
 //   - TopologySink：连接器宿主 → 拓扑的发现数据入口（W2→W3 管道）；
 //   - ChangeStore（严格节点校验）：变更事件库，校验钩子经 Sink.HasNode
-//     锁内查图——"先发现、后变更"的关联语义在此闭环；
+//     锁内查图——"先发现、后变更"的关联语义在此闭环；后端可换
+//     （topology.ChangeBackend）：有 DB 用 PG 真相源 + 启动回放（优化方案 #4），
+//     无 DB 降级纯内存；
 //   - ChangeWebhook：POST /api/v1/changes 手动提交变更事件。
 //
 // 装配放在 cmd/（package main）：跨模块引用的唯一合法汇合点（v1.3 §5.2）。
@@ -34,8 +36,10 @@ const changeWebhookPath = "/api/v1/changes"
 
 // Assembly W5 装配产物：各组件的持有者，供 main 做生命周期管理与测试断言。
 type Assembly struct {
-	Sink    *TopologySink
-	Changes *topology.ChangeStore
+	Sink *TopologySink
+	// Changes 变更事件库（优化方案 #4）：有 DB 时 PGChangeStore（真相源 +
+	// 启动回放），否则纯内存 ChangeStore——消费方只认 topology.ChangeBackend。
+	Changes topology.ChangeBackend
 	Webhook *ChangeWebhook
 	// Noise 影子降噪引擎（W4-1.4）；nil = envNoiseShadow=off 已关闭。
 	Noise *NoiseEngine
@@ -136,12 +140,8 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 	if err != nil {
 		return nil, err
 	}
-	store := topology.NewChangeStore(sink.HasNode)
-	hook, err := NewChangeWebhook(store, "manual")
-	if err != nil {
-		return nil, err
-	}
-	hook.Token = webhookToken
+	// 变更库（内存 + 可选 PG 持久化）与 webhook 在共享池就绪后装配，
+	// 见下方"变更库后端选型"（优化方案 #4）。
 
 	// 影子降噪：挂在 sink 上（告警经 IngestCollect 转交），引擎持有
 	// sink 引用做拓扑快照——互相引用只能后挂（见 AttachNoise 注释）。
@@ -157,19 +157,13 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 	appMetrics := NewAppMetrics()
 	noiseEngine.SetMetrics(appMetrics) // noiseEngine 为 nil（降噪关闭）时方法自带判空
 
-	// W5-2.1：SemanticModel gRPC 服务（进程内形态，契约测试经
-	// transport.DialInProcess 回环验证；独立进程形态只换 Dial 实现）。
-	semantic := NewSemanticModelServer(sink, store)
-	grpcServer := grpc.NewServer()
-	pb.RegisterSemanticModelServer(grpcServer, semantic)
-
 	// W5-2.2：REST 只读查询面（复用 SemanticModelServer 的校验与映射，
 	// gRPC/REST 一套语义不漂移）。M2 主干：事件 Store 同源挂载。
 	// W9：事件 Store 双实现——OPS_DB_DSN 设置用 TimescaleDB（重启不丢），
 	// 否则内存（Persistence 标注提醒）。pg 池错误不阻塞启动（降级内存）。
-	// 事件 Store 双实现；DB 可用时事件 Store / 导入队列 / 审计**共用一条池**
-	// （R9：多池各占连接无收益）。pg 不可用不阻塞启动（降级内存，Persistence
-	// 字段提醒消费者；见 R6-4）。
+	// 事件 Store 双实现；DB 可用时事件 Store / 导入队列 / 审计 / 变更库**共用
+	// 一条池**（R9：多池各占连接无收益）。pg 不可用不阻塞启动（降级内存，
+	// Persistence 字段提醒消费者；见 R6-4）。
 	var incStore incident.Store = incident.NewMemStore()
 	var audit AuditLog = NewMemAuditLog()
 	var pgPool *pgxpool.Pool
@@ -202,10 +196,54 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 			} else {
 				pgPool, incStore = pool, pgInc
 				audit = NewPGAuditLog(pool, DefaultTenant, logf) // 审计随真相源持久化
-				logf("incident persistence: timescaledb (shared pool: store+queue+audit, max_conns=%d)", poolCfg.MaxConns)
+				logf("incident persistence: timescaledb (shared pool: store+queue+audit+changes, max_conns=%d)", poolCfg.MaxConns)
 			}
 		}
 	}
+	// 变更库后端选型（优化方案 #4）：恒先建内存实现——严格节点校验钩子经
+	// Sink.HasNode 锁内查图，"先发现、后变更"的关联语义在此闭环。有共享池
+	// 则包一层 PGChangeStore（PG=真相源、内存=读缓存）并**启动回放**保留窗
+	// 内的历史证据：重启不丢 RCA 取证输入。回放失败只 WARNING、继续纯内存
+	// ——变更持久化故障绝不阻塞启动（与事件 Store 同款降级纪律）。
+	// 回放窗口与 OPS_CHANGE_RETENTION（清理器保留窗）对齐：两侧同窗，
+	// "回放读到的"与"清理保留的"才一致（off = 不清理，则全量回放）。
+	memChanges := topology.NewChangeStore(sink.HasNode)
+	var changes topology.ChangeBackend = memChanges
+	if pgPool != nil {
+		pg := topology.NewPGChangeStore(memChanges, pgPool, DefaultTenant, logf)
+		window, on, err := ParseRetentionDefault(os.Getenv(envChangeRetention), changeRetentionDefault)
+		if err != nil {
+			// 非法配置由 main 的 NewChangePrunerFromEnv fail-fast 拦截；
+			// 装配这里按默认窗口回放，不重复报错。
+			window, on = changeRetentionDefault, true
+		}
+		since := time.Time{}
+		if on {
+			since = time.Now().Add(-window)
+		}
+		if n, err := pg.LoadSince(since); err != nil {
+			logf("WARNING: change pg store unavailable (memory only): %v", err)
+		} else {
+			changes = pg
+			if on {
+				logf("change persistence: timescaledb (replayed %d events within %s)", n, window)
+			} else {
+				logf("change persistence: timescaledb (full replay: %d events, retention off)", n)
+			}
+		}
+	}
+	hook, err := NewChangeWebhook(changes, "manual")
+	if err != nil {
+		return nil, err
+	}
+	hook.Token = webhookToken
+
+	// W5-2.1：SemanticModel gRPC 服务（进程内形态，契约测试经
+	// transport.DialInProcess 回环验证；独立进程形态只换 Dial 实现）。
+	semantic := NewSemanticModelServer(sink, changes)
+	grpcServer := grpc.NewServer()
+	pb.RegisterSemanticModelServer(grpcServer, semantic)
+
 	// W9-2 通知渠道：DB 为配置真相源，装配期装载启用渠道进注册表；
 	// W9-1 闸门接线（ADR-011）：enforce 才挂（计数用共享池）。顺序要紧：
 	// 先建注册表 → 装渠道 → 挂闸门（Gate 持有同一 registry，CRUD 后
@@ -260,7 +298,7 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 
 	asm := &Assembly{
 		Sink:      sink,
-		Changes:   store,
+		Changes:   changes,
 		Webhook:   hook,
 		Noise:     noiseEngine,
 		GRPC:      grpcServer,

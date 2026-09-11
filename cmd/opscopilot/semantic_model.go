@@ -26,12 +26,13 @@ import (
 type SemanticModelServer struct {
 	pb.UnimplementedSemanticModelServer
 	sink    *TopologySink
-	changes *topology.ChangeStore
+	changes topology.ChangeBackend
 }
 
 // NewSemanticModelServer 构造。装配层保证参数非 nil（nil 会 panic 于
 // 首次调用——但装配是唯一入口且有测试覆盖，不做运行时防御）。
-func NewSemanticModelServer(sink *TopologySink, changes *topology.ChangeStore) *SemanticModelServer {
+// changes 为后端接口（内存或 PG 持久化，见 topology.ChangeBackend）。
+func NewSemanticModelServer(sink *TopologySink, changes topology.ChangeBackend) *SemanticModelServer {
 	return &SemanticModelServer{sink: sink, changes: changes}
 }
 

@@ -246,3 +246,44 @@ func TestPruneBefore(t *testing.T) {
 		t.Errorf("Len after prune-all = %d, want 0", s.Len())
 	}
 }
+
+// ---- 优化方案 #4 新增：后端接口与启动回放原生元语 ----
+
+// TestChangeStore_BackendConformance 编译面已由 change.go 断言；这里锁定
+// Persistence 口径值（装配日志与运维可见性依赖该字符串）。
+func TestChangeStore_BackendConformance(t *testing.T) {
+	var b ChangeBackend = NewChangeStore(nil)
+	if b.Persistence() != "memory" {
+		t.Errorf("Persistence = %q, want memory", b.Persistence())
+	}
+}
+
+// TestChangeStore_Load 启动回放原语：直插缓存、跳过校验钩子、按 ID 幂等。
+func TestChangeStore_Load(t *testing.T) {
+	// nodeCheck 恒 false：Record 全拒，load 不受影响（回放在装配早期跑，
+	// 拓扑图尚未包含历史节点——用 Record 会把全部历史证据拒之门外）。
+	s := NewChangeStore(func(string) bool { return false })
+	if _, err := s.Record(ChangeEvent{ID: "r1", NodeKey: "host:a", Type: ChangeDeploy}); !errors.Is(err, ErrNodeNotFound) {
+		t.Fatalf("Record with rejecting nodeCheck: err = %v, want ErrNodeNotFound", err)
+	}
+	ev := ChangeEvent{ID: "l1", NodeKey: "host:a", Type: ChangeRollback, Confidence: ConfidenceHigh}
+	if !s.load(ev) {
+		t.Fatal("load rejected a fresh event")
+	}
+	if s.load(ChangeEvent{ID: "l1", NodeKey: "host:other", Type: ChangeDeploy}) {
+		t.Error("load overwrote existing id (must be idempotent)")
+	}
+	if s.Len() != 1 {
+		t.Errorf("Len = %d, want 1", s.Len())
+	}
+	got, ok := s.Get("l1")
+	if !ok || got.Type != ChangeRollback || got.Confidence != ConfidenceHigh {
+		t.Errorf("Get after load = %+v ok=%v, want original fields", got, ok)
+	}
+	if hits := s.ByNode("host:a"); len(hits) != 1 || hits[0].ID != "l1" {
+		t.Errorf("ByNode after load = %+v, want l1 (byNode index updated)", hits)
+	}
+	if s.load(ChangeEvent{}) {
+		t.Error("load must reject empty id")
+	}
+}

@@ -17,8 +17,13 @@ import (
 //   - 置信度约定（ADR-007）：变更事件由外部系统（Git/Jenkins/人工）声明，
 //     不是连接器直接观测到的事实，因此零值默认 **medium**；确属直接
 //     观测（如变更平台同机直采）由调用方显式给 high。
-//   - 存储为进程内内存实现（M1 规模：百台主机、分钟级窗口查询足够）；
-//     接口按"可换后端"设计，持久化属后续迭代。
+//   - 存储抽象为 ChangeBackend 接口，两个实现（优化方案 #4）：
+//     ① ChangeStore（本文件）——进程内内存，DB 缺席时的降级形态
+//     （项目纪律：DB 不可用不得阻塞启动）；
+//     ② PGChangeStore（change_pg.go）——TimescaleDB 真相源 + 内存读缓存：
+//     写先落内存再尽力落 PG（PG 写失败记日志降级，不阻塞采集链路），
+//     读全部走内存，启动时从 PG 回放保留窗内数据（重启不丢 RCA 取证），
+//     PruneBefore 同时清 PG 与内存。装配选择在 cmd/assembly.go。
 //   - 所有返回值为值拷贝，调用方修改不影响库内状态（并发安全）。
 //
 // 对外契约（pb.ChangeRecord，全局审查 C5 三步走 **已于 W5-2.1 完成**）：
@@ -34,9 +39,12 @@ import (
 //
 //	change_record 表已加 event_id TEXT（承载 ChangeEvent.ID）+ UNIQUE(tenant_id, event_id)
 //	+ CHECK(change_type IN ('deploy','config_change','rollback'))。DB 层防重复 +
-//	枚举与 ChangeType 封闭集合一致。W4 接 gRPC/DB 时 ChangeStore 须实现
-//	ChangeEvent → change_record 的列映射：Source→source, Author→actor,
+//	枚举与 ChangeType 封闭集合一致。ChangeEvent → change_record 的列映射：
+//	Source→source, Author→actor,
 //	Ref/Revision/Summary/Confidence→detail JSONB；ID 即 event_id。
+//	（优化方案 #4 已落地：列映射见 change_pg.go——ref/revision/summary/
+//	confidence 用 000002 第 4 步的独立列，detail 保持默认 '{}'，
+//	Source→source、Author→actor、ID→event_id。启动回放与双清见同文件。）
 
 // ChangeType 变更事件类型（强类型）。
 type ChangeType string
@@ -101,6 +109,41 @@ type ChangeEvent struct {
 	// Confidence 事件置信度；零值默认 medium（外部声明非直接观测，见文件头）。
 	Confidence Confidence `json:"confidence,omitempty"`
 }
+
+// ChangeBackend 变更事件库的后端接口（优化方案 #4：内存实现可替换为持久化
+// 实现，对齐 internal/incident.Store 的"接口 + 双实现"范式）。
+// 方法语义与 ChangeStore 的同名方法逐字一致（见各方法注释）；实现方必须
+// 并发安全、返回值为拷贝。两个实现：
+//   - *ChangeStore    —— 纯内存（DB 缺席时的降级形态），Persistence "memory"；
+//   - *PGChangeStore  —— TimescaleDB 真相源 + 内存读缓存（change_pg.go），
+//     Persistence "timescaledb"。
+//
+// 装配只认本接口（cmd/assembly.go）：webhook/清理器/语义服务均持有接口，
+// 与后端选型解耦。
+type ChangeBackend interface {
+	// Record 记录一条变更事件（校验 + 幂等判重 + 默认值补全），语义见
+	// ChangeStore.Record；持久化实现额外负责落库（写失败降级不报错）。
+	Record(ev ChangeEvent) (ChangeEvent, error)
+	// ByNode 某节点全部变更，按 OccurredAt 升序。
+	ByNode(nodeKey string) []ChangeEvent
+	// ByNodeWithin 某节点 [from, to] 闭窗口变更（零值 = 该侧不设限）。
+	ByNodeWithin(nodeKey string, from, to time.Time) []ChangeEvent
+	// Within 全部节点 [from, to] 闭窗口变更。
+	Within(from, to time.Time) []ChangeEvent
+	// Get 按 ID 取单条；不存在返回 false。
+	Get(id string) (ChangeEvent, bool)
+	// Len 已存事件总数。
+	Len() int
+	// PruneBefore 清除 OccurredAt 早于 cutoff 的事件，返回内存清除条数
+	//（持久化实现须同步清 DB，保持两侧保留窗一致）。
+	PruneBefore(cutoff time.Time) int
+	// Persistence 落库形态（"memory" | "timescaledb"）——装配日志与
+	// 运维可见性用（对齐 incident.Store.Persistence）。
+	Persistence() string
+}
+
+// 编译期保证：内存实现满足接口（PG 实现的断言在 change_pg.go）。
+var _ ChangeBackend = (*ChangeStore)(nil)
 
 // ChangeStore 变更事件存储（进程内实现，并发安全）。
 //
@@ -281,6 +324,31 @@ func (s *ChangeStore) PruneBefore(cutoff time.Time) int {
 		}
 	}
 	return removed
+}
+
+// Persistence 落库形态：纯内存（重启即丢——持久化见 PGChangeStore）。
+func (s *ChangeStore) Persistence() string { return "memory" }
+
+// load 启动回放专用：把一条**已从 DB 读回**的事件直插内存缓存。
+//
+// 与 Record 的区别：跳过字段校验与 nodeCheck——回放发生在装配早期，
+// 拓扑图尚未（甚至永远不会）包含历史节点，用严格校验会把全部历史
+// 证据拒之门外；数据在写入时已经过 Record 校验 + DB CHECK 约束，
+// 可信度由来源保证。ID 已存在则不覆盖（幂等），返回是否插入。
+// 仅供本包持久化实现使用（change_pg.go），不暴露给调用方。
+func (s *ChangeStore) load(ev ChangeEvent) bool {
+	if s == nil || ev.ID == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, dup := s.events[ev.ID]; dup {
+		return false
+	}
+	stored := ev
+	s.events[ev.ID] = &stored
+	s.byNode[ev.NodeKey] = append(s.byNode[ev.NodeKey], ev.ID)
+	return true
 }
 
 // filterWindow 原地过滤出 [from, to] 闭区间内的事件（零值表示不设限）。

@@ -32,7 +32,8 @@ const AuthHeader = "X-OpsCopilot-Token"
 // DefaultSource：请求体未带 source 时填充的默认值（如 "manual"），
 // 让手动 curl 与 Git/Jenkins 推送共用同一端点、来源可区分。
 type ChangeWebhook struct {
-	store *topology.ChangeStore
+	// store 变更库后端（内存或 PG 持久化，装配期选定，见 assembly.go）。
+	store topology.ChangeBackend
 	// DefaultSource 请求体未带 source 时填充的默认来源。
 	DefaultSource string
 	// Token 共享密钥；非空时请求必须携带匹配的 AuthHeader 头（401 拒绝）。
@@ -42,8 +43,8 @@ type ChangeWebhook struct {
 	MaxBodyBytes int64
 }
 
-// NewChangeWebhook 构造。store 须非 nil。
-func NewChangeWebhook(store *topology.ChangeStore, defaultSource string) (*ChangeWebhook, error) {
+// NewChangeWebhook 构造。store 须非 nil（内存或 PG 后端均可，见 ChangeBackend）。
+func NewChangeWebhook(store topology.ChangeBackend, defaultSource string) (*ChangeWebhook, error) {
 	if store == nil {
 		return nil, errors.New("change webhook: nil change store")
 	}
