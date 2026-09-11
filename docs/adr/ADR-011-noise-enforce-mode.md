@@ -39,3 +39,19 @@
 - 无指纹/未参与判定的告警（`Reason` 为空）按 new-incident 处理——宁可多通知，不可漏。
 - 渠道配置：`notify_channel` 表（迁移 000012），`console` 兜底渠道恒在且为保留名（enforce 零渠道 = 通知静默丢失，兜底至少留痕）；配置经 REST/控制台 CRUD 后**热重载**注册表（不重启生效）。
 - 投递仍为同步（Notifier 契约自带 ≤5s 超时），失败计入 `gateFailures`；异步队列+重试留 W9-3（值班升级规则同批）。
+
+## 补充（W9-3，2026-09-11）：严重级路由与值班升级
+
+**严重级路由**：渠道可声明 `min_severity`（`critical` > `warning` > `info`，`notify_channel.min_severity`，迁移 000013），`Registry.Dispatch` 按告警严重级逐渠道判定投递——"critical 进 IM、info 只留日志"由此表达，不需要为每个渠道写独立规则表。
+
+- 未知/空严重级按 `critical`（最高）处理：路由的失败模式必须是**多通知**而非静默丢弃；
+- 路由跳过不计入 `Dispatch` 错误；但全部渠道都被过滤掉时返回 `ErrNoChannel`（确定性报错，而非"假装发出去了"）；
+- `console` 兜底渠道 `MinSeverity` 恒为 `info`（什么都能收）——它是最后一道留痕。
+
+**值班升级（最小版）**：`OPS_ESCALATION=on` 启用后台扫描（`EscalationPoller`）：`state=open` 且创建超过 `OPS_ESCALATION_AFTER`（默认 15m）的事件，再发一次 `[超时未响应]` 通知。
+
+- **只发一次**由台账 `incident_escalation`（迁移 000014）的 `(tenant_id, incident_id)` 主键保证：`INSERT ... ON CONFLICT DO NOTHING` 只有真正插入成功者认领，多实例安全；发送失败 `Release` 回滚认领，下一轮重试（失败补偿 → 至少一次 + 幂等）；
+- **不经 Gate**：升级是"对既有事件再提醒"，与降噪判定（该不该第一次通知）正交——Gate 管首次，Poller 管"发了没人理"；
+- 只对 `open` 升级：`acked` 即人工接手（R2 语义），不再催；
+- 严重级沿用事件自身 → 走上面的渠道路由；
+- 边界：不做排班/轮岗/多级升级（M3）；无 DB 时台账退化为内存（重启即丢、单实例），启动打 WARNING。

@@ -18,29 +18,46 @@ import (
 )
 
 func TestValidateChannelRules(t *testing.T) {
-	ok := []struct{ name, kind, url string }{
-		{"ops-feishu", notify.KindFeishu, "https://open.feishu.cn/open-apis/bot/v2/hook/xxx"},
-		{"wecom-1", notify.KindWecom, "http://127.0.0.1:9999/send"},
-		{"A.b_c-1", notify.KindGeneric, "https://example.com/hook"},
+	ok := []struct{ name, kind, url, sev string }{
+		{"ops-feishu", notify.KindFeishu, "https://open.feishu.cn/open-apis/bot/v2/hook/xxx", "critical"},
+		{"wecom-1", notify.KindWecom, "http://127.0.0.1:9999/send", "warning"},
+		{"A.b_c-1", notify.KindGeneric, "https://example.com/hook", ""}, // 空 = info
+		{"info-sink", notify.KindGeneric, "https://example.com/hook", "info"},
 	}
 	for _, c := range ok {
-		if err := ValidateChannel(c.name, c.kind, c.url); err != nil {
-			t.Fatalf("valid channel rejected (%s): %v", c.name, err)
+		if err := ValidateChannel(c.name, c.kind, c.url, c.sev); err != nil {
+			t.Fatalf("valid channel rejected (%s, sev=%q): %v", c.name, c.sev, err)
 		}
 	}
-	bad := []struct{ name, kind, url string }{
-		{"", notify.KindGeneric, "http://x"},
-		{"console", notify.KindGeneric, "http://x"},                       // 保留名（兜底渠道）
-		{"-lead", notify.KindGeneric, "http://x"},                         // 首字符非法
-		{"has space", notify.KindGeneric, "http://x"},                     // 字符集
-		{"ok", "slack", "http://x"},                                       // kind 白名单
-		{"ok", notify.KindGeneric, "ftp://x"},                             // 非 http(s)
-		{"ok", notify.KindGeneric, ""},                                    // 空 url
-		{"ok", notify.KindGeneric, "http://" + strings.Repeat("a", 2100)}, // 超长
+	bad := []struct{ name, kind, url, sev string }{
+		{"", notify.KindGeneric, "http://x", ""},
+		{"console", notify.KindGeneric, "http://x", ""},                       // 保留名（兜底渠道）
+		{"-lead", notify.KindGeneric, "http://x", ""},                         // 首字符非法
+		{"has space", notify.KindGeneric, "http://x", ""},                     // 字符集
+		{"ok", "slack", "http://x", ""},                                       // kind 白名单
+		{"ok", notify.KindGeneric, "ftp://x", ""},                             // 非 http(s)
+		{"ok", notify.KindGeneric, "", ""},                                    // 空 url
+		{"ok", notify.KindGeneric, "http://" + strings.Repeat("a", 2100), ""}, // 超长
+		{"ok", notify.KindGeneric, "http://x", "fatal"},                       // min_severity 白名单
 	}
 	for _, c := range bad {
-		if err := ValidateChannel(c.name, c.kind, c.url); err == nil {
-			t.Fatalf("invalid channel accepted: name=%q kind=%q url=%.20q", c.name, c.kind, c.url)
+		if err := ValidateChannel(c.name, c.kind, c.url, c.sev); err == nil {
+			t.Fatalf("invalid channel accepted: name=%q kind=%q url=%.20q sev=%q", c.name, c.kind, c.url, c.sev)
+		}
+	}
+}
+
+// TestNormalizeMinSeverity 空/空白/大小写归一。
+func TestNormalizeMinSeverity(t *testing.T) {
+	for in, want := range map[string]string{
+		"":         "info",
+		"   ":      "info",
+		"INFO":     "info",
+		" Warning": "warning",
+		"critical": "critical",
+	} {
+		if got := NormalizeMinSeverity(in); got != want {
+			t.Fatalf("NormalizeMinSeverity(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
@@ -66,14 +83,14 @@ func TestChannelStoreRoundtrip(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	if err := store.Upsert(ctx, "ch1", notify.KindGeneric, "http://a/hook", true); err != nil {
+	if err := store.Upsert(ctx, "ch1", notify.KindGeneric, "http://a/hook", "", true); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
-	// 幂等 upsert：同 name 覆盖
-	if err := store.Upsert(ctx, "ch1", notify.KindFeishu, "http://b/hook", true); err != nil {
+	// 幂等 upsert：同 name 覆盖（含 min_severity 一并覆盖）
+	if err := store.Upsert(ctx, "ch1", notify.KindFeishu, "http://b/hook", "critical", true); err != nil {
 		t.Fatalf("upsert 2: %v", err)
 	}
-	if err := store.Upsert(ctx, "ch2", notify.KindWecom, "http://c/hook", false); err != nil {
+	if err := store.Upsert(ctx, "ch2", notify.KindWecom, "http://c/hook", "warning", false); err != nil {
 		t.Fatalf("upsert 3: %v", err)
 	}
 
@@ -84,8 +101,11 @@ func TestChannelStoreRoundtrip(t *testing.T) {
 	if len(all) != 2 {
 		t.Fatalf("list len = %d, want 2", len(all))
 	}
-	if all[0].Name != "ch1" || all[0].Kind != notify.KindFeishu || all[0].URL != "http://b/hook" {
+	if all[0].Name != "ch1" || all[0].Kind != notify.KindFeishu || all[0].URL != "http://b/hook" || all[0].MinSeverity != "critical" {
 		t.Fatalf("ch1 not overwritten: %+v", all[0])
+	}
+	if all[1].Name != "ch2" || all[1].MinSeverity != "warning" {
+		t.Fatalf("ch2 min_severity = %+v, want warning", all[1])
 	}
 	enabled, err := store.ListEnabled(ctx)
 	if err != nil {
@@ -109,7 +129,7 @@ func TestChannelStoreRoundtrip(t *testing.T) {
 		t.Fatalf("double delete err = %v, want ErrChannelNotFound", err)
 	}
 	// 校验失败不得落库
-	if err := store.Upsert(ctx, "bad name", notify.KindGeneric, "http://x", true); err == nil {
+	if err := store.Upsert(ctx, "bad name", notify.KindGeneric, "http://x", "", true); err == nil {
 		t.Fatal("invalid upsert must fail")
 	}
 }
@@ -119,7 +139,7 @@ func TestLoadChannelsIntoRegistryAndReload(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	if err := store.Upsert(ctx, "chA", notify.KindGeneric, "http://a/hook", true); err != nil {
+	if err := store.Upsert(ctx, "chA", notify.KindGeneric, "http://a/hook", "", true); err != nil {
 		t.Fatal(err)
 	}
 	reg := notify.NewRegistry()
@@ -173,7 +193,7 @@ func TestAssemblyChannelE2E(t *testing.T) {
 	}
 	cleanup()
 	t.Cleanup(cleanup)
-	if err := store.Upsert(context.Background(), "e2e-sink", notify.KindGeneric, srv.URL, true); err != nil {
+	if err := store.Upsert(context.Background(), "e2e-sink", notify.KindGeneric, srv.URL, "", true); err != nil {
 		t.Fatalf("seed channel: %v", err)
 	}
 

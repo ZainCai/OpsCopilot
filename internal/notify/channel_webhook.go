@@ -48,19 +48,21 @@ const bodySnippetLimit = 512
 
 // WebhookChannel 通用 webhook 渠道（按 kind 选载荷模板）。
 type WebhookChannel struct {
-	name    string
-	kind    string
-	url     string
-	client  *http.Client
-	timeout time.Duration
+	name        string
+	kind        string
+	url         string
+	minSeverity string // 接收的最低严重级（W9-3 路由；空 = info 全收）
+	client      *http.Client
+	timeout     time.Duration
 }
 
-// WebhookOptions 构造参数（timeout 为 0 取默认 5s）。
+// WebhookOptions 构造参数（timeout 为 0 取默认 5s；minSeverity 空 = info）。
 type WebhookOptions struct {
-	Name    string
-	Kind    string
-	URL     string
-	Timeout time.Duration
+	Name        string
+	Kind        string
+	URL         string
+	MinSeverity string
+	Timeout     time.Duration
 }
 
 // NewWebhookChannel 构造。校验 kind 与 URL 形态——非法配置应该在建渠道
@@ -76,18 +78,38 @@ func NewWebhookChannel(o WebhookOptions) (*WebhookChannel, error) {
 	if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
 		return nil, fmt.Errorf("notify: channel %q url must be http(s)://", o.Name)
 	}
+	sev := strings.ToLower(strings.TrimSpace(o.MinSeverity))
+	if sev == "" {
+		sev = "info"
+	}
+	if !ValidSeverity(sev) {
+		return nil, fmt.Errorf("notify: channel %q min_severity must be one of critical|warning|info", o.Name)
+	}
 	to := o.Timeout
 	if to <= 0 {
 		to = defaultSendTimeout
 	}
 	return &WebhookChannel{
-		name:    o.Name,
-		kind:    o.Kind,
-		url:     u,
-		client:  &http.Client{Timeout: to},
-		timeout: to,
+		name:        o.Name,
+		kind:        o.Kind,
+		url:         u,
+		minSeverity: sev,
+		client:      &http.Client{Timeout: to},
+		timeout:     to,
 	}, nil
 }
+
+// ValidSeverity 严重级白名单（与事件域/DB 口径一致）。
+func ValidSeverity(s string) bool {
+	switch s {
+	case "critical", "warning", "info":
+		return true
+	}
+	return false
+}
+
+// MinSeverity 本渠道接收的最低严重级（SeverityFilter 实现）。
+func (c *WebhookChannel) MinSeverity() string { return c.minSeverity }
 
 // Name 渠道名（Registry 键）。
 func (c *WebhookChannel) Name() string { return c.name }

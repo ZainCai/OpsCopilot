@@ -429,7 +429,7 @@ svg text { fill: var(--text); font-family: var(--font-mono); font-size: 11px; }
     <div class="page-head">
       <div>
         <div class="page-title">设置 · 通知渠道</div>
-        <div class="page-desc">降噪转正（enforce）后的通知出口 · generic / 飞书 / 企业微信 · 保存即生效 · 内置 console 兜底渠道不可删</div>
+        <div class="page-desc">降噪转正（enforce）后的通知出口 · generic / 飞书 / 企业微信 · 按最低严重级路由 · 保存即生效 · 内置 console 兜底渠道不可删</div>
       </div>
       <div style="margin-left:auto">
         <button class="btn btn--sm" onclick="loadChannels()">刷新</button>
@@ -445,13 +445,19 @@ svg text { fill: var(--text); font-family: var(--font-mono); font-size: 11px; }
         </div>
       </div>
       <div id="channelForm" class="panel-b" style="display:none">
-        <div class="form-row" style="max-width:760px">
+        <div class="form-row" style="max-width:900px">
           <span class="muted">名称</span><input id="chName" placeholder="如：ops-feishu（字母数字._-）">
           <span class="muted">类型</span>
           <select id="chKind">
             <option value="generic">generic（自建 JSON）</option>
             <option value="feishu">feishu（飞书机器人）</option>
             <option value="wecom">wecom（企微机器人）</option>
+          </select>
+          <span class="muted">最低严重级</span>
+          <select id="chSeverity">
+            <option value="info">info（全收）</option>
+            <option value="warning">warning（告警及以上）</option>
+            <option value="critical">critical（仅严重）</option>
           </select>
           <span class="muted">Webhook URL</span><input id="chURL" placeholder="https://...">
         </div>
@@ -462,7 +468,7 @@ svg text { fill: var(--text); font-family: var(--font-mono); font-size: 11px; }
       </div>
       <div class="tbl-wrap">
         <table class="tbl">
-          <thead><tr><th>名称</th><th>类型</th><th>URL</th><th>状态</th><th>更新时间</th><th>操作</th></tr></thead>
+          <thead><tr><th>名称</th><th>类型</th><th>最低级</th><th>URL</th><th>状态</th><th>更新时间</th><th>操作</th></tr></thead>
           <tbody id="chRows"></tbody>
         </table>
       </div>
@@ -771,6 +777,8 @@ function switchView(v) {
 // 写路径带 Token（postJSON/authHeaders 统一注入）；行内操作走 data-* +
 // 事件委托（内联 onclick 拼串会把渠道 URL 带进 DOM 属性，是 XSS 面）。
 const CH_KIND_LABEL = { generic: "自建 JSON", feishu: "飞书", wecom: "企业微信" };
+// 最低严重级标签（W9-3 渠道路由）：critical 只收严重、warning 收告警及以上、info 全收。
+const CH_SEV_LABEL = { critical: "critical", warning: "warning", info: "info" };
 let channelCache = [];
 function toggleChannelForm() {
   const f = $("channelForm");
@@ -793,6 +801,7 @@ function renderChannels() {
     <tr>
       <td class="mono">${esc(c.name)}</td>
       <td><span class="chip">${esc(CH_KIND_LABEL[c.kind] || c.kind)}</span></td>
+      <td><span class="chip">${esc(CH_SEV_LABEL[c.min_severity] || c.min_severity || "info")}</span></td>
       <td class="mono faint" style="max-width:320px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap" title="${esc(c.url)}">${esc(c.url)}</td>
       <td>${c.enabled ? '<span class="chip chip--open">启用</span>' : '<span class="chip">已禁用</span>'}</td>
       <td>${timeAgo(c.updated_at)}</td>
@@ -801,14 +810,15 @@ function renderChannels() {
         <button class="btn btn--sm" data-ch-del="${esc(c.name)}">删除</button>
       </td>
     </tr>`).join("");
-  $("chRows").innerHTML = rows || emptyState("暂无渠道", "只启用了内置 console 兜底渠道（通知会落服务日志）", 6);
+  $("chRows").innerHTML = rows || emptyState("暂无渠道", "只启用了内置 console 兜底渠道（通知会落服务日志）", 7);
 }
 async function submitChannel() {
-  const name = $("chName").value.trim(), kind = $("chKind").value, url = $("chURL").value.trim();
+  const name = $("chName").value.trim(), kind = $("chKind").value;
+  const minSeverity = $("chSeverity").value, url = $("chURL").value.trim();
   if (!name || !url) { msg($("chMsg"), "err", "名称与 URL 必填"); return; }
   msg($("chMsg"), "loading", "保存渠道…");
   try {
-    const out = await postJSON("/api/v1/notify/channels", { name, kind, url, enabled: true });
+    const out = await postJSON("/api/v1/notify/channels", { name, kind, url, min_severity: minSeverity, enabled: true });
     msg($("chMsg"), "", "");
     $("chName").value = ""; $("chURL").value = "";
     toggleChannelForm();

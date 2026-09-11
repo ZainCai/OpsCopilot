@@ -38,13 +38,51 @@ type Notifier interface {
 	Send(m Message) error
 }
 
-// ConsoleChannel 控制台渠道：落日志（主干默认渠道，联调用；W10 换 IM/webhook）。
+// SeverityFilter 渠道可选能力（W9-3 值班路由）：声明本渠道接收的**最低
+// 严重级**。不实现 = 接收全部（等价 info）。Gate 按告警严重级逐个渠道
+// 判定——"critical 进 IM、info 只留日志"由此表达。
+type SeverityFilter interface {
+	MinSeverity() string
+}
+
+// 严重级排序：critical > warning > info。**未知/空值按 critical 处理**
+// ——路由的失败模式必须是"多通知"而不是"静默丢弃"。
+func SeverityRank(sev string) int {
+	switch strings.ToLower(strings.TrimSpace(sev)) {
+	case "critical":
+		return 3
+	case "warning":
+		return 2
+	case "info":
+		return 1
+	case "":
+		return 3
+	default:
+		return 3
+	}
+}
+
+// channelAccepts 渠道是否接收该严重级（未实现 SeverityFilter = 全接）。
+func channelAccepts(c Notifier, msgSeverity string) bool {
+	f, ok := c.(SeverityFilter)
+	if !ok {
+		return true
+	}
+	return SeverityRank(msgSeverity) >= SeverityRank(f.MinSeverity())
+}
+
+// ConsoleChannel 控制台渠道：落日志（兜底渠道，联调与降级用）。
+// MinSeverity 恒为 info（接收全部）：enforce 下零渠道 = 通知静默丢失，
+// 兜底渠道必须"什么都能收"，它是最后一道留痕。
 type ConsoleChannel struct {
 	Logf func(format string, args ...any) // 注入日志函数（main 的 logger）
 }
 
 // Name 渠道名。
 func (c *ConsoleChannel) Name() string { return "console" }
+
+// MinSeverity 兜底渠道最低严重级（info = 全部）。
+func (c *ConsoleChannel) MinSeverity() string { return "info" }
 
 // Send 落日志即成功。
 func (c *ConsoleChannel) Send(m Message) error {
@@ -109,12 +147,18 @@ func (r *Registry) Names() []string {
 	return out
 }
 
-// Dispatch 全渠道分发（单渠道失败不拖累其余；全失败才报错）。
+// Dispatch 全渠道分发（W9-3：按严重级路由——低于渠道 MinSeverity 的
+// 渠道跳过；单渠道失败不拖累其余；全失败才报错）。
+//
+// 路由跳过不计入错误：通知已由其它渠道送达，且 console 兜底渠道
+// 恒接收全部，不存在"全被路由掉导致静默丢失"的组合。
 func (r *Registry) Dispatch(m Message) error {
 	r.mu.RLock()
 	chs := make([]Notifier, 0, len(r.channels))
 	for _, c := range r.channels {
-		chs = append(chs, c)
+		if channelAccepts(c, m.Severity) {
+			chs = append(chs, c)
+		}
 	}
 	r.mu.RUnlock()
 	if len(chs) == 0 {

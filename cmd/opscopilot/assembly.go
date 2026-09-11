@@ -55,6 +55,8 @@ type Assembly struct {
 	Worker *IngestWorker
 	// Poller 链路 A 拉取侧：定时从数据源拉告警入队（nil = 未启用）。
 	Poller *AlertPoller
+	// Escalation 值班升级（W9-3）：未 ack 超时重发一次（nil = 未启用）。
+	Escalation *EscalationPoller
 	// Events 实时广播器（W11：控制台事件页 SSE 订阅源）。
 	Events *EventHub
 	// NotifyReg 通知渠道注册表（W9-2）：渠道 CRUD 后由 reloadNotifyChannels
@@ -256,6 +258,10 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 	// 重启才生效——"配置改了没反应"是运维最恨的一类 bug）。
 	rest.SetChannels(asm.Channels, asm.reloadNotifyChannels)
 
+	// W9-3 值班升级：未 ack 超时重发一次。需事件 Store（读 open）+ 通知
+	// 注册表（出口）。台账优先 PG（多实例安全），无库降级内存并告警。
+	asm.Escalation = buildEscalationPoller(asm.Incidents, asm.NotifyReg, pgPool, logf)
+
 	// W9 双链路链路 A（外部导入）：入队通道需要 DB 队列（持久化/可积压/可重放）。
 	// 无 DB 时不注册队列——入队端点显式 503（见 Handler），比 404 可诊断。
 	if pgPool != nil {
@@ -300,6 +306,44 @@ func buildAlertPoller(owner *QueueOwner, logf func(string, ...any)) *AlertPoller
 	}
 	src := NewPrometheusAlertsSource(url, os.Getenv("OPS_PROM_TOKEN"))
 	return NewAlertPoller(src, owner, incident.OriginPrometheus, interval, logf)
+}
+
+// buildEscalationPoller 按环境变量装配值班升级调度器（未启用返回 nil）。
+//
+//	OPS_ESCALATION=on         启用（默认关；避免"没人管"在配置不当时刷通知）
+//	OPS_ESCALATION_AFTER      创建后多久未 ack 触发升级（默认 15m；非法值告警取默认）
+//	OPS_ESCALATION_INTERVAL   扫描周期（默认 60s；非法值告警取默认）
+//
+// 台账优先 PG（incident_escalation 主键幂等，多实例安全）；无库退化为内存
+// 台账（重启即丢、仅单实例正确）——显式告警，不让运维误以为已持久化。
+func buildEscalationPoller(store incident.Store, dispatcher EscalationDispatcher, pool *pgxpool.Pool, logf func(string, ...any)) *EscalationPoller {
+	if !strings.EqualFold(strings.TrimSpace(os.Getenv("OPS_ESCALATION")), "on") {
+		return nil
+	}
+	after := parseDurEnv("OPS_ESCALATION_AFTER", 15*time.Minute, logf)
+	interval := parseDurEnv("OPS_ESCALATION_INTERVAL", 60*time.Second, logf)
+	var ledger EscalationLedger
+	if pool != nil {
+		ledger = newPGEscalationLedger(pool, DefaultTenant)
+	} else {
+		logf("WARNING: escalation ledger is in-memory (no DB) — restart loses state, single-instance only")
+		ledger = newMemEscalationLedger()
+	}
+	return NewEscalationPoller(store, dispatcher, ledger, DefaultTenant, after, interval, logf)
+}
+
+// parseDurEnv 解析 duration 型环境变量（空/非法 → 取默认并告警）。
+func parseDurEnv(key string, def time.Duration, logf func(string, ...any)) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		logf("WARNING: invalid %s %q — using %v", key, raw, def)
+		return def
+	}
+	return d
 }
 
 // Handler 装配 HTTP 路由：

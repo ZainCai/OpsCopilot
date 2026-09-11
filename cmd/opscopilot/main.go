@@ -150,6 +150,11 @@ func main() {
 		go asm.Poller.Run(runCtx)
 	}
 
+	// W9-3 值班升级：周期扫描未 ack 超时事件并升级一次（未启用则 nil）。
+	if asm.Escalation != nil {
+		go asm.Escalation.Run(runCtx)
+	}
+
 	// D8 决策 C：事件保留策略 —— resolved 满 N 天归档到 incident_archive
 	// （事件本体 + 簇 + 审计 打包成 JSONB，不丢任何上下文）。默认 90d，
 	// OPS_INCIDENT_RETENTION=off 可关闭；配置非法直接启动失败（fail-fast）。
@@ -241,6 +246,12 @@ func main() {
 		logger.Printf("  alert pull: ON (source %s, origin %s)", asm.Poller.Source.Name(), asm.Poller.Origin)
 	} else {
 		logger.Printf("  alert pull: OFF (set OPS_PULL_ALERTS=on + OPS_PROM_URL to enable)")
+	}
+	if asm.Escalation != nil {
+		logger.Printf("  escalation: ON (unacked > %v re-notify once, scan %v)",
+			asm.Escalation.After, asm.Escalation.Interval)
+	} else {
+		logger.Printf("  escalation: OFF (set OPS_ESCALATION=on to enable unacked-timeout re-notify)")
 	}
 	logger.Printf("  events: 双链路（人工建单 POST /api/v1/incidents ∥ 外部导入 push/pull）+ SSE 实时推送 + 控制台事件页 /console")
 	logger.Printf("  not wired (M2): rca, sessionstore, /metrics（预留件，见 README「预留未接线的组件」；notify 闸门已随 W9-1 enforce 接线）")

@@ -3,7 +3,8 @@
 // 职责边界：
 //   - 本文件只管"渠道配置的存取与合法性"（DB + 校验 + 装载进 Registry）；
 //   - 投递逻辑在 internal/notify（WebhookChannel）；
-//   - 路由规则（severity→渠道、值班升级）属 W9-3。
+//   - 严重级路由的**运行时执行**在 internal/notify（Dispatch 按 MinSeverity
+//     过滤）；本文件只负责把 min_severity 存进/读出配置表并带进渠道构造。
 //
 // 租户纪律与其它表一致：全部访问带 tenant_id（M1 单租户，但键空间不省）。
 package main
@@ -24,13 +25,16 @@ import (
 
 // ChannelRecord 渠道配置行（API 响应与 DB 行同构，snake_case json）。
 type ChannelRecord struct {
-	TenantID  string    `json:"tenant_id"`
-	Name      string    `json:"name"`
-	Kind      string    `json:"kind"`
-	URL       string    `json:"url"`
-	Enabled   bool      `json:"enabled"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	TenantID string `json:"tenant_id"`
+	Name     string `json:"name"`
+	Kind     string `json:"kind"`
+	URL      string `json:"url"`
+	// MinSeverity 本渠道接收的最低严重级（W9-3 值班路由）：
+	// critical=只在最严重级响、warning=critical+warning、info=全收（默认）。
+	MinSeverity string    `json:"min_severity"`
+	Enabled     bool      `json:"enabled"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // channelNameRe 渠道名约束：键空间与前端路径参数共用，收窄字符集。
@@ -52,8 +56,18 @@ func invalidChannelf(format string, args ...any) error {
 	return &ValidationError{Msg: fmt.Sprintf(format, args...)}
 }
 
+// NormalizeMinSeverity 归一化最低严重级：空/空白 = info（默认全收）。
+// 不改写非法值——非法值应被 ValidateChannel 拒绝，而非静默兜底。
+func NormalizeMinSeverity(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" {
+		return "info"
+	}
+	return s
+}
+
 // ValidateChannel 渠道配置校验（API 与装配装载共用一套规则）。
-func ValidateChannel(name, kind, url string) error {
+func ValidateChannel(name, kind, url, minSeverity string) error {
 	if name == ChannelConsoleName {
 		return invalidChannelf("name %q is reserved (built-in console sink)", ChannelConsoleName)
 	}
@@ -69,6 +83,9 @@ func ValidateChannel(name, kind, url string) error {
 	}
 	if len(u) > 2048 {
 		return invalidChannelf("url too long (max 2048)")
+	}
+	if !notify.ValidSeverity(NormalizeMinSeverity(minSeverity)) {
+		return invalidChannelf("min_severity must be one of critical|warning|info")
 	}
 	return nil
 }
@@ -90,7 +107,7 @@ func (s *ChannelStore) List(ctx context.Context) ([]ChannelRecord, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	rows, err := s.pool.Query(ctx, `
-SELECT tenant_id, name, kind, url, enabled, created_at, updated_at
+SELECT tenant_id, name, kind, url, min_severity, enabled, created_at, updated_at
 FROM notify_channel WHERE tenant_id = $1 ORDER BY name`, s.tenant)
 	if err != nil {
 		return nil, fmt.Errorf("channel store: list: %w", err)
@@ -99,7 +116,7 @@ FROM notify_channel WHERE tenant_id = $1 ORDER BY name`, s.tenant)
 	var out []ChannelRecord
 	for rows.Next() {
 		var r ChannelRecord
-		if err := rows.Scan(&r.TenantID, &r.Name, &r.Kind, &r.URL, &r.Enabled, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		if err := rows.Scan(&r.TenantID, &r.Name, &r.Kind, &r.URL, &r.MinSeverity, &r.Enabled, &r.CreatedAt, &r.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("channel store: scan: %w", err)
 		}
 		out = append(out, r)
@@ -122,20 +139,21 @@ func (s *ChannelStore) ListEnabled(ctx context.Context) ([]ChannelRecord, error)
 	return out, nil
 }
 
-// Upsert 新建/更新（同 name 覆盖 kind/url/enabled）。
-func (s *ChannelStore) Upsert(ctx context.Context, name, kind, url string, enabled bool) error {
-	if err := ValidateChannel(name, kind, url); err != nil {
+// Upsert 新建/更新（同 name 覆盖 kind/url/min_severity/enabled）。
+func (s *ChannelStore) Upsert(ctx context.Context, name, kind, url, minSeverity string, enabled bool) error {
+	sev := NormalizeMinSeverity(minSeverity)
+	if err := ValidateChannel(name, kind, url, sev); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	_, err := s.pool.Exec(ctx, `
-INSERT INTO notify_channel (tenant_id, name, kind, url, enabled, updated_at)
-VALUES ($1, $2, $3, $4, $5, now())
+INSERT INTO notify_channel (tenant_id, name, kind, url, min_severity, enabled, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, now())
 ON CONFLICT (tenant_id, name) DO UPDATE SET
-  kind = EXCLUDED.kind, url = EXCLUDED.url, enabled = EXCLUDED.enabled,
-  updated_at = now()`,
-		s.tenant, name, kind, strings.TrimSpace(url), enabled)
+  kind = EXCLUDED.kind, url = EXCLUDED.url, min_severity = EXCLUDED.min_severity,
+  enabled = EXCLUDED.enabled, updated_at = now()`,
+		s.tenant, name, kind, strings.TrimSpace(url), sev, enabled)
 	if err != nil {
 		return fmt.Errorf("channel store: upsert: %w", err)
 	}
@@ -190,7 +208,9 @@ func loadChannelsIntoRegistry(ctx context.Context, store *ChannelStore, reg *not
 	}
 	n := 0
 	for _, r := range rows {
-		ch, err := notify.NewWebhookChannel(notify.WebhookOptions{Name: r.Name, Kind: r.Kind, URL: r.URL})
+		ch, err := notify.NewWebhookChannel(notify.WebhookOptions{
+			Name: r.Name, Kind: r.Kind, URL: r.URL, MinSeverity: r.MinSeverity,
+		})
 		if err != nil {
 			logf("WARNING: notify channel %q skipped (invalid config): %v", r.Name, err)
 			continue
@@ -207,9 +227,9 @@ func (s *ChannelStore) channelByName(ctx context.Context, name string) (ChannelR
 	defer cancel()
 	var r ChannelRecord
 	err := s.pool.QueryRow(ctx, `
-SELECT tenant_id, name, kind, url, enabled, created_at, updated_at
+SELECT tenant_id, name, kind, url, min_severity, enabled, created_at, updated_at
 FROM notify_channel WHERE tenant_id = $1 AND name = $2`, s.tenant, name).
-		Scan(&r.TenantID, &r.Name, &r.Kind, &r.URL, &r.Enabled, &r.CreatedAt, &r.UpdatedAt)
+		Scan(&r.TenantID, &r.Name, &r.Kind, &r.URL, &r.MinSeverity, &r.Enabled, &r.CreatedAt, &r.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ChannelRecord{}, ErrChannelNotFound
 	}

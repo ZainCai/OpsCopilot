@@ -4,6 +4,8 @@
 //
 //	GET    /api/v1/notify/channels            列表（含禁用）
 //	POST   /api/v1/notify/channels            新建/更新（name 为键，幂等 upsert）
+//	         body: {name, kind, url, min_severity?, enabled?}
+//	         min_severity: critical|warning|info（省略 = info 全收，W9-3 路由）
 //	POST   /api/v1/notify/channels/{name}/enabled  软开关 {"enabled":bool}
 //	DELETE /api/v1/notify/channels/{name}     删除
 //
@@ -52,10 +54,11 @@ func (g *RESTGateway) handleNotifyChannels(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		var in struct {
-			Name    string `json:"name"`
-			Kind    string `json:"kind"`
-			URL     string `json:"url"`
-			Enabled *bool  `json:"enabled"` // 省略 = 启用
+			Name        string `json:"name"`
+			Kind        string `json:"kind"`
+			URL         string `json:"url"`
+			MinSeverity string `json:"min_severity"` // 省略 = info（全收）
+			Enabled     *bool  `json:"enabled"`      // 省略 = 启用
 		}
 		if !decodeStrict(w, r, notifyBodyLimit, &in) {
 			return
@@ -66,7 +69,7 @@ func (g *RESTGateway) handleNotifyChannels(w http.ResponseWriter, r *http.Reques
 		if in.Enabled != nil {
 			enabled = *in.Enabled
 		}
-		if err := store.Upsert(r.Context(), name, kind, in.URL, enabled); err != nil {
+		if err := store.Upsert(r.Context(), name, kind, in.URL, in.MinSeverity, enabled); err != nil {
 			if errors.Is(err, ErrChannelNotFound) {
 				writeErr(w, http.StatusNotFound, err.Error())
 				return

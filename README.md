@@ -118,9 +118,10 @@ curl -X POST http://127.0.0.1:8080/api/v1/changes \
 
 ```bash
 # 新增/更新渠道（kind：generic 自建 JSON | feishu 飞书机器人 | wecom 企业微信机器人）
+# min_severity（W9-3 路由）：critical 只收严重 / warning 收告警及以上 / info 全收（默认）
 curl -X POST http://127.0.0.1:8080/api/v1/notify/channels \
   -H "Content-Type: application/json" -H "X-OpsCopilot-Token: <OPS_WEBHOOK_TOKEN>" \
-  -d '{"name":"ops-feishu","kind":"feishu","url":"https://open.feishu.cn/open-apis/bot/v2/hook/xxx","enabled":true}'
+  -d '{"name":"ops-feishu","kind":"feishu","url":"https://open.feishu.cn/open-apis/bot/v2/hook/xxx","min_severity":"warning","enabled":true}'
 
 curl http://127.0.0.1:8080/api/v1/notify/channels                       # 列表（读路径）
 curl -X POST .../api/v1/notify/channels/ops-feishu/enabled -d '{"enabled":false}' -H 'Content-Type: application/json' -H 'X-OpsCopilot-Token: <key>'
@@ -128,6 +129,16 @@ curl -X DELETE .../api/v1/notify/channels/ops-feishu -H 'X-OpsCopilot-Token: <ke
 ```
 
 内置 `console` 兜底渠道（落服务日志）恒在且**不可覆盖/删除**——enforce 下零渠道意味着通知静默丢失，兜底至少留痕。装配启动时若 enforce 且零 webhook 渠道会打 WARNING。控制台「设置」页提供同样的能力（列表/新增/启停/删除）。
+
+**严重级路由（W9-3）**：每个渠道可声明 `min_severity`（`critical` > `warning` > `info`），投递时按告警严重级逐渠道判定——"critical 进 IM、info 只留日志"由此表达。未知/空严重级按 `critical` 处理（失败模式必须是多通知，而非静默丢弃）。
+
+### 值班升级（W9-3，最小版）
+
+通知发出去 ≠ 有人接手。`OPS_ESCALATION=on` 启用后，后台每 `OPS_ESCALATION_INTERVAL`（默认 60s）扫描一次：`state=open`（未确认）且创建超过 `OPS_ESCALATION_AFTER`（默认 15m）的事件，再发一次 `[超时未响应]` 通知。**只升级一次**——台账 `incident_escalation`（迁移 000014）以 `(tenant_id, incident_id)` 主键幂等，多实例也不会重复发；发送失败自动回滚认领，下一轮重试。
+
+- 已 `acked` 的事件不再催（人工已接手）；不做排班/轮岗/多级升级（M3）；
+- 升级通知沿用事件自身严重级 → 自然走上面的渠道路由；
+- 无 DB 时台账退化为内存（重启即丢、仅单实例正确），启动会打 WARNING。
 
 ### 本地 compose 环境
 
@@ -146,7 +157,7 @@ curl -X DELETE .../api/v1/notify/channels/ops-feishu -H 'X-OpsCopilot-Token: <ke
 | 包 | 行数 | 用途 | 计划接线阶段 |
 |---|---|---|---|
 | `internal/rca` | 124 | 根因分析（证据窗口、因果子图消费方） | M2 |
-| `internal/notify` | 164 | 通知闸门/渠道（**Gate 已随 W9-1 enforce 接线**，Console 渠道；真实渠道 W9-2） | 渠道扩展 W9-2 |
+| `internal/notify` | 164 | 通知闸门/渠道（**Gate 随 W9-1 enforce 接线、渠道随 W9-2、严重级路由随 W9-3**；剩余：值班排班 M3） | 已接线 |
 | `internal/sessionstore` | 61 | 会话状态（Redis 会话存储） | W5+ |
 
 历史审核报告在 `docs/reviews/`（原堆在仓库根，D11 决策 A 归档）；M2 候选清单与双链路方案在 `docs/`。

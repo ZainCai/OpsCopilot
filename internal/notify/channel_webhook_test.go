@@ -159,6 +159,39 @@ func TestWebhookChannelValidation(t *testing.T) {
 	if ch, err := NewWebhookChannel(WebhookOptions{Name: "a", Kind: KindGeneric, URL: " http://x "}); err != nil || ch.Kind() != KindGeneric {
 		t.Fatalf("trimmed url must be accepted: %v", err)
 	}
+	// 非法 min_severity 必须拒绝
+	if _, err := NewWebhookChannel(WebhookOptions{Name: "a", Kind: KindGeneric, URL: "http://x", MinSeverity: "fatal"}); err == nil {
+		t.Fatal("invalid min_severity must fail")
+	}
+	// 省略/空白 = info（全收）
+	ch, err := NewWebhookChannel(WebhookOptions{Name: "a", Kind: KindGeneric, URL: "http://x", MinSeverity: "  "})
+	if err != nil {
+		t.Fatalf("blank min_severity must be accepted: %v", err)
+	}
+	if got := ch.MinSeverity(); got != "info" {
+		t.Fatalf("blank min_severity = %q, want info", got)
+	}
+	ch2, err := NewWebhookChannel(WebhookOptions{Name: "a", Kind: KindGeneric, URL: "http://x", MinSeverity: "CRITICAL"})
+	if err != nil {
+		t.Fatalf("uppercase min_severity must be accepted: %v", err)
+	}
+	if got := ch2.MinSeverity(); got != "critical" {
+		t.Fatalf("uppercase min_severity = %q, want critical", got)
+	}
+}
+
+// TestValidSeverity 白名单口径（与 DB CHECK 一致）。
+func TestValidSeverity(t *testing.T) {
+	for _, s := range []string{"critical", "warning", "info"} {
+		if !ValidSeverity(s) {
+			t.Fatalf("ValidSeverity(%q) = false, want true", s)
+		}
+	}
+	for _, s := range []string{"", "CRITICAL", "fatal", "warn"} {
+		if ValidSeverity(s) {
+			t.Fatalf("ValidSeverity(%q) = true, want false", s)
+		}
+	}
 }
 
 // TestGatePolicyOnlyNewIncidentNotifies W9-2 验收口径：只有新事件发通知，

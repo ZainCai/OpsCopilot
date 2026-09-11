@@ -21,6 +21,20 @@ func (c *chanStub) Send(m Message) error {
 	return c.err
 }
 
+// sevChanStub 带最低严重级的渠道（SeverityFilter 实现），记录收到的严重级。
+type sevChanStub struct {
+	name string
+	min  string
+	got  *[]string
+}
+
+func (c *sevChanStub) Name() string        { return c.name }
+func (c *sevChanStub) MinSeverity() string { return c.min }
+func (c *sevChanStub) Send(m Message) error {
+	*c.got = append(*c.got, m.Severity)
+	return nil
+}
+
 func TestRegistryRegisterAndNames(t *testing.T) {
 	r := NewRegistry()
 	r.Register(&chanStub{name: "console"})
@@ -71,5 +85,60 @@ func TestGateSuppressionCounting(t *testing.T) {
 	// 空判定拒绝。
 	if _, err := g.Admit(Decision{}); err == nil {
 		t.Fatal("empty decision accepted")
+	}
+}
+
+// TestSeverityRank 严重级排序：critical>warning>info；空/未知按最严（critical）。
+func TestSeverityRank(t *testing.T) {
+	for in, want := range map[string]int{
+		"critical": 3, "CRITICAL": 3, " warning ": 2, "info": 1,
+		"": 3, "bogus": 3, // 未知值不得降级为"最低"——失败模式是多通知而非静默丢弃
+	} {
+		if got := SeverityRank(in); got != want {
+			t.Fatalf("SeverityRank(%q) = %d, want %d", in, got, want)
+		}
+	}
+}
+
+// TestDispatchSeverityRouting 按严重级路由：
+// console(info) 全收；warn-only 收 warning+critical；crit-only 只收 critical。
+func TestDispatchSeverityRouting(t *testing.T) {
+	var warnOnly, critOnly []string
+	r := NewRegistry()
+	r.Register(&ConsoleChannel{Logf: func(string, ...any) {}}) // info 全收
+	r.Register(&sevChanStub{name: "warn", min: "warning", got: &warnOnly})
+	r.Register(&sevChanStub{name: "crit", min: "critical", got: &critOnly})
+
+	// info：只有 console 收（warn/crit 过滤掉）
+	if err := r.Dispatch(Message{Title: "t", Severity: "info"}); err != nil {
+		t.Fatalf("dispatch info: %v", err)
+	}
+	// warning：console + warn
+	if err := r.Dispatch(Message{Title: "t", Severity: "warning"}); err != nil {
+		t.Fatalf("dispatch warning: %v", err)
+	}
+	// critical：console + warn + crit
+	if err := r.Dispatch(Message{Title: "t", Severity: "critical"}); err != nil {
+		t.Fatalf("dispatch critical: %v", err)
+	}
+	if len(warnOnly) != 2 || warnOnly[0] != "warning" || warnOnly[1] != "critical" {
+		t.Fatalf("warn-only got %v, want [warning critical]", warnOnly)
+	}
+	if len(critOnly) != 1 || critOnly[0] != "critical" {
+		t.Fatalf("crit-only got %v, want [critical]", critOnly)
+	}
+}
+
+// TestDispatchAllFilteredNoChannel 全部渠道被严重级过滤掉 → ErrNoChannel
+// （确定性：而不是静默返回 nil 让调用方以为发出去了）。
+func TestDispatchAllFilteredNoChannel(t *testing.T) {
+	var got []string
+	r := NewRegistry()
+	r.Register(&sevChanStub{name: "crit", min: "critical", got: &got})
+	if err := r.Dispatch(Message{Title: "t", Severity: "info"}); !errors.Is(err, ErrNoChannel) {
+		t.Fatalf("all-filtered dispatch err = %v, want ErrNoChannel", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("crit channel received %v, want none", got)
 	}
 }
