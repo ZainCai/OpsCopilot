@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"opscopilot/internal/connector"
@@ -61,7 +62,13 @@ type NoiseEngine struct {
 	// verdicts 逐告警判决落库出口（W6-1 评估数据链，可选）。
 	verdicts noise.VerdictSink
 	// saveFailures / verdictFailures 落库失败累计（不中断告警链路）。
-	saveFailures, verdictFailures int
+	//
+	// W9-5（第八轮审核建议 11）：改 atomic.Uint64。这两个计数在**锁外**自增
+	// （persistClusters / persistVerdicts 都在 n.mu.Unlock() 之后运行），
+	// 此前是裸 int++——采集宿主与任何潜在并发调用方同时进入就是数据竞争
+	// （CI 的 -race 会抓）。落库路径本就该与引擎锁解耦，故选择原子计数
+	// 而不是把它们挪回锁内。
+	saveFailures, verdictFailures atomic.Uint64
 	// persistedSig 已落库签名：clusterKey → state|lastSeenUnixNano|alertCount。
 	// 第四轮扫描 F3：resolved 簇状态不再变化，全量重写会让 Redis 写放大
 	// 随历史线性增长——按签名去重，只有变化过的簇才写。Restore 后清空
@@ -77,7 +84,8 @@ type NoiseEngine struct {
 	// gateStats Gate 计数真相源出口（nil = 只累计内存，重启清零）。
 	gateStats GateStatsSink
 	// gateFailures 计数持久化失败累计（尽力而为，不中断告警链路）。
-	gateFailures int
+	// W9-5：同 saveFailures —— admitDecisions 在锁外运行，原子计数。
+	gateFailures atomic.Uint64
 	// m 延迟/计数打点集（W9-4；nil = 不打点）。nil 安全：所有打点方法
 	// 自带判空，指标缺失不得影响告警链路。
 	m *AppMetrics
@@ -327,8 +335,8 @@ func (n *NoiseEngine) admitDecisions(gate *notify.Gate, gs GateStatsSink, decisi
 		if err != nil {
 			// 空判决（无簇无标题）或全渠道失败：计数为闸门异常，
 			// 不中断后续告警的闸门判定。
-			n.gateFailures++
-			n.logf("WARNING: gate admit failed (cumulative %d): %v", n.gateFailures, err)
+			n.gateFailures.Add(1)
+			n.logf("WARNING: gate admit failed (cumulative %d): %v", n.gateFailures.Load(), err)
 			continue
 		}
 		if ok {
@@ -348,8 +356,8 @@ func (n *NoiseEngine) admitDecisions(gate *notify.Gate, gs GateStatsSink, decisi
 	st := gate.Stats()
 	if gs != nil {
 		if err := gs.SaveGateStats(n.tenant, st); err != nil {
-			n.gateFailures++
-			n.logf("WARNING: gate stats persist failed (cumulative %d): %v", n.gateFailures, err)
+			n.gateFailures.Add(1)
+			n.logf("WARNING: gate stats persist failed (cumulative %d): %v", n.gateFailures.Load(), err)
 		}
 	}
 	n.logf("enforce gate: %d decisions (admitted %d, suppressed %d) — cumulative suppressed=%d dispatched=%d",
@@ -366,7 +374,7 @@ func (n *NoiseEngine) persistVerdicts(vs noise.VerdictSink, verdicts []noise.Ver
 	for i, rec := range verdicts {
 		if err := vs.SaveVerdict(rec); err != nil {
 			failed++
-			n.verdictFailures++
+			n.verdictFailures.Add(1)
 			continue // 失败的行没有"落库时刻"，打点会低估
 		}
 		if i < len(fired) && !fired[i].IsZero() {
@@ -379,7 +387,7 @@ func (n *NoiseEngine) persistVerdicts(vs noise.VerdictSink, verdicts []noise.Ver
 	}
 	if failed > 0 {
 		n.logf("WARNING: verdict persist failed for %d/%d (cumulative %d)",
-			failed, len(verdicts), n.verdictFailures)
+			failed, len(verdicts), n.verdictFailures.Load())
 	}
 }
 
@@ -419,7 +427,7 @@ func (n *NoiseEngine) persistClusters(dirty []noise.ClusterRecord) {
 	for _, rec := range dirty {
 		if err := n.records.SaveCluster(rec); err != nil {
 			failed++
-			n.saveFailures++
+			n.saveFailures.Add(1)
 			n.mu.Lock()
 			delete(n.persistedSig, rec.ClusterKey)
 			n.mu.Unlock()
@@ -427,7 +435,7 @@ func (n *NoiseEngine) persistClusters(dirty []noise.ClusterRecord) {
 	}
 	if failed > 0 {
 		n.logf("WARNING: cluster persist failed for %d/%d clusters (rolled back signatures, cumulative failures %d)",
-			failed, len(dirty), n.saveFailures)
+			failed, len(dirty), n.saveFailures.Load())
 	}
 }
 

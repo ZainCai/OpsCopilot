@@ -9,6 +9,15 @@ import (
 	"time"
 )
 
+// SSE 连接参数。
+const (
+	// sseHeartbeat 心跳间隔：穿过反代/代理的空闲超时，也便于客户端感知存活。
+	sseHeartbeat = 20 * time.Second
+	// sseWriteDeadline 单次写的截止时间，每次写前重置（见 handleEventStream
+	// 的 renewWrite）。必须显著大于心跳间隔，否则正常心跳会被自己的截止时间打断。
+	sseWriteDeadline = 60 * time.Second
+)
+
 // handleAuthStatus GET /api/v1/auth/status —— 写权限探测（控制台据此决定是否
 // 显示 Token 输入框）。
 //
@@ -43,8 +52,12 @@ func (g *RESTGateway) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 //
 // 连接管理：
 //   - 首帧发注释行 ": connected" 立即刷新，让客户端确定连接已建立；
-//   - 每 20s 发 ": ping" 心跳——穿过反代/代理的空闲超时，也便于客户端
-//     感知连接存活；
+//   - 每 20s 发 ": ping" 心跳（sseHeartbeat）——穿过反代/代理的空闲超时，
+//     也便于客户端感知连接存活；
+//   - 写截止时间每次写前重置（sseWriteDeadline）：服务端有全局 WriteTimeout
+//     时（main.go），长连接需要它才能续命，同时不至于对半开连接永久阻塞；
+//   - 写失败（含截止时间到点）即退出循环——否则半开连接会永久占住
+//     goroutine 与订阅名额；
 //   - r.Context().Done() 触发（客户端断开/超时/服务停机）即退订返回。
 //
 // 慢客户端不阻塞写路径：Hub 缓冲满即丢该条（事件页是全量刷新语义，
@@ -59,6 +72,31 @@ func (g *RESTGateway) handleEventStream(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusInternalServerError, "streaming unsupported by server")
 		return
 	}
+
+	// W9-5（第八轮审核 D7）：http.Server 现在有全局 WriteTimeout（30s），
+	// 而 SSE 是长连接——必须在每次写前把写截止时间**往后推**。
+	//
+	// 为什么不是简单地清空截止时间（SetWriteDeadline(time.Time{})）：
+	// 清空后，对"半开连接"（客户端网络静默失联、没有 FIN/RST）的写会永久
+	// 阻塞，goroutine 与连接都回收不了——把超时问题换成了泄漏问题。
+	// 推进式截止时间两头都顾：正常心跳（20s）远早于新截止时间（60s），
+	// 长连接可无限续命；一旦某次写真的卡住超过 60s，写会失败，下面的
+	// 错误检查随即退出循环。
+	rc := http.NewResponseController(w)
+	deadlineUnsupported := false
+	renewWrite := func() {
+		if deadlineUnsupported {
+			return
+		}
+		if err := rc.SetWriteDeadline(time.Now().Add(sseWriteDeadline)); err != nil {
+			// 真实 net/http 服务恒支持；不支持只出现在自定义包装/测试替身，
+			// 此时连接会在全局 WriteTimeout 到点时被切断——留痕即可，
+			// 不因此拒绝提供 SSE（那对测试与嵌入方是更差的回归）。
+			deadlineUnsupported = true
+			g.logf("WARNING: event stream cannot set write deadline (stream may be cut by the global WriteTimeout): %v", err)
+		}
+	}
+
 	// 先订阅再写响应头：订阅失败（超限/停机）要能干净地回 503 而不是先发 200。
 	ch, cancel, ok := g.hub.Subscribe()
 	if !ok {
@@ -73,11 +111,14 @@ func (g *RESTGateway) handleEventStream(w http.ResponseWriter, r *http.Request) 
 	h.Set("Connection", "keep-alive")
 	// 反代（nginx）默认缓冲响应，会攒够才下发——显式关闭，否则推送变"批量"。
 	h.Set("X-Accel-Buffering", "no")
+	renewWrite()
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, ": connected\n\n")
+	if _, err := fmt.Fprint(w, ": connected\n\n"); err != nil {
+		return // 写失败即连接不可用（含写截止时间到点），不必再循环
+	}
 	fl.Flush()
 
-	ka := time.NewTicker(20 * time.Second)
+	ka := time.NewTicker(sseHeartbeat)
 	defer ka.Stop()
 	for {
 		select {
@@ -91,10 +132,16 @@ func (g *RESTGateway) handleEventStream(w http.ResponseWriter, r *http.Request) 
 			if err != nil {
 				continue // 理论不可达；坏帧跳过，不断流
 			}
-			fmt.Fprintf(w, "event: incident\ndata: %s\n\n", b)
+			renewWrite()
+			if _, err := fmt.Fprintf(w, "event: incident\ndata: %s\n\n", b); err != nil {
+				return // 连接已不可用：退出，回收 goroutine 与订阅名额
+			}
 			fl.Flush()
 		case <-ka.C:
-			fmt.Fprint(w, ": ping\n\n")
+			renewWrite()
+			if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {
+				return
+			}
 			fl.Flush()
 		}
 	}

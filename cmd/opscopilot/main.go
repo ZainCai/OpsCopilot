@@ -25,6 +25,40 @@ import (
 // 无鉴权服务不得默认监听全部网络接口。
 const defaultListenAddr = "127.0.0.1:8080"
 
+// HTTP 超时口径（W9-5，第八轮审核 D7）。
+//
+// 此前只有 ReadHeaderTimeout——足够挡 slow-loris，但慢响应/慢读连接仍可长期
+// 占住 goroutine 与连接（写不出去也不超时）。
+const (
+	// httpReadHeaderTimeout 只约束"请求头读完"这一段（slow-loris 防御）。
+	httpReadHeaderTimeout = 5 * time.Second
+	// httpWriteTimeout 单次请求的整段写上限。**SSE 例外**：长连接由
+	// handleEventStream 经 http.ResponseController 显式清除写截止时间
+	// （见 rest_stream.go），否则 30s 后写静默失败、连接变"假活"。
+	httpWriteTimeout = 30 * time.Second
+	// httpIdleTimeout keep-alive 空闲上限。SSE 是活跃连接（不算空闲），
+	// 不受它影响。
+	httpIdleTimeout = 120 * time.Second
+)
+
+// newHTTPServer 构造 HTTP 服务（超时口径见上面的常量；抽成函数便于测试
+// 断言这三个超时不被误删——SSE 的稳定性依赖 WriteTimeout 与响应级清除的
+// 配合，任一侧被删都会让长连接在 30s 后静默断掉）。
+//
+// **刻意不设 ReadTimeout**：Go 的 http.Server 会把读截止时间覆盖到整个请求
+// （不只是读头），而长连接期间后台读超时会被当作读错误 → 取消 request
+// context → SSE 在 ReadTimeout 到点时被服务端主动断开。挡 slow-loris 用
+// ReadHeaderTimeout 就够，ReadTimeout 在这里只有副作用。
+func newHTTPServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		ReadHeaderTimeout: httpReadHeaderTimeout,
+		WriteTimeout:      httpWriteTimeout,
+		IdleTimeout:       httpIdleTimeout,
+	}
+}
+
 func main() {
 	// 双 Redis 实例约束（v1.2 C2/P1-1）在启动期强制。
 	cfg := &config.Config{
@@ -77,7 +111,19 @@ func main() {
 	// 运维通过日志与失败计数观察；ADR-001 语义下库缺席只影响重建能力。
 	var noiseRDB *redis.Client
 	if asm.Noise != nil {
-		noiseRDB = redis.NewClient(&redis.Options{Addr: os.Getenv("REDIS_ALERT_ADDR")})
+		// W9-5：显式给超时（默认值不动声色的后果见 noise_store_redis.go 文件头）。
+		// 客户端超时只管单次 round-trip，整体上界由 sink 的 ctx deadline 兜底。
+		//
+		// **ContextTimeoutEnabled 必须为 true**：go-redis v9 默认（false）会把
+		// 命令收到的 ctx 换成 context.Background()（见 baseClient.context），
+		// 我们设的 ctx 上界会被静默丢弃——那次"补超时"就成了假修复。
+		noiseRDB = redis.NewClient(&redis.Options{
+			Addr:                  os.Getenv("REDIS_ALERT_ADDR"),
+			DialTimeout:           redisDialTimeout,
+			ReadTimeout:           redisIOTimeout,
+			WriteTimeout:          redisIOTimeout,
+			ContextTimeoutEnabled: true,
+		})
 		redisSink := NewRedisClusterSink(noiseRDB, DefaultTenant)
 		var pgSink *PGClusterSink
 		if dsn := os.Getenv("OPS_DB_DSN"); dsn != "" {
@@ -122,11 +168,7 @@ func main() {
 			"或显式设置 OPS_ALLOW_UNAUTHENTICATED=on（仅限本机联调，严禁用于生产）。")
 		os.Exit(1)
 	}
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           asm.Handler(),
-		ReadHeaderTimeout: 5 * time.Second, // slow-loris 防御
-	}
+	srv := newHTTPServer(addr, asm.Handler())
 
 	// runCtx 同时管两件事的生命周期：Host 调度循环与 credential 周期清扫。
 	// 优雅停机信号先 cancel 再 drain HTTP，采集循环在在途请求落地前先退出。

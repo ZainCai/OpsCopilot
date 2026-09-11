@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"net"
 	"testing"
 	"time"
 
@@ -182,3 +183,69 @@ var errPersistFailed = &persistError{}
 type persistError struct{}
 
 func (*persistError) Error() string { return "persist unavailable" }
+
+// TestRedisSinkWriteTimeoutBounded W9-5（第八轮审核建议 11）：写路径必须有
+// 硬上界——挂在"接受连接但永不响应"的假 Redis 上，SaveCluster 必须在
+// sink 超时（包内可覆盖，这里设 300ms）附近返回，而不是无限等待。
+//
+// 动机：写路径在**告警链路的同步路径**上（persistClusters 在引擎锁外同步
+// 调用）。此前只有 go-redis 客户端默认 IO 超时兜底，若 Redis 是"连得上但
+// 不响应"（防火墙 DROP / 实例假死），多次重试会把单条告警的处理时间拉长
+// 到十几秒，直接吃掉 E2E 延迟预算（W9-4 实测处理段 P95 仅 0.54s）。
+func TestRedisSinkWriteTimeoutBounded(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	// 接受连接、读走请求、但永不回复——模拟假死 Redis。
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				buf := make([]byte, 512)
+				for {
+					if _, err := conn.Read(buf); err != nil {
+						_ = conn.Close()
+						return
+					}
+					select {
+					case <-done:
+						_ = conn.Close()
+						return
+					default:
+					}
+				}
+			}(c)
+		}
+	}()
+
+	rdb := redis.NewClient(&redis.Options{
+		Addr:                  ln.Addr().String(),
+		DialTimeout:           redisDialTimeout,
+		ReadTimeout:           redisIOTimeout,
+		WriteTimeout:          redisIOTimeout,
+		ContextTimeoutEnabled: true, // 必须：否则 go-redis 丢弃命令 ctx 的截止时间
+	})
+	defer func() { _ = rdb.Close() }()
+
+	sink := NewRedisClusterSink(rdb, "default")
+	sink.timeout = 300 * time.Millisecond // 覆盖成短超时，让测试在毫秒级跑完
+
+	start := time.Now()
+	err = sink.SaveCluster(noise.ClusterRecord{TenantID: "default", ClusterKey: "c:test"})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("SaveCluster against a hung redis must return an error, got nil")
+	}
+	// 上界：ctx deadline（300ms）+ 少量调度余量。远小于 3s 默认值即证明
+	// 生效的是 sink 的 ctx 上界，而不是靠运气。
+	if elapsed > 2*time.Second {
+		t.Fatalf("SaveCluster blocked %v, want bounded by sink timeout (300ms)", elapsed)
+	}
+}
