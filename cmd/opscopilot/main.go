@@ -174,6 +174,16 @@ func main() {
 		logger.Printf("  retention: OFF (set OPS_INCIDENT_RETENTION, e.g. 90d, to enable)")
 	}
 
+	// W9-5（第八轮审核 C7）：变更事件库的保留窗清理。ChangeStore 是进程内
+	// map、POST /api/v1/changes 公开可写——不清理就是一条无人察觉的内存
+	// 增长路径。默认 7d / 每 1h；配置非法直接启动失败（fail-fast）。
+	changePruner, err := NewChangePrunerFromEnv(asm.Changes, logger.Printf)
+	if err != nil {
+		logger.Printf("FATAL: %v", err)
+		os.Exit(1)
+	}
+	go changePruner.Run(runCtx)
+
 	// credential 周期清扫（C9 收尾）：过期条目不再是"删除前一直占内存"。
 	// 周期 10 分钟——清扫是幂等原语，频率只需远小于凭证最小有效期。
 	go func() {

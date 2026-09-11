@@ -60,10 +60,19 @@ const retentionDefault = 90 * 24 * time.Hour
 // 如 "90d"）；"off"/"0" 表示关闭。**空值 = 默认 90d（决策 C 的默认行为）**。
 // 非法值返回错误（调用方 fail-fast）。
 func ParseRetention(raw string) (time.Duration, bool, error) {
+	return ParseRetentionDefault(raw, retentionDefault)
+}
+
+// ParseRetentionDefault 同 ParseRetention，但显式给定"空值时的默认保留期"。
+//
+// 抽出动机（W9-5）：变更事件库的保留窗（见 change_prune.go）口径与工单
+// 归档完全相同——接受 duration / "<N>d" / off——只是默认值不同（7d vs 90d）。
+// 两处各写一份解析必然漂移（"7d" 只在一处被支持这类差异），故共用实现。
+func ParseRetentionDefault(raw string, def time.Duration) (time.Duration, bool, error) {
 	raw = strings.TrimSpace(strings.ToLower(raw))
 	switch raw {
 	case "", "-":
-		return retentionDefault, true, nil
+		return def, true, nil
 	case "off", "0", "never":
 		return 0, false, nil
 	}
@@ -75,7 +84,7 @@ func ParseRetention(raw string) (time.Duration, bool, error) {
 			return time.Duration(n) * 24 * time.Hour, true, nil
 		}
 	}
-	return 0, false, fmt.Errorf("invalid retention %q (want duration like 2160h, or days like 90d, or off)", raw)
+	return 0, false, fmt.Errorf("invalid retention %q (want a duration like 168h/2160h, days like 7d/90d, or off)", raw)
 }
 
 // Run 周期归档；首轮延迟一分钟（避开启动风暴），ctx 取消即退出。
