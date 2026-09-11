@@ -21,4 +21,5 @@ Thumbs.db
 .demo/
 *.log
 evaluation-report.md
+verdicts.json
 csmoke.log

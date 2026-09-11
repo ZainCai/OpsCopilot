@@ -17,6 +17,7 @@ bin/
 *.test
 *.out
 *.log
+verdicts.json
 .demo/
 *.pids
 

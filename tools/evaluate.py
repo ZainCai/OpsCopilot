@@ -3,22 +3,20 @@
 #
 # 原理：逐条影子判决（alert_event, source='shadow'）按 occurred_at
 # 落入注入器 answerbook 的场景段，与该段的已知答案对照打分：
-#   场景 A（单节点磁盘，2 条告警）  → 段内 new-incident 恰 1 条
-#   场景 B（交换机，3 条告警）      → 段内 new-incident 恰 1 条
-#   场景 D（无关噪声，2 条告警）    → 段内 new-incident 恰 2 条
-#   场景 C（静默）                  → 段内无判决（有 = 误告警噪声）
+#   （期望值以注入器 answerbook 数据为准，本文件不复述——避免第二处定义漂移）
 # 段满分条件：new-incident 数 == expected_new_incidents（簇形态由
 # cluster_key 共享性隐式验证：段内去重后 (expected_groups 数) 簇）。
 #
 # 用法：
-#   python tools/evaluate.py [--answerbook URL] [--docker docker.exe路径]
-# 默认读本机 opscopilot-db 容器（docker exec psql）。
+#   python tools/evaluate.py [--answerbook URL|file:///...] \
+#       [--verdicts-file tools/verdicts 导出的 JSON] [--tenant default] \
+#       [--cutoff ISO8601]
+# 取数两选一：--verdicts-file（推荐，无 Docker 依赖）或 docker exec psql。
 #
-# 评估有效性前提（重要）：打分模型假设"每段独立成立"——上一周期簇已
-# 在静默段（C，15min）内 resolve。**须以真实时序跑（run_demo.sh 默认
-# scale=1.0 + 默认 10m 窗口）**；--fast 极端缩放下段间隔 < 窗口，告警
-# 并入未 resolve 旧簇是正确降噪行为，会被误判 FAIL——--fast 只用于
-# 联调功能，打分无效（实测 22.7% 即此假象，首周期段全部 PASS）。
+# 评估有效性前提（重要）：打分模型假设 **静默段时长 > 降噪窗口**
+# （现行剧本每段 300s，故窗口须 < 5m，如 OPS_NOISE_WINDOW=4m）——否则
+# 上一段簇未 resolve，下一段告警（含同节点）并入旧簇是**正确降噪行为**，
+# 会被误判 FAIL（实测 22.7% 即此假象：--fast 把段缩到 30s 且未缩窗口）。
 #
 # 输出：控制台报告 + 每段的判定明细；退出码 0=达标(>85%)、1=不达标。
 import argparse
@@ -38,12 +36,13 @@ def fetch_answerbook(url):
         return json.load(r)
 
 
-def fetch_verdicts():
+def fetch_verdicts(tenant="default"):
     """从 opscopilot-db 容器拉全部影子判决（CSV）。"""
+    safe = tenant.replace("'", "''")  # 本地工具：仅防 operator 手滑，非安全边界
     sql = (
         "SELECT occurred_at, cluster_key, fingerprint, "
-        "payload->>'reason' AS reason "
-        "FROM alert_event WHERE source='shadow' AND tenant_id='default' "
+        f"payload->>'reason' AS reason FROM alert_event "
+        f"WHERE source='shadow' AND tenant_id='{safe}' "
         "AND occurred_at > now() - interval '7 days' "
         "ORDER BY occurred_at"
     )
@@ -95,6 +94,8 @@ def main():
     ap.add_argument("--verdicts-file", default="",
                     help="从 tools/verdicts 导出的 JSON 读判决（无 Docker 环境用；"
                          "设置后跳过 docker exec 取数）")
+    ap.add_argument("--tenant", default=os.environ.get("OPS_TENANT", "default"),
+                    help="影子判决所属租户（docker 取数路径用；--verdicts-file 不受影响）")
     ap.add_argument("--cutoff", default="",
                     help="评估截止时刻（ISO8601）：start > cutoff 的段一律不计——"
                          "注入器停机后的空段不应参与打分（静默段会被误算 PASS）")
@@ -103,7 +104,7 @@ def main():
     global DOCKER
     DOCKER = args.docker
     book = fetch_answerbook(args.answerbook)
-    verdicts = load_verdicts_file(args.verdicts_file) if args.verdicts_file else fetch_verdicts()
+    verdicts = load_verdicts_file(args.verdicts_file) if args.verdicts_file else fetch_verdicts(args.tenant)
     cutoff = parse_ts(args.cutoff) if args.cutoff else None
     segments = book["segments"]
     now = datetime.now(timezone.utc)

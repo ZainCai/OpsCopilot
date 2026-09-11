@@ -7,7 +7,8 @@
 --   3) 保留主键 id，保证与原表可追溯。
 --
 -- 归档动作由应用层周期任务执行（cmd/opscopilot/retention.go）：
--- 事务内 选行(FOR UPDATE SKIP LOCKED) → 写归档 → 删审计 → 删事件
+-- 事务内 选行 → FOR UPDATE 锁定复核（聚合不能与 FOR UPDATE 同句，
+--   故分两步：先聚合选候选，再普通 SELECT 锁定）→ 写归档 → 删审计 → 删事件
 -- （incident_cluster 由 FK ON DELETE CASCADE 级联清除）。
 CREATE TABLE IF NOT EXISTS incident_archive (
   id          BIGINT PRIMARY KEY,          -- 沿用原 incident.id（可追溯）
