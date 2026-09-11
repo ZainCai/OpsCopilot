@@ -1,8 +1,16 @@
 // W9 双链路一期：链路 A 的异步通道——导入队列 + 消费 worker。
 //
 // 队列落 DB（ingest_queue）：接收即落盘、可积压、可重放、可审计。
-// worker 单 goroutine 轮询（SKIP LOCKED），与人工建单的同步 REST 路径
+// worker 轮询消费（interval/batch 见 OPS_INGEST_*），与人工建单的同步 REST 路径
 // 物理分离——外部源再突发也不占人工路径的连接与事务（互不阻塞保证①/②）。
+//
+// 多实例安全（优化方案 #11 / ADR-012，migration 000016）：**认领租约**取代
+// "整批一事务的 FOR UPDATE 行锁"（旧注释自注的"仅单实例正确"限制已解除）。
+// 领取语句把一批行原子地写上 locked_by=本实例 owner 与 locked_until=now()+租约；
+// 租约未过期的行其他实例的认领条件自动跳过；处理中途崩溃 → 租约到期 → 行被
+// 重领重做（at-least-once，下游 UpsertExternal 本就幂等，重领安全不重复建单）。
+// 确认/失败回写都带 locked_by=owner 条件：租约被抢走后旧持有者的回写落空，
+// 绝不覆盖新 owner 的状态。
 //
 // 自动建单开关（决策 2 / R8）：OPS_INCIDENT_AUTOCREATE=off（默认，影子期）
 // 时 worker **不消费**，只让消息堆积——转正后开启即可回放历史消息建单。
@@ -10,9 +18,12 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,9 +49,10 @@ const ingestTimeout = 5 * time.Second
 // perItem（15s/条）与批量下限/封顶都收敛为 config 的默认值（#10 去魔法数字），
 // 装配层经 OPS_INGEST_BATCH_TIMEOUT_PER_ITEM 可调。
 //
-// 注意：整批一个事务的前提是**单 worker**（多 worker 也安全——FOR UPDATE
-// SKIP LOCKED 各领各的——但"行锁覆盖处理全程"的互斥语义只在单连接池内成立）。
-// 多实例部署时需改为按条短事务（列入 M2）。
+// 注意：#11 后领取/确认不再共享一个事务（跨实例行锁本就不覆盖处理全程，
+// 互斥语义由**认领租约**承担）。批超时的意义收缩为"单轮消费的整体上界"：
+// 处理超过 OPS_INGEST_LEASE_DURATION 的批可能被别的实例重领（幂等重做，
+// 确认回写因 owner 条件落空）——租约默认 2m，正常 DB 下默认批量远触不到。
 func batchTimeoutFor(batch int, perItem time.Duration) time.Duration {
 	if batch <= 0 {
 		batch = config.DefaultIngestBatch
@@ -68,14 +80,46 @@ type PGIngestQueue struct {
 	tenant string
 	// batchPerItem 批超时随批量线性放大的单条系数（config.Ingest.BatchTimeoutPerItem）。
 	batchPerItem time.Duration
+	// owner 本实例认领标识（写入 locked_by）；多实例并发消费靠它区分归属。
+	owner string
+	// lease 认领租约时长（config.Ingest.LeaseDuration）：领取的行在租约内
+	// 归本 owner，过期后其他实例可重领（at-least-once）。
+	lease time.Duration
+	logf  func(string, ...any)
 }
 
-// NewPGIngestQueue 构造。batchPerItem<=0 时回退 config 默认（15s/条）。
-func NewPGIngestQueue(pool *pgxpool.Pool, tenant string, batchPerItem time.Duration) *PGIngestQueue {
+// NewPGIngestQueue 构造。batchPerItem/lease 传零值时回退 config 默认。
+// owner 为空则自动生成（NewIngestOwnerID）。
+func NewPGIngestQueue(pool *pgxpool.Pool, tenant string, batchPerItem, lease time.Duration, owner string, logf func(string, ...any)) *PGIngestQueue {
 	if batchPerItem <= 0 {
 		batchPerItem = config.DefaultIngestBatchPerItem
 	}
-	return &PGIngestQueue{pool: pool, tenant: tenant, batchPerItem: batchPerItem}
+	if lease <= 0 {
+		lease = config.DefaultIngestLeaseDuration
+	}
+	if owner == "" {
+		owner = NewIngestOwnerID()
+	}
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	return &PGIngestQueue{pool: pool, tenant: tenant, batchPerItem: batchPerItem,
+		owner: owner, lease: lease, logf: logf}
+}
+
+// NewIngestOwnerID 认领标识：host:pid:随机尾缀。同机多进程靠 pid 区分，
+// pid 复用场景靠随机尾缀兜底。
+func NewIngestOwnerID() string {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "unknown"
+	}
+	var b [3]byte
+	if _, rndErr := rand.Read(b[:]); rndErr != nil {
+		// 随机源异常退化到时间戳尾缀（仍可区分同机不同 pid）。
+		return fmt.Sprintf("%s:%d:%x", host, os.Getpid(), time.Now().UnixNano())
+	}
+	return fmt.Sprintf("%s:%d:%s", host, os.Getpid(), hex.EncodeToString(b[:]))
 }
 
 // Enqueue 入队：待处理态 (tenant, origin, source_ref) 唯一索引兜底，
@@ -103,29 +147,40 @@ type Item struct {
 	Attempts  int
 }
 
-// processBatch 在一个**事务内**完成"领取 → 逐条处理 → 落状态"。
+// processBatch 一轮消费：认领 → 逐条处理 → 确认（#11 认领租约，ADR-012）。
 //
-// 为什么必须是一个事务：`FOR UPDATE SKIP LOCKED` 的行锁只在事务存续期间有效。
-// 此前用 pool.Query 领取，隐式事务在 rows 读完（Close）时就已提交，行锁随即
-// 释放 → 另一个 worker 能重复领到同一批消息，注释宣称的"多 worker 安全"
-// 并不成立。把 claim 与 done 放进同一事务后，行锁覆盖到处理结束。
+// 三段式的互斥语义：
+//  1. **认领**是一条语句：`UPDATE ... FROM (SELECT ... FOR UPDATE SKIP LOCKED
+//     LIMIT n)` ——语句级原子性把"锁定候选行"与"写上 locked_by/locked_until"
+//     合成一步，RETURNING 直接带回本批消息。并发实例的认领因 SKIP LOCKED
+//     （语句执行瞬间）与 `locked_until <= now()`（跨语句可见）双重条件各领各的，
+//     同一行至多一个 owner。
+//  2. **处理**在事务外：旧实现"整批一事务、行锁覆盖处理全程"只在单连接池内
+//     成立，跨实例从不成立——认领租约才是跨实例互斥原语。
+//  3. **确认/失败回写**都带 `locked_by = 本 owner` 条件（CAS）：若处理拖过
+//     租约、行已被他实例重领（locked_by 已换），回写落空只记 WARNING——
+//     绝不覆盖新 owner 的状态；下游 UpsertExternal 幂等，重复处理不重复建单。
 //
-// 失败语义：单条失败只累加 attempts（事务照常提交），不因一条坏消息回滚整批；
-// 达 maxIngestAttempts 后该行不再被领取（死信，attempts/last_error 留存可查）。
+// 失败语义不变：单条失败只累加 attempts（下轮重试），达 maxIngestAttempts
+// 后不再被领取（死信，attempts/last_error 留存可查，Retention 定期清除）。
 func (q *PGIngestQueue) processBatch(limit int, process func(Item) error) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), batchTimeoutFor(limit, q.batchPerItem))
 	defer cancel()
-	tx, err := q.pool.Begin(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("ingest: begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }() // 提交后为 no-op
 
-	rows, err := tx.Query(ctx, `
-SELECT id, origin, source_ref, payload, attempts FROM ingest_queue
-WHERE processed_at IS NULL AND attempts < $3 AND tenant_id=$1
-ORDER BY received_at FOR UPDATE SKIP LOCKED LIMIT $2`,
-		q.tenant, limit, maxIngestAttempts)
+	rows, err := q.pool.Query(ctx, `
+WITH claim AS (
+  SELECT id FROM ingest_queue
+  WHERE tenant_id=$1 AND processed_at IS NULL AND attempts < $3
+    AND (locked_until IS NULL OR locked_until <= now())
+  ORDER BY received_at
+  FOR UPDATE SKIP LOCKED
+  LIMIT $2
+)
+UPDATE ingest_queue q
+SET locked_by = $4, locked_until = now() + make_interval(secs => $5::double precision)
+FROM claim WHERE q.id = claim.id
+RETURNING q.id, q.origin, q.source_ref, q.payload, q.attempts`,
+		q.tenant, limit, maxIngestAttempts, q.owner, q.lease.Seconds())
 	if err != nil {
 		return 0, fmt.Errorf("ingest: claim: %w", err)
 	}
@@ -145,19 +200,30 @@ ORDER BY received_at FOR UPDATE SKIP LOCKED LIMIT $2`,
 
 	for _, it := range items {
 		if perr := process(it); perr != nil {
-			if _, err := tx.Exec(ctx, `
-UPDATE ingest_queue SET attempts=attempts+1, last_error=$2 WHERE id=$1`,
-				it.ID, perr.Error()); err != nil {
+			tag, err := q.pool.Exec(ctx, `
+UPDATE ingest_queue SET attempts=attempts+1, last_error=$2, locked_by='', locked_until=NULL
+WHERE id=$1 AND locked_by=$3`, it.ID, perr.Error(), q.owner)
+			if err != nil {
 				return 0, fmt.Errorf("ingest: record failure: %w", err)
+			}
+			if tag.RowsAffected() == 0 {
+				q.logf("WARNING: ingest item %d failure write-back lost (lease reclaimed by another owner)", it.ID)
 			}
 			continue
 		}
-		if _, err := tx.Exec(ctx,
-			`UPDATE ingest_queue SET processed_at=now() WHERE id=$1`, it.ID); err != nil {
+		tag, err := q.pool.Exec(ctx, `
+UPDATE ingest_queue SET processed_at=now(), locked_by='', locked_until=NULL
+WHERE id=$1 AND locked_by=$2`, it.ID, q.owner)
+		if err != nil {
 			return 0, fmt.Errorf("ingest: done: %w", err)
 		}
+		if tag.RowsAffected() == 0 {
+			// 处理时长越过租约、行被他实例重领：消息本体已幂等落库，只是
+			// 确认权不再属于本实例——重做的他实例会再确认一次（幂等）。
+			q.logf("WARNING: ingest item %d confirm lost (lease reclaimed by another owner)", it.ID)
+		}
 	}
-	return len(items), tx.Commit(ctx)
+	return len(items), nil
 }
 
 // Pending 待处理条数（运维观察与测试断言）。达死信上限的行不计入。
@@ -239,7 +305,7 @@ func (w *IngestWorker) Run(ctx context.Context) {
 	}
 }
 
-// drain 处理一批：领取与落状态在同一事务内（行锁覆盖处理全程）。
+// drain 处理一批：认领→处理→确认（租约互斥，见 processBatch）。
 // 单条失败只累加 attempts 由下轮重试，不阻塞其余；单条 panic 被隔离为本条失败，
 // 不能让一个坏输入把整个消费循环带走（此前 process panic 会让 goroutine 静默
 // 死亡、队列永久停摆）。

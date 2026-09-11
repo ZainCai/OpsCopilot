@@ -58,6 +58,7 @@ const (
 	EnvIngestRateWindow     = "OPS_INGEST_RATE_WINDOW"
 	EnvIngestBatchPerItem   = "OPS_INGEST_BATCH_TIMEOUT_PER_ITEM"
 	EnvIngestAlertBodyLimit = "OPS_INGEST_ALERT_BODY_LIMIT"
+	EnvIngestLeaseDuration  = "OPS_INGEST_LEASE_DURATION"
 
 	EnvEscalation         = "OPS_ESCALATION"
 	EnvEscalationAfter    = "OPS_ESCALATION_AFTER"
@@ -134,6 +135,7 @@ func LoadFrom(lookup LookupFunc) (*Config, error) {
 	c.Ingest.RateWindow = p.posDur(EnvIngestRateWindow, DefaultIngestRateWindow)
 	c.Ingest.BatchTimeoutPerItem = p.posDur(EnvIngestBatchPerItem, DefaultIngestBatchPerItem)
 	c.Ingest.AlertBodyLimit = p.posInt64(EnvIngestAlertBodyLimit, DefaultAlertBodyLimit)
+	c.Ingest.LeaseDuration = p.posDur(EnvIngestLeaseDuration, DefaultIngestLeaseDuration)
 
 	c.Notify.EscalationEnabled = p.onOff(EnvEscalation, false)
 	c.Notify.EscalationAfter = p.posDur(EnvEscalationAfter, DefaultEscalationAfter)

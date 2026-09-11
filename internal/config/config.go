@@ -169,6 +169,11 @@ type IngestSection struct {
 	// AlertBodyLimit 告警载荷字节上限——原 4MiB 在入站 webhook 与拉取
 	// 响应两处重复定义（#10），收敛为单一定义、两处共用。
 	AlertBodyLimit int64 // OPS_INGEST_ALERT_BODY_LIMIT，默认 4194304（4MiB）
+	// LeaseDuration 认领租约时长（#11 水平扩展 / ADR-012）：多实例并发消费
+	// 同一张 ingest_queue 时，认领行带上 locked_until=now()+本值；过期行
+	// 自动可被别人重领（at-least-once，下游幂等）。应 ≥ 单批最坏处理时长——
+	// 默认 2m 覆盖正常 DB 下的默认批量（20 条），慢 DB 触发重领也只是幂等重做。
+	LeaseDuration time.Duration // OPS_INGEST_LEASE_DURATION，默认 2m
 }
 
 // NotifySection 通知与值班升级（W9-2/W9-3）。渠道配置在 DB（notify_channel），
@@ -310,12 +315,13 @@ const (
 
 	DefaultPullInterval = 30 * time.Second
 
-	DefaultIngestInterval           = 5 * time.Second
-	DefaultIngestBatch              = 20
-	DefaultIngestRateLimit          = 50 // 5 分钟内最多建 50 单，其余进聚合单
-	DefaultIngestRateWindow         = 5 * time.Minute
-	DefaultIngestBatchPerItem       = 15 * time.Second // 批消费超时 15s/条（第七轮 M-2）
-	DefaultAlertBodyLimit     int64 = 4 << 20          // 4MiB：入站 webhook 与拉取响应共用的单一定义
+	DefaultIngestInterval            = 5 * time.Second
+	DefaultIngestBatch               = 20
+	DefaultIngestRateLimit           = 50 // 5 分钟内最多建 50 单，其余进聚合单
+	DefaultIngestRateWindow          = 5 * time.Minute
+	DefaultIngestBatchPerItem        = 15 * time.Second // 批消费超时 15s/条（第七轮 M-2）
+	DefaultAlertBodyLimit      int64 = 4 << 20          // 4MiB：入站 webhook 与拉取响应共用的单一定义
+	DefaultIngestLeaseDuration       = 2 * time.Minute  // 认领租约（#11/ADR-012）：过期可被重领
 
 	DefaultEscalationAfter    = 15 * time.Minute
 	DefaultEscalationInterval = 60 * time.Second
@@ -373,6 +379,7 @@ func Defaults() *Config {
 	c.Ingest.RateWindow = DefaultIngestRateWindow
 	c.Ingest.BatchTimeoutPerItem = DefaultIngestBatchPerItem
 	c.Ingest.AlertBodyLimit = DefaultAlertBodyLimit
+	c.Ingest.LeaseDuration = DefaultIngestLeaseDuration
 	c.Notify.EscalationAfter = DefaultEscalationAfter
 	c.Notify.EscalationInterval = DefaultEscalationInterval
 	c.Retention.IncidentWindow = DefaultIncidentRetention

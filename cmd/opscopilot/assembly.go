@@ -356,7 +356,10 @@ func NewAssembly(logger connector.Logger, cfg *config.Config) (*Assembly, error)
 	// W9 双链路链路 A（外部导入）：入队通道需要 DB 队列（持久化/可积压/可重放）。
 	// 无 DB 时不注册队列——入队端点显式 503（见 Handler），比 404 可诊断。
 	if pgPool != nil {
-		queue := NewPGIngestQueue(pgPool, tenant, cfg.Ingest.BatchTimeoutPerItem)
+		// #11/ADR-012：认领租约参数来自 OPS_INGEST_LEASE_DURATION；owner 自动
+		// 生成（host:pid:rand），多实例并起时靠它区分认领归属。
+		queue := NewPGIngestQueue(pgPool, tenant, cfg.Ingest.BatchTimeoutPerItem,
+			cfg.Ingest.LeaseDuration, "", logf)
 		owner := &QueueOwner{}
 		owner.SetWriter(queue)
 		asm.Queue = queue

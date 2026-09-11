@@ -147,6 +147,7 @@ func TestLoadFromValidOverrides(t *testing.T) {
 	env[EnvIngestRateWindow] = "10m"
 	env[EnvIngestBatchPerItem] = "20s"
 	env[EnvIngestAlertBodyLimit] = "8388608"
+	env[EnvIngestLeaseDuration] = "45s"
 	env[EnvEscalation] = "on"
 	env[EnvEscalationAfter] = "1h"
 	env[EnvEscalationInterval] = "5m"
@@ -173,7 +174,8 @@ func TestLoadFromValidOverrides(t *testing.T) {
 		{"pull", c.Pull.Enabled && c.Pull.Interval == 10*time.Second},
 		{"ingest", c.Ingest.AutoCreate && c.Ingest.Interval == 2*time.Second && c.Ingest.Batch == 100 &&
 			c.Ingest.RateLimit == 10 && c.Ingest.RateWindow == 10*time.Minute &&
-			c.Ingest.BatchTimeoutPerItem == 20*time.Second && c.Ingest.AlertBodyLimit == 8388608},
+			c.Ingest.BatchTimeoutPerItem == 20*time.Second && c.Ingest.AlertBodyLimit == 8388608 &&
+			c.Ingest.LeaseDuration == 45*time.Second},
 		{"notify", c.Notify.EscalationEnabled && c.Notify.EscalationAfter == time.Hour && c.Notify.EscalationInterval == 5*time.Minute},
 		{"retention 30d", c.Retention.IncidentWindow == 30*24*time.Hour && c.Retention.IncidentEnabled},
 		{"edges raw", c.Topology.Edges == "n1->n2,n2->n3"},
