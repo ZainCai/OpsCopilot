@@ -201,6 +201,34 @@ func TestCollect_AlertNormalization(t *testing.T) {
 	}
 }
 
+// TestNormalizeAlertStartTimeShapes 发射时刻两形态（W9-4 前置修复）：
+// Alertmanager 形态给 startsAt；Prometheus /api/v1/alerts 只给 activeAt。
+// 此前只读 startsAt → Prometheus 源的告警年龄被抹成 0。
+func TestNormalizeAlertStartTimeShapes(t *testing.T) {
+	at := func(y, mo, d, h, mi int) time.Time {
+		return time.Date(y, time.Month(mo), d, h, mi, 0, 0, time.UTC)
+	}
+	cases := []struct {
+		name string
+		in   rawAlert
+		want time.Time
+	}{
+		{"alertmanager startsAt", rawAlert{StartsAt: "2026-09-11T12:00:00Z"}, at(2026, 9, 11, 12, 0)},
+		{"prometheus activeAt", rawAlert{ActiveAt: "2026-09-11T11:30:00Z"}, at(2026, 9, 11, 11, 30)},
+		{"startsAt 优先（两者都有）", rawAlert{StartsAt: "2026-09-11T12:00:00Z", ActiveAt: "2026-09-11T11:00:00Z"}, at(2026, 9, 11, 12, 0)},
+	}
+	for _, c := range cases {
+		got := normalizeAlert(c.in, "src")
+		if !got.StartsAt.Equal(c.want) {
+			t.Fatalf("%s: StartsAt = %v, want %v", c.name, got.StartsAt, c.want)
+		}
+	}
+	// 两种都没有 → 零值（下游 cmd/noise.go toEvent 会兜底成采集时刻）
+	if got := normalizeAlert(rawAlert{}, "src"); !got.StartsAt.IsZero() {
+		t.Fatalf("no time field → want zero, got %v", got.StartsAt)
+	}
+}
+
 // TestCollect_Metrics 指标采集：配置了 PromQL 才拉取指标，
 // 未配置时（默认）不采集，保持向后兼容。
 func TestCollect_Metrics(t *testing.T) {

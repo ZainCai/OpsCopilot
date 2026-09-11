@@ -78,6 +78,9 @@ type NoiseEngine struct {
 	gateStats GateStatsSink
 	// gateFailures 计数持久化失败累计（尽力而为，不中断告警链路）。
 	gateFailures int
+	// m 延迟/计数打点集（W9-4；nil = 不打点）。nil 安全：所有打点方法
+	// 自带判空，指标缺失不得影响告警链路。
+	m *AppMetrics
 }
 
 // DefaultTenant M1 单租户缺省值（alert_cluster.tenant_id 对齐）。
@@ -208,6 +211,25 @@ type batchView struct {
 	byInsEnv map[string]string // labels.instance → 节点 Key（首个命中，构建序决定）
 }
 
+// SetMetrics 挂载打点集（W9-4）。传 nil 卸载。只允许启动期调用一次
+// （运行中热替换会让指标口径中途变化，无收益）。
+func (n *NoiseEngine) SetMetrics(m *AppMetrics) {
+	if n == nil {
+		return
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.m = m
+}
+
+// pendingDecision 待放行判决 + 它的告警发射时刻（打点用）。
+// fired 为零值表示上游没给 startsAt —— 不观测该条延迟（用合成时间打点
+// 等于自欺，宁可少一个样本）。
+type pendingDecision struct {
+	d     notify.Decision
+	fired time.Time
+}
+
 // ProcessAlerts 处理一轮采集的全部告警（影子模式：不拦截，只标注）。
 // 每批开始时重建拓扑快照（CausalSubgraph），批内共用——一轮采集期间
 // 拓扑视为不变。
@@ -226,12 +248,19 @@ func (n *NoiseEngine) ProcessAlerts(alerts []connector.Alert) {
 
 	var suppressed, merged, created int
 	var verdicts []noise.VerdictRecord
-	var decisions []notify.Decision
+	// fired 与 verdicts 平行：告警发射时刻（零值 = 上游没给，不打点）。
+	var fired []time.Time
+	var pending []pendingDecision
 	for _, a := range alerts {
 		e := n.toEvent(a, view)
 		v := n.shadow.Process(e)
 		verdicts = append(verdicts, v.ToRecord(n.tenant))
+		fired = append(fired, a.StartsAt) // 上游 startsAt 原值（toEvent 会兜底成 now，这里不兜）
 		n.total++
+		if n.m != nil {
+			n.m.CountAlert()
+			n.m.CountVerdict(v.Reason)
+		}
 		switch {
 		case v.WouldSuppress:
 			suppressed++
@@ -248,13 +277,16 @@ func (n *NoiseEngine) ProcessAlerts(alerts []connector.Alert) {
 			// enforce 模式（ADR-011）：每条判决都过闸门——
 			// W9-2 语义只有新事件放行（dedup/merge 都不重复通知）；
 			// 判决照常落库：enforce 首周与影子基线对比的数据基础。
-			decisions = append(decisions, notify.Decision{
-				TenantID:      n.tenant,
-				ClusterKey:    v.ClusterKey,
-				Severity:      v.Severity,
-				Title:         v.Summary,
-				WouldSuppress: v.WouldSuppress,
-				Reason:        v.Reason,
+			pending = append(pending, pendingDecision{
+				d: notify.Decision{
+					TenantID:      n.tenant,
+					ClusterKey:    v.ClusterKey,
+					Severity:      v.Severity,
+					Title:         v.Summary,
+					WouldSuppress: v.WouldSuppress,
+					Reason:        v.Reason,
+				},
+				fired: a.StartsAt,
 			})
 		}
 	}
@@ -276,10 +308,10 @@ func (n *NoiseEngine) ProcessAlerts(alerts []connector.Alert) {
 		n.persistClusters(dirty)
 	}
 	if vs != nil {
-		n.persistVerdicts(vs, verdicts)
+		n.persistVerdicts(vs, verdicts, fired)
 	}
-	if len(decisions) > 0 && gate != nil {
-		n.admitDecisions(gate, gs, decisions)
+	if len(pending) > 0 && gate != nil {
+		n.admitDecisions(gate, gs, pending)
 	}
 }
 
@@ -288,10 +320,10 @@ func (n *NoiseEngine) ProcessAlerts(alerts []connector.Alert) {
 // 可观察性，且渠道间顺序没有契约值得保）。
 // 拦截/放行计数持久化：每批批后保存累计值（覆盖写，幂等）；失败只
 // 计数+日志，下一批覆盖写自然补齐（累计值语义下无脏写问题）。
-func (n *NoiseEngine) admitDecisions(gate *notify.Gate, gs GateStatsSink, decisions []notify.Decision) {
+func (n *NoiseEngine) admitDecisions(gate *notify.Gate, gs GateStatsSink, decisions []pendingDecision) {
 	var admitted int
-	for _, d := range decisions {
-		ok, err := gate.Admit(d)
+	for _, p := range decisions {
+		ok, err := gate.Admit(p.d)
 		if err != nil {
 			// 空判决（无簇无标题）或全渠道失败：计数为闸门异常，
 			// 不中断后续告警的闸门判定。
@@ -301,6 +333,16 @@ func (n *NoiseEngine) admitDecisions(gate *notify.Gate, gs GateStatsSink, decisi
 		}
 		if ok {
 			admitted++
+			// W9-4 打点：Admit 返回 = 全渠道 Send 已完成 →
+			// time.Since(fired) 即"发射 → 通知送达"的端到端延迟。
+			// 批次内后闸门的判决含前面几条的发送耗时（同步顺序投递），
+			// 这是真实发生的队列效应，不做修正。
+			if !p.fired.IsZero() {
+				n.m.ObserveNotifyLatency(time.Since(p.fired))
+			} else {
+				// 缺发射时刻：留痕（口径同上，见 persistVerdicts）。
+				n.m.CountLatencySkipped("notify")
+			}
 		}
 	}
 	st := gate.Stats()
@@ -316,12 +358,23 @@ func (n *NoiseEngine) admitDecisions(gate *notify.Gate, gs GateStatsSink, decisi
 
 // persistVerdicts 逐告警判决落库（W6-1，锁外）。失败只计数+日志——
 // 评估数据缺行会让准确率分母偏小，运维通过 verdictFailures 观察丢失面。
-func (n *NoiseEngine) persistVerdicts(vs noise.VerdictSink, verdicts []noise.VerdictRecord) {
+//
+// W9-4：落库**成功后**观测"发射 → 判决落库完成"延迟（M1 报告点名的口径）。
+// fired 与 verdicts 平行等长；某条 fired 为零值（上游没给 startsAt）即跳过。
+func (n *NoiseEngine) persistVerdicts(vs noise.VerdictSink, verdicts []noise.VerdictRecord, fired []time.Time) {
 	failed := 0
-	for _, rec := range verdicts {
+	for i, rec := range verdicts {
 		if err := vs.SaveVerdict(rec); err != nil {
 			failed++
 			n.verdictFailures++
+			continue // 失败的行没有"落库时刻"，打点会低估
+		}
+		if i < len(fired) && !fired[i].IsZero() {
+			n.m.ObserveVerdictLatency(time.Since(fired[i]))
+		} else if i < len(fired) {
+			// 上游没给发射时刻：观测不了，但必须留痕——否则
+			// "processed 多、观测少"会被误读成丢样本。
+			n.m.CountLatencySkipped("verdict")
 		}
 	}
 	if failed > 0 {

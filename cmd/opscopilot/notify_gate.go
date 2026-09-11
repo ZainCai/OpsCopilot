@@ -63,12 +63,15 @@ SELECT suppressed, dispatched FROM notify_gate_stats WHERE tenant_id = $1`, tena
 //
 // reg 由装配层统一持有（渠道 CRUD 后要重载进同一个 Registry，见
 // Assembly.reloadNotifyChannels），故此处只做"闸门挂载"这一件事。
-func attachNoiseGate(ne *NoiseEngine, reg *notify.Registry, pool *pgxpool.Pool, logf func(string, ...any)) {
+//
+// 返回挂上的闸门（影子模式返回 nil）——装配层据此把 Gate 的实时计数
+// 挂成 /metrics 的 GaugeFunc（W9-4），避免在第二条路径上重复记账。
+func attachNoiseGate(ne *NoiseEngine, reg *notify.Registry, pool *pgxpool.Pool, logf func(string, ...any)) *notify.Gate {
 	if ne == nil || ne.Mode() != ModeEnforce {
 		if ne != nil {
 			logf("noise mode: shadow (verdicts recorded, nothing intercepted)")
 		}
-		return
+		return nil
 	}
 	gate := notify.NewGate(reg)
 	var gs GateStatsSink
@@ -77,4 +80,5 @@ func attachNoiseGate(ne *NoiseEngine, reg *notify.Registry, pool *pgxpool.Pool, 
 	}
 	ne.SetGate(gate, gs)
 	logf("noise mode: enforce (gate active; set OPS_NOISE_MODE=shadow to roll back)")
+	return gate
 }

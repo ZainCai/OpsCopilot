@@ -140,6 +140,31 @@ curl -X DELETE .../api/v1/notify/channels/ops-feishu -H 'X-OpsCopilot-Token: <ke
 - 升级通知沿用事件自身严重级 → 自然走上面的渠道路由；
 - 无 DB 时台账退化为内存（重启即丢、仅单实例正确），启动会打 WARNING。
 
+### 指标与延迟打点（W9-4）
+
+`GET /metrics` 暴露 Prometheus 文本格式指标（读路径无鉴权，与其它 GET 一致）。
+
+```
+opscopilot_alerts_processed_total                                    进入降噪引擎的告警数
+opscopilot_noise_verdicts_total{reason="…"}                          按收敛原因分桶（new-incident/dedup-window/cluster-merge/unjudged/other）
+opscopilot_alert_fired_to_verdict_seconds{_bucket,_sum,_count,_p50,_p95,_p99}
+                                                                     告警发射 → 判决落库完成（M1 出口标准 3 的口径）
+opscopilot_alert_fired_to_notify_seconds{…}                          告警发射 → 通知送达完成（enforce + 放行才有样本）
+opscopilot_alert_latency_skipped_total{stage="verdict"|"notify"}     因源侧未给发射时刻而未观测延迟的条数
+opscopilot_noise_gate_{suppressed,dispatched}_total                  Gate 累计计数（镜像 notify_gate_stats）
+```
+
+- **`_p50/_p95/_p99` 是本项目的扩展**：Prometheus 官方直方图只能给桶内插值近似分位，而验收要拿 P95 当证据——所以直方图额外保留 10000 个滑窗原始样本，分位按**最近秩法**在真实观测值上精确计算（结果必是实测值，不插值）。无样本时渲染为 `NaN`。
+- `alert_fired_at` 取上游的告警发射时刻：Alertmanager 用 `startsAt`，Prometheus `/api/v1/alerts` 用 `activeAt`。**缺失时不打点**（用合成时间打点等于自欺），该情形记进 `opscopilot_alert_latency_skipped_total{stage}`。
+- **对账恒等式**（判决落库出口已接线时）：
+  `alerts_processed_total − skipped{stage="verdict"} − 落库失败数 == fired_to_verdict_seconds_count`。
+  notify 侧同理，但分母只含**被放行**的判决（被拦截的不发通知，自然无样本），且不扣 ErrNoChannel 一类的投递异常。若抓取瞬间读到不相等，多半是**快照非原子**——`alerts_processed_total` 在引擎锁内累加，而延迟观测发生在锁外 IO 完成之后；下一次抓取即一致。
+- 该差值含"源侧告警年龄"——告警真实发射到我们下一次采集之间的等待，量级由采集节拍决定（采集 30s → 上界 ≈30s）。要隔离 opscopilot 自身的处理耗时，看 `sum/count` 与源侧 `activeAt` 的差值，或在注入器侧把 `activeAt` 设为请求时刻（本项目 `tools/faultinjector` 即如此）。
+
+```bash
+curl -s http://127.0.0.1:8080/metrics | grep -E 'fired_to_(verdict|notify)_seconds_(count|p95)'
+```
+
 ### 本地 compose 环境
 
 `make env-up` 启动 TimescaleDB + 双 Redis + 应用。compose 已配置 `OPS_LISTEN_ADDR=0.0.0.0:8080`（容器隔离即安全边界）与 Redis healthcheck；应用容器为 distroless（无 shell），探活用 `GET /healthz` 由外部编排层负责。默认 DB 口令仅限本地开发（见 `.env.example` 注释）。

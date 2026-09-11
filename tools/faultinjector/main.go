@@ -176,7 +176,11 @@ func (inj *injector) alerts(now time.Time) map[string]any {
 		Fingerprint string            `json:"fingerprint"`
 	}
 	var list []alert
-	nowStr := now.UTC().Format(time.RFC3339)
+	// RFC3339Nano 而非 RFC3339：秒级截断会给下游的延迟打点（W9-4
+	// fired→verdict / fired→通知）注入最多 1s 的量化误差——读数会变成
+	// "0~1s 的均匀噪声 + 真实耗时"，把几十毫秒的处理量级淹掉。
+	// 下游 parseTime 用 time.RFC3339 解析，本身容忍小数秒。
+	nowStr := now.UTC().Format(time.RFC3339Nano)
 	add := func(fp, node, name, sev string) {
 		list = append(list, alert{
 			Labels: map[string]string{"alertname": name, "instance": node, "job": "nodes", "severity": sev},

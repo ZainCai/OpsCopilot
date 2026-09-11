@@ -64,6 +64,8 @@ type Assembly struct {
 	NotifyReg *notify.Registry
 	// Channels 渠道配置存储（nil = 无 DB，渠道配置不可管）。
 	Channels *ChannelStore
+	// Metrics 指标集与 /metrics 暴露（W9-4：告警链路延迟打点）。
+	Metrics *AppMetrics
 	// audit 审计日志（人工操作与外部自动动作统一留痕）。
 	audit AuditLog
 	// logf 装配期日志函数（渠道重载等运行期回调需要，nil 安全）。
@@ -149,6 +151,12 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 	}
 	sink.AttachNoise(noiseEngine)
 
+	// W9-4 延迟打点集：挂在噪声引擎上——告警→判决→通知全链路都在它手里，
+	// 是唯一能同时看到"发射时刻"（alert.startsAt）与"送达完成时刻"的位置。
+	// 早于 asm 字面量创建（Assembly 要持有它；装配顺序敏感，见 W9-2 的坑）。
+	appMetrics := NewAppMetrics()
+	noiseEngine.SetMetrics(appMetrics) // noiseEngine 为 nil（降噪关闭）时方法自带判空
+
 	// W5-2.1：SemanticModel gRPC 服务（进程内形态，契约测试经
 	// transport.DialInProcess 回环验证；独立进程形态只换 Dial 实现）。
 	semantic := NewSemanticModelServer(sink, store)
@@ -219,7 +227,18 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 			}
 		}
 	}
-	attachNoiseGate(noiseEngine, notifyReg, pgPool, logf)
+	gate := attachNoiseGate(noiseEngine, notifyReg, pgPool, logf)
+	// W9-4：Gate 的实时计数直接读运行时状态暴露成 gauge——不在第二条
+	// 路径上重复记账（两处记账必然漂移；真相源只有 notify_gate_stats
+	// 与内存里这一个 Gate）。
+	if gate != nil {
+		appMetrics.Registry().GaugeFunc("opscopilot_noise_gate_suppressed_total",
+			"Noise gate suppressed count (mirrors notify_gate_stats)", nil,
+			func() float64 { return float64(gate.Stats().Suppressed) })
+		appMetrics.Registry().GaugeFunc("opscopilot_noise_gate_dispatched_total",
+			"Noise gate dispatched count (mirrors notify_gate_stats)", nil,
+			func() float64 { return float64(gate.Stats().Dispatched) })
+	}
 	if noiseEngine != nil && noiseEngine.Mode() == ModeEnforce && webhookChannels == 0 {
 		logf("WARNING: enforce mode with zero webhook channels — notifications are only logged (configure via POST /api/v1/notify/channels)")
 	}
@@ -250,6 +269,7 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 		Events:    hub,
 		NotifyReg: notifyReg,
 		Channels:  chStore,
+		Metrics:   appMetrics,
 		audit:     audit,
 		logf:      logf,
 		pool:      pgPool,
@@ -351,6 +371,7 @@ func parseDurEnv(key string, def time.Duration, logf func(string, ...any)) time.
 //   - GET  /healthz         存活探针（进程活着即 200，不探测下游）
 //   - GET  /api/v1/*        REST 查询面（W5-2.2：簇/拓扑/变更；W9：事件读 + 写端点）
 //   - POST /api/v1/ingest/* 外部导入入队（W9 链路 A：Alertmanager / 通用 webhook）
+//   - GET  /metrics         Prometheus 指标（W9-4：告警链路延迟 + 判决/闸门计数）
 //   - GET  /console（/ 跳转）控制台视图（W5-2.3；W10：事件页）
 func (a *Assembly) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -360,6 +381,7 @@ func (a *Assembly) Handler() http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
+	mux.HandleFunc("GET /metrics", a.Metrics.Handler())
 	a.REST.Register(mux)
 	if a.Ingest != nil {
 		a.Ingest.Register(mux) // 链路 A：POST /api/v1/ingest/{alertmanager,webhook}

@@ -348,12 +348,22 @@ func normalizeAlert(a rawAlert, source string) connector.Alert {
 	} else if a.StatusText != "" {
 		status = a.StatusText
 	}
+	// 发射时刻两形态取一：Alertmanager 用 startsAt，**Prometheus 的
+	// /api/v1/alerts 只给 activeAt**（告警开始 firing 的时刻）。此前只读
+	// startsAt → 对接 Prometheus 时该字段恒空，下游（cmd/noise.go toEvent）
+	// 只好兜底成"采集时刻"——等于把告警年龄抹成 0，W9-4 的
+	// fired→verdict 延迟就没法测了（也无法区分"源侧积压"与"系统慢"）。
+	// 保留 startsAt 优先：Alertmanager 形态下它才是权威值。
+	startsAt := a.StartsAt
+	if startsAt == "" {
+		startsAt = a.ActiveAt
+	}
 	return connector.Alert{
 		Fingerprint:  a.Fingerprint,
 		GeneratorURL: a.GeneratorURL,
 		Labels:       a.Labels,
 		Annotations:  a.Annotations,
-		StartsAt:     parseTime(a.StartsAt),
+		StartsAt:     parseTime(startsAt),
 		EndsAt:       parseTime(a.EndsAt),
 		Status:       status,
 		Severity:     sev,
@@ -444,7 +454,10 @@ type rawAlert struct {
 	Labels       map[string]string `json:"labels"`
 	Annotations  map[string]string `json:"annotations"`
 	StartsAt     string            `json:"startsAt"`
-	EndsAt       string            `json:"endsAt"`
+	// ActiveAt Prometheus /api/v1/alerts 的告警开始时刻（该形态没有
+	// startsAt/endsAt）——normalizeAlert 在 startsAt 缺失时用它兜底。
+	ActiveAt string `json:"activeAt"`
+	EndsAt   string `json:"endsAt"`
 	// StatusRaw 先以 RawMessage 兜住两种形态（对象或字符串），避免类型冲突。
 	StatusRaw json.RawMessage `json:"status"`
 	// 归一化后填充：
@@ -466,6 +479,7 @@ func (a *rawAlert) UnmarshalJSON(data []byte) error {
 		Labels       map[string]string `json:"labels"`
 		Annotations  map[string]string `json:"annotations"`
 		StartsAt     string            `json:"startsAt"`
+		ActiveAt     string            `json:"activeAt"`
 		EndsAt       string            `json:"endsAt"`
 		Status       json.RawMessage   `json:"status"`
 	}
@@ -478,6 +492,7 @@ func (a *rawAlert) UnmarshalJSON(data []byte) error {
 	a.Labels = aux.Labels
 	a.Annotations = aux.Annotations
 	a.StartsAt = aux.StartsAt
+	a.ActiveAt = aux.ActiveAt
 	a.EndsAt = aux.EndsAt
 	if len(aux.Status) > 0 && aux.Status[0] == '{' {
 		_ = json.Unmarshal(aux.Status, &a.Status)

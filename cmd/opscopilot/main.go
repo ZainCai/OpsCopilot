@@ -254,7 +254,8 @@ func main() {
 		logger.Printf("  escalation: OFF (set OPS_ESCALATION=on to enable unacked-timeout re-notify)")
 	}
 	logger.Printf("  events: 双链路（人工建单 POST /api/v1/incidents ∥ 外部导入 push/pull）+ SSE 实时推送 + 控制台事件页 /console")
-	logger.Printf("  not wired (M2): rca, sessionstore, /metrics（预留件，见 README「预留未接线的组件」；notify 闸门已随 W9-1 enforce 接线）")
+	logger.Printf("  metrics: GET /metrics (告警 fired→verdict / fired→通知 延迟分位 + 判决/闸门计数)")
+	logger.Printf("  not wired (M2): rca, sessionstore（预留件，见 README「预留未接线的组件」；notify 闸门随 W9-1、渠道随 W9-2、/metrics 随 W9-4 已接线）")
 	logger.Printf("POST %s (change events) | GET /healthz | listening on %s",
 		changeWebhookPath, addr)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
