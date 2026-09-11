@@ -32,6 +32,26 @@ func isUniqueViolation(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation
 }
 
+// pgIncidentCols Incident 全量业务列（含 ack_by——D1 教训：所有查询与
+// RETURNING 必须共用这一份清单。此前 ack_by 有写无读，正是因为读路径各写
+// 各的列清单、漏了它；统一后新增字段只改一处）。行内 SELECT 需要附加列的
+// 地方在其后拼接（如 generation）。
+const pgIncidentCols = `incident_id, title, severity, state, created_at, updated_at, resolved_at,
+       origin, source_ref, source_meta, created_by, merged_into, auto_close_policy, ack_by`
+
+// rowScanner pgx Rows/Row 的公共扫描面。
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+// scanIncident 按 pgIncidentCols 顺序扫描一行（与列清单的对应关系仅此一处）。
+func scanIncident(r rowScanner, inc *Incident) error {
+	return r.Scan(&inc.ID, &inc.Title, &inc.Severity, &inc.State, &inc.CreatedAt,
+		&inc.UpdatedAt, &nullTime{t: &inc.ResolvedAt}, &inc.Origin, &inc.SourceRef,
+		&inc.SourceMeta, &inc.CreatedBy, &inc.MergedInto, &inc.AutoClosePolicy,
+		&inc.AckBy)
+}
+
 // PGStore TimescaleDB 实现。
 type PGStore struct {
 	pool     *pgxpool.Pool
@@ -114,21 +134,21 @@ func (s *PGStore) Create(id, title, severity, createdBy string) (*Incident, erro
 	if strings.TrimSpace(title) == "" {
 		return nil, errors.New("incident: title is required")
 	}
+	severity = normalizeSeverity(severity) // D2 入口收口（与 MemStore 同一函数）
 	if err := s.ensureTenant(context.Background()); err != nil {
 		return nil, err
 	}
 	ctx, cancel := s.ctx()
 	defer cancel()
+	// 列均 NOT NULL DEFAULT ''：直接写入归一化值即可。此前对 severity/
+	// created_by 用 NULLIF(x,'')——显式 NULL 不走 DEFAULT，空串反而撞
+	// NOT NULL 报错（D2/D3 的 PG 侧根因）。
 	var inc Incident
-	err := s.pool.QueryRow(ctx, `
+	err := scanIncident(s.pool.QueryRow(ctx, `
 INSERT INTO incident (tenant_id, incident_id, title, severity, state, origin, created_by, auto_close_policy)
-VALUES ($1, $2, $3, NULLIF($4,''), 'open', 'manual', NULLIF($5,''), 'manual_only')
-RETURNING incident_id, title, severity, state, created_at, updated_at, resolved_at,
-          origin, source_ref, source_meta, created_by, merged_into, auto_close_policy`,
-		s.tenantID, id, title, severity, createdBy).Scan(
-		&inc.ID, &inc.Title, &inc.Severity, &inc.State, &inc.CreatedAt, &inc.UpdatedAt,
-		&nullTime{t: &inc.ResolvedAt}, &inc.Origin, &inc.SourceRef, &inc.SourceMeta,
-		&inc.CreatedBy, &inc.MergedInto, &inc.AutoClosePolicy)
+VALUES ($1, $2, $3, $4, 'open', 'manual', $5, 'manual_only')
+RETURNING `+pgIncidentCols,
+		s.tenantID, id, title, severity, createdBy), &inc)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return nil, fmt.Errorf("incident: duplicate id %q", id)
@@ -150,7 +170,9 @@ func (s *PGStore) Get(id string) (Incident, error) {
 }
 
 // Transition 状态推进：事务内 SELECT FOR UPDATE 读当前态 → 状态机校验 →
-// UPDATE（并发下仍保持状态机正确性）。
+// UPDATE（并发下仍保持状态机正确性）。合法性判定与副作用计划走两 Store 共用
+// 的 planTransition（incident.go 状态机单一实现）——SQL 的 CASE 只消费计划
+// 参数，不再各自表达语义。RETURNING 含 ack_by（D1）。
 func (s *PGStore) Transition(id string, to State, actor string) (Incident, error) {
 	ctx, cancel := s.ctx()
 	defer cancel()
@@ -170,22 +192,19 @@ SELECT state FROM incident WHERE tenant_id=$1 AND incident_id=$2 FOR UPDATE`,
 	if err != nil {
 		return Incident{}, fmt.Errorf("incident pg: select state: %w", err)
 	}
-	if !CanTransition(cur, to) {
-		return Incident{}, ErrInvalidTransition{From: cur, To: to}
+	plan, perr := planTransition(cur, to, actor)
+	if perr != nil {
+		return Incident{}, perr
 	}
 	var inc Incident
-	err = tx.QueryRow(ctx, `
+	err = scanIncident(tx.QueryRow(ctx, `
 UPDATE incident SET state=$3, updated_at=now(),
-  resolved_at = CASE WHEN $3='resolved' THEN now() ELSE resolved_at END,
-  ack_by = CASE WHEN $3='resolved' AND $4<>'' THEN $4 ELSE ack_by END,
-  auto_close_policy = CASE WHEN $3='acked' THEN 'manual_only' ELSE auto_close_policy END
+  resolved_at = CASE WHEN $4::bool THEN now() ELSE resolved_at END,
+  ack_by      = CASE WHEN $5::text <> '' THEN $5 ELSE ack_by END,
+  auto_close_policy = CASE WHEN $6::bool THEN 'manual_only' ELSE auto_close_policy END
 WHERE tenant_id=$1 AND incident_id=$2
-RETURNING incident_id, title, severity, state, created_at, updated_at, resolved_at,
-          origin, source_ref, source_meta, created_by, merged_into, auto_close_policy`,
-		s.tenantID, id, to, actor).Scan(
-		&inc.ID, &inc.Title, &inc.Severity, &inc.State, &inc.CreatedAt, &inc.UpdatedAt,
-		&nullTime{t: &inc.ResolvedAt}, &inc.Origin, &inc.SourceRef, &inc.SourceMeta,
-		&inc.CreatedBy, &inc.MergedInto, &inc.AutoClosePolicy)
+RETURNING `+pgIncidentCols,
+		s.tenantID, id, to, plan.StampResolved, plan.AckBy, plan.FlipManualOnly), &inc)
 	if err != nil {
 		return Incident{}, fmt.Errorf("incident pg: update state: %w", err)
 	}
@@ -253,8 +272,7 @@ func (s *PGStore) List(state State) ([]Incident, error) {
 	// state 走绑定参数（非字符串拼接）：incident.Store 是公开接口，
 	// 防线不能只靠调用方白名单。`$2='' OR state=$2` 一次表达"空串=全部"。
 	rows, err := s.pool.Query(ctx, `
-SELECT incident_id, title, severity, state, created_at, updated_at, resolved_at,
-       origin, source_ref, source_meta, created_by, merged_into, auto_close_policy
+SELECT `+pgIncidentCols+`
 FROM incident
 WHERE tenant_id=$1 AND ($2 = '' OR state = $2)
 ORDER BY created_at`, s.tenantID, string(state))
@@ -265,10 +283,7 @@ ORDER BY created_at`, s.tenantID, string(state))
 	out := []Incident{}
 	for rows.Next() {
 		var inc Incident
-		if err := rows.Scan(&inc.ID, &inc.Title, &inc.Severity, &inc.State,
-			&inc.CreatedAt, &inc.UpdatedAt, &nullTime{t: &inc.ResolvedAt},
-			&inc.Origin, &inc.SourceRef, &inc.SourceMeta, &inc.CreatedBy,
-			&inc.MergedInto, &inc.AutoClosePolicy); err != nil {
+		if err := scanIncident(rows, &inc); err != nil {
 			return nil, fmt.Errorf("incident pg: list scan: %w", err)
 		}
 		out = append(out, inc)
@@ -317,8 +332,7 @@ FROM incident WHERE tenant_id=$1`, s.tenantID).Scan(
 	}
 	args = append(args, limit+1) // 多取一行判断是否还有下一页
 	rows, err := s.pool.Query(ctx, `
-SELECT incident_id, title, severity, state, created_at, updated_at, resolved_at,
-       origin, source_ref, source_meta, created_by, merged_into, auto_close_policy
+SELECT `+pgIncidentCols+`
 FROM incident
 WHERE tenant_id=$1
   AND ($2 = '' OR ($2 = 'active' AND state <> 'resolved') OR state = $2)
@@ -333,10 +347,7 @@ LIMIT $`+strconv.Itoa(len(args)), args...)
 	items := []Incident{}
 	for rows.Next() {
 		var inc Incident
-		if err := rows.Scan(&inc.ID, &inc.Title, &inc.Severity, &inc.State,
-			&inc.CreatedAt, &inc.UpdatedAt, &nullTime{t: &inc.ResolvedAt},
-			&inc.Origin, &inc.SourceRef, &inc.SourceMeta, &inc.CreatedBy,
-			&inc.MergedInto, &inc.AutoClosePolicy); err != nil {
+		if err := scanIncident(rows, &inc); err != nil {
 			return Page{}, fmt.Errorf("incident pg: page scan: %w", err)
 		}
 		items = append(items, inc)
@@ -377,13 +388,9 @@ incident_id = (SELECT i.incident_id FROM incident_cluster ic
 // queryOne 按 where 片段查单事件 + 簇关联。
 func (s *PGStore) queryOne(ctx context.Context, where string, args ...any) (Incident, error) {
 	var inc Incident
-	full := `SELECT incident_id, title, severity, state, created_at, updated_at, resolved_at,
-       origin, source_ref, source_meta, created_by, merged_into, auto_close_policy
+	full := `SELECT ` + pgIncidentCols + `
 FROM incident WHERE tenant_id=$2 AND ` + where
-	err := s.pool.QueryRow(ctx, full, args...).Scan(
-		&inc.ID, &inc.Title, &inc.Severity, &inc.State, &inc.CreatedAt, &inc.UpdatedAt,
-		&nullTime{t: &inc.ResolvedAt}, &inc.Origin, &inc.SourceRef, &inc.SourceMeta,
-		&inc.CreatedBy, &inc.MergedInto, &inc.AutoClosePolicy)
+	err := scanIncident(s.pool.QueryRow(ctx, full, args...), &inc)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Incident{}, ErrNotFound
 	}
@@ -452,17 +459,6 @@ ORDER BY i.incident_id, ic.cluster_key`, s.tenantID, ids)
 // externalIncidentID 见 incident.go（与 MemStore 同一规则，必须一致）。
 const externalGenRetries = 8
 
-// UpsertExternal 外部链路写入（链路 A）。幂等语义（M9：复发即新建）：
-//
-//   - 命中未解决（open/acked/mitigated）的当前代 → 刷新（重推不新建）；
-//   - 命中已解决的当前代 → 视为告警复发，**新开一代**（generation+1，
-//     incident_id 追加 #N）。否则新故障只会去刷新一条已关闭的旧单，
-//     运维看不见——这正是 M9 要修的。
-//   - 第 1 代 incident_id 保持裸 origin:sourceRef（兼容历史数据与反查习惯）。
-//
-// 幂等键：migrations/000008 把唯一索引从 (tenant,origin,source_ref) 换成
-// (…, generation)。并发 worker 同号插入会撞索引，此处以"重读当前代 →
-// 重试下一代"收敛（有界）。
 // rowQuerier 事务与连接池共用的单行查询能力（insertExternalGen 复用）。
 type rowQuerier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
@@ -497,6 +493,7 @@ func (s *PGStore) UpsertExternal(origin Origin, sourceRef, title, severity, crea
 	if strings.TrimSpace(title) == "" {
 		return nil, false, errors.New("incident: title is required")
 	}
+	severity = normalizeSeverity(severity) // D2/D4 入口收口：新建与刷新分支都写不到空串
 	if meta == "" {
 		meta = "{}"
 	}
@@ -532,15 +529,14 @@ func (s *PGStore) upsertExternalAttempt(ctx context.Context, base string, origin
 	var cur Incident
 	var curGen int
 	err = tx.QueryRow(ctx, `
-SELECT incident_id, title, severity, state, created_at, updated_at, resolved_at,
-       origin, source_ref, source_meta, created_by, merged_into, auto_close_policy, generation
+SELECT `+pgIncidentCols+`, generation
 FROM incident
 WHERE tenant_id=$1 AND origin=$2 AND source_ref=$3
 ORDER BY generation DESC LIMIT 1
 FOR UPDATE`, s.tenantID, string(origin), sourceRef).Scan(
 		&cur.ID, &cur.Title, &cur.Severity, &cur.State, &cur.CreatedAt, &cur.UpdatedAt,
 		&nullTime{t: &cur.ResolvedAt}, &cur.Origin, &cur.SourceRef, &cur.SourceMeta,
-		&cur.CreatedBy, &cur.MergedInto, &cur.AutoClosePolicy, &curGen)
+		&cur.CreatedBy, &cur.MergedInto, &cur.AutoClosePolicy, &cur.AckBy, &curGen)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		inc, ierr := insertExternalGen(ctx, tx, s.tenantID, base, origin, sourceRef, 1, title, severity, createdBy, meta)
@@ -558,21 +554,22 @@ FOR UPDATE`, s.tenantID, string(origin), sourceRef).Scan(
 	if cur.State != StateResolved {
 		// 未解决：就地刷新当前代（行已被 FOR UPDATE 锁定，无 TOCTOU）。
 		var inc Incident
-		if err := tx.QueryRow(ctx, `
+		err = scanIncident(tx.QueryRow(ctx, `
 UPDATE incident SET title=$3, severity=$4, source_meta=$5::jsonb, updated_at=now()
 WHERE tenant_id=$1 AND incident_id=$2
-RETURNING incident_id, title, severity, state, created_at, updated_at, resolved_at,
-          origin, source_ref, source_meta, created_by, merged_into, auto_close_policy`,
-			s.tenantID, cur.ID, title, severity, meta).Scan(
-			&inc.ID, &inc.Title, &inc.Severity, &inc.State, &inc.CreatedAt, &inc.UpdatedAt,
-			&nullTime{t: &inc.ResolvedAt}, &inc.Origin, &inc.SourceRef, &inc.SourceMeta,
-			&inc.CreatedBy, &inc.MergedInto, &inc.AutoClosePolicy); err != nil {
+RETURNING `+pgIncidentCols,
+			s.tenantID, cur.ID, title, severity, meta), &inc)
+		if err != nil {
 			return nil, false, fmt.Errorf("incident pg: upsert external refresh: %w", err)
 		}
 		if err := tx.Commit(ctx); err != nil {
 			return nil, false, fmt.Errorf("incident pg: upsert commit: %w", err)
 		}
-		return &inc, false, nil
+		// D6：刷新返回值回填 ClusterKeys，与 Get/List 一致（提交后读，
+		// 不与本事务的行锁互踩）。
+		tmp := []Incident{inc}
+		s.fillClusters(ctx, tmp)
+		return &tmp[0], false, nil
 	}
 
 	// 已解决：复发，新开一代（同事务内；撞唯一索引→回滚→上层重试）。
@@ -587,18 +584,15 @@ RETURNING incident_id, title, severity, state, created_at, updated_at, resolved_
 }
 
 // insertExternalGen 写入外部事件的第 gen 代（db 可为连接池或事务）。
+// severity 已由 UpsertExternal 入口归一化（D2/D4），不再 NULLIF。
 func insertExternalGen(ctx context.Context, db rowQuerier, tenantID, base string, origin Origin, sourceRef string, gen int, title, severity, createdBy, meta string) (*Incident, error) {
 	var inc Incident
 	id := externalIncidentID(base, gen)
-	err := db.QueryRow(ctx, `
+	err := scanIncident(db.QueryRow(ctx, `
 INSERT INTO incident (tenant_id, incident_id, title, severity, state, origin, source_ref, source_meta, created_by, auto_close_policy, generation)
-VALUES ($1, $2, $3, NULLIF($4,''), 'open', $5, $6, $7::jsonb, $8, 'auto', $9)
-RETURNING incident_id, title, severity, state, created_at, updated_at, resolved_at,
-          origin, source_ref, source_meta, created_by, merged_into, auto_close_policy`,
-		tenantID, id, title, severity, origin, sourceRef, meta, createdBy, gen).Scan(
-		&inc.ID, &inc.Title, &inc.Severity, &inc.State, &inc.CreatedAt, &inc.UpdatedAt,
-		&nullTime{t: &inc.ResolvedAt}, &inc.Origin, &inc.SourceRef, &inc.SourceMeta,
-		&inc.CreatedBy, &inc.MergedInto, &inc.AutoClosePolicy)
+VALUES ($1, $2, $3, $4, 'open', $5, $6, $7::jsonb, $8, 'auto', $9)
+RETURNING `+pgIncidentCols,
+		tenantID, id, title, severity, origin, sourceRef, meta, createdBy, gen), &inc)
 	if err != nil {
 		return nil, fmt.Errorf("incident pg: insert external gen %d: %w", gen, err)
 	}
@@ -620,7 +614,10 @@ SELECT EXISTS(SELECT 1 FROM incident
 }
 
 // MergeInto 人工合并：事务内把被合并单置 resolved + merged_into，
-// 簇关联转移给主单（一簇一事件唯一索引约束下用 ON CONFLICT 忽略冲突）。
+// 簇关联转移给主单（一簇一事件唯一索引约束下跳过主单已占用的簇）。
+// 本 SQL 是状态机单一实现 closeAsMerged（incident.go）落库侧的镜像：
+// resolved_at/updated_at 同语句双 now() ⇒ 恒相等；D7 裁决以此处
+// "真实簇转移"语义为准，MemStore 原 no-op 实现已修齐。
 func (s *PGStore) MergeInto(id, targetID string) error {
 	if id == targetID {
 		return errors.New("incident: cannot merge into itself")

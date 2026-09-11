@@ -86,6 +86,79 @@ func (e ErrInvalidTransition) Error() string {
 	return fmt.Sprintf("invalid transition %s -> %s", e.From, e.To)
 }
 
+// ---- 状态机单一实现（#5：双 Store 共用的转移判定 + 副作用计划）----
+//
+// 转移的"合法性判定 + 副作用"只有下面这一份代码。PGStore 的 UPDATE 语句
+// 只按 transitionPlan 产出的参数打 CASE（不在 SQL 里藏第二套判定）；
+// MemStore 经 applyTransitionPlan 直接落字段。契约测试（store_contract_
+// test.go 契约 2/11）锁死两侧可观测结果必须一致。
+
+// transitionPlan 一次合法转移的副作用计划。
+type transitionPlan struct {
+	To State
+	// FlipManualOnly → 转入 acked：人工确认过的单，外部恢复不得自动关闭（R2）。
+	FlipManualOnly bool
+	// StampResolved → 转入 resolved：resolved_at == updated_at
+	//（Mem 同 clock 值；PG 同语句双 now()，同一事务时间戳）。
+	StampResolved bool
+	// AckBy → resolved 且 actor 去空白后非空：记录处置人；空串 = 不改写。
+	AckBy string
+}
+
+// planTransition 判定 from→to 合法性并产出副作用计划；非法返回 ErrInvalidTransition。
+func planTransition(from, to State, actor string) (transitionPlan, error) {
+	if !CanTransition(from, to) {
+		return transitionPlan{}, ErrInvalidTransition{From: from, To: to}
+	}
+	p := transitionPlan{To: to}
+	if to == StateAcked {
+		p.FlipManualOnly = true
+	}
+	if to == StateResolved {
+		p.StampResolved = true
+		if strings.TrimSpace(actor) != "" {
+			p.AckBy = actor
+		}
+	}
+	return p, nil
+}
+
+// applyTransitionPlan 把计划落到实体（MemStore 侧；now 由调用方时钟注入）。
+func applyTransitionPlan(inc *Incident, p transitionPlan, now time.Time) {
+	inc.State = p.To
+	inc.UpdatedAt = now
+	if p.FlipManualOnly {
+		inc.AutoClosePolicy = "manual_only"
+	}
+	if p.StampResolved {
+		inc.ResolvedAt = now
+	}
+	if p.AckBy != "" {
+		inc.AckBy = p.AckBy
+	}
+}
+
+// closeAsMerged 关闭被合并单：resolved + merged_into，resolved_at == updated_at
+// （落戳语义与 planTransition 的 StampResolved 同源；PG 侧 MergeInto 用同语句
+// now() 双写兑现同一契约）。合并**不走转移表**——已 resolved 的单仍可被合并。
+func closeAsMerged(inc *Incident, targetID string, at time.Time) {
+	inc.State = StateResolved
+	inc.MergedInto = targetID
+	inc.ResolvedAt = at
+	inc.UpdatedAt = at
+}
+
+// normalizeSeverity 空严重级入口收口（D2/D4）：空 → "info"——与 REST 层
+// 兜底、DB 列默认值（000004 severity NOT NULL DEFAULT 'info'）同向。两
+// Store 的 Create / UpsertExternal（新建与刷新分支）共用，杜绝"PG 撞
+// NOT NULL / Mem 静默存空"与"PG 刷新分支反而能写空"的分叉。
+func normalizeSeverity(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "info"
+	}
+	return s
+}
+
 // Incident 事件实体。
 type Incident struct {
 	ID          string    `json:"id"`
@@ -245,7 +318,7 @@ func (s *MemStore) Create(id, title, severity, createdBy string) (*Incident, err
 		return nil, fmt.Errorf("incident: duplicate id %q", id)
 	}
 	now := s.now()
-	inc := &Incident{ID: id, Title: title, Severity: severity,
+	inc := &Incident{ID: id, Title: title, Severity: normalizeSeverity(severity),
 		State: StateOpen, CreatedAt: now, UpdatedAt: now,
 		Origin: OriginManual, CreatedBy: createdBy, AutoClosePolicy: "manual_only"}
 	s.byID[id] = inc
@@ -265,7 +338,7 @@ func (s *MemStore) Get(id string) (Incident, error) {
 	return *clone(inc), nil
 }
 
-// Transition 状态推进（状态机校验；ResolvedAt 在转入 resolved 时落戳）。
+// Transition 状态推进（判定与副作用走状态机单一实现；见 planTransition）。
 func (s *MemStore) Transition(id string, to State, actor string) (Incident, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -273,21 +346,11 @@ func (s *MemStore) Transition(id string, to State, actor string) (Incident, erro
 	if !ok {
 		return Incident{}, ErrNotFound
 	}
-	if !CanTransition(inc.State, to) {
-		return Incident{}, ErrInvalidTransition{From: inc.State, To: to}
+	plan, err := planTransition(inc.State, to, actor)
+	if err != nil {
+		return Incident{}, err
 	}
-	inc.State = to
-	inc.UpdatedAt = s.now()
-	if to == StateAcked {
-		// R2：人工确认过的单，外部恢复不得自动关闭（防吞掉人工处置）。
-		inc.AutoClosePolicy = "manual_only"
-	}
-	if to == StateResolved {
-		inc.ResolvedAt = inc.UpdatedAt
-		if strings.TrimSpace(actor) != "" {
-			inc.AckBy = actor
-		}
-	}
+	applyTransitionPlan(inc, plan, s.now())
 	return *clone(inc), nil
 }
 
@@ -505,6 +568,7 @@ func (s *MemStore) UpsertExternal(origin Origin, sourceRef, title, severity, cre
 	if strings.TrimSpace(title) == "" {
 		return nil, false, errors.New("incident: title is required")
 	}
+	severity = normalizeSeverity(severity) // D2/D4 入口收口（与 PGStore 同一函数）
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	base := string(origin) + ":" + sourceRef
@@ -518,6 +582,12 @@ func (s *MemStore) UpsertExternal(origin Origin, sourceRef, title, severity, cre
 		inc, ok := s.byID[id]
 		if !ok {
 			break // 此代空缺 → 在这一代新建
+		}
+		if inc.Origin != origin || inc.SourceRef != sourceRef {
+			// ID 空间被非本系列单占用（如人工单恰好起名 origin:ref）：拒绝，
+			// 绝不静默改写（D8 护栏——与 PG 撞唯一索引报错的行为对齐）。
+			return nil, false, fmt.Errorf("incident: id %q occupied by %s incident %q, external upsert refused",
+				id, inc.Origin, inc.ID)
 		}
 		if inc.State != StateResolved {
 			inc.Title = title
@@ -647,8 +717,9 @@ func externalIncidentID(base string, gen int) string {
 	return base + "#" + strconv.Itoa(gen)
 }
 
-// MergeInto 人工合并：被合并单置 resolved + 记录 merged_into，簇关联转移
-// 给主单（主单不存在报错；重复合并幂等）。
+// MergeInto 人工合并：被合并单置 resolved + 记录 merged_into，簇关联**真实
+// 转移**给主单（D7，以 PG 语义为准——主单不存在报错；重复合并幂等；主单
+// 已占用某簇则该簇跳过，一簇一事件）。
 func (s *MemStore) MergeInto(id, targetID string) error {
 	if id == targetID {
 		return errors.New("incident: cannot merge into itself")
@@ -666,17 +737,25 @@ func (s *MemStore) MergeInto(id, targetID string) error {
 	if src.MergedInto == targetID && src.State == StateResolved {
 		return nil // 幂等
 	}
+	// 簇转移：反查改指主单、src 释放（旧实现的 `!taken` 判定对已挂簇恒为
+	// taken——整段是 no-op，违背本函数注释与 PG 行为，即漂移 D7）。
 	for _, k := range src.ClusterKeys {
-		if _, taken := s.byCluster[k]; !taken {
-			s.byCluster[k] = targetID
+		held := false
+		for _, tk := range tgt.ClusterKeys {
+			if tk == k {
+				held = true
+				break
+			}
+		}
+		if !held {
 			tgt.ClusterKeys = append(tgt.ClusterKeys, k)
 		}
+		s.byCluster[k] = targetID
 	}
-	src.MergedInto = targetID
-	src.State = StateResolved
-	src.ResolvedAt = s.now()
-	src.UpdatedAt = src.ResolvedAt
-	tgt.UpdatedAt = src.ResolvedAt
+	src.ClusterKeys = nil
+	now := s.now()
+	closeAsMerged(src, targetID, now)
+	tgt.UpdatedAt = now
 	return nil
 }
 
