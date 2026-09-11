@@ -63,6 +63,16 @@ const (
 	EnvTopologyEdges       = "OPS_TOPOLOGY_EDGES"
 	EnvChangeRetention     = "OPS_CHANGE_RETENTION"
 	EnvChangePruneInterval = "OPS_CHANGE_PRUNE_INTERVAL"
+
+	EnvMemLimitWarnRatio        = "OPS_MEMLIMIT_WARN_RATIO"
+	EnvMemLimitTopologyNodes    = "OPS_MEMLIMIT_TOPOLOGY_NODES"
+	EnvMemLimitTopologyEdges    = "OPS_MEMLIMIT_TOPOLOGY_EDGES"
+	EnvMemLimitIncidents        = "OPS_MEMLIMIT_INCIDENTS"
+	EnvMemLimitEscalationLedger = "OPS_MEMLIMIT_ESCALATION_LEDGER"
+	EnvMemLimitNoiseDedup       = "OPS_MEMLIMIT_NOISE_DEDUP"
+	EnvMemLimitNoiseClusters    = "OPS_MEMLIMIT_NOISE_CLUSTERS"
+	EnvMemLimitNoiseSigCache    = "OPS_MEMLIMIT_NOISE_SIGCACHE"
+	EnvMemLimitAudit            = "OPS_MEMLIMIT_AUDIT"
 )
 
 // LookupFunc 与 os.LookupEnv 同签名（测试注入假环境，不碰全局 env）。
@@ -133,6 +143,16 @@ func LoadFrom(lookup LookupFunc) (*Config, error) {
 		c.Topology.ChangeWindow, c.Topology.ChangeEnabled = w, on
 	}
 	c.Topology.ChangePruneInterval = p.posDur(EnvChangePruneInterval, DefaultChangePruneInterval)
+
+	c.MemLimit.WarnRatio = p.posRatio(EnvMemLimitWarnRatio, DefaultMemWarnRatio)
+	c.MemLimit.TopologyNodes = p.posInt(EnvMemLimitTopologyNodes, DefaultMemTopologyNodes)
+	c.MemLimit.TopologyEdges = p.posInt(EnvMemLimitTopologyEdges, DefaultMemTopologyEdges)
+	c.MemLimit.Incidents = p.posInt(EnvMemLimitIncidents, DefaultMemIncidents)
+	c.MemLimit.EscalationLedger = p.posInt(EnvMemLimitEscalationLedger, DefaultMemEscalationLedger)
+	c.MemLimit.NoiseDedup = p.posInt(EnvMemLimitNoiseDedup, DefaultMemNoiseDedup)
+	c.MemLimit.NoiseClusters = p.posInt(EnvMemLimitNoiseClusters, DefaultMemNoiseClusters)
+	c.MemLimit.NoiseSigCache = p.posInt(EnvMemLimitNoiseSigCache, DefaultMemNoiseSigCache)
+	c.MemLimit.Audit = p.posInt(EnvMemLimitAudit, DefaultMemAudit)
 
 	if len(p.errs) > 0 {
 		return nil, &Error{Errs: p.errs}
@@ -257,6 +277,24 @@ func (p *parser) posInt64(key string, def int64) int64 {
 		return def
 	}
 	return n
+}
+
+// posRatio 比例浮点（0 < r <= 1）：告警水位类配置的解析原语。
+func (p *parser) posRatio(key string, def float64) float64 {
+	raw := p.str(key)
+	if raw == "" {
+		return def
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		p.bad(key, fmt.Sprintf("must be a number, got %q", raw))
+		return def
+	}
+	if v <= 0 || v > 1 {
+		p.bad(key, fmt.Sprintf("must be in (0, 1], got %g", v))
+		return def
+	}
+	return v
 }
 
 // onOff 布尔开关：大小写不敏感的 on/off；缺失/空取默认；其余值记错。

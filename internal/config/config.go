@@ -184,6 +184,23 @@ type TopologySection struct {
 	ChangePruneInterval time.Duration // OPS_CHANGE_PRUNE_INTERVAL 清理周期，默认 1h
 }
 
+// MemLimitSection 内存有界化（优化方案 #6）：各无界/准无界进程内结构的
+// 容量上限与告警水位。上限按"开发/演示规模不可能触发"保守设定——
+// 正常规模行为与不设限完全一致；只有逼近病态增长才淘汰并计 WARN/指标。
+// 消费方（装配层）把对应字段变成 pkg/memguard.Guard 注入各结构，
+// internal 模块本身不认识本包（边界纪律）。
+type MemLimitSection struct {
+	WarnRatio        float64 // OPS_MEMLIMIT_WARN_RATIO，告警水位比例，默认 0.8（0<r<1）
+	TopologyNodes    int     // OPS_MEMLIMIT_TOPOLOGY_NODES 拓扑图节点上限，默认 100000
+	TopologyEdges    int     // OPS_MEMLIMIT_TOPOLOGY_EDGES 拓扑图边上限，默认 400000
+	Incidents        int     // OPS_MEMLIMIT_INCIDENTS 事件内存兜底 Store 上限，默认 50000
+	EscalationLedger int     // OPS_MEMLIMIT_ESCALATION_LEDGER 升级台账内存兜底上限，默认 100000
+	NoiseDedup       int     // OPS_MEMLIMIT_NOISE_DEDUP 去重指纹表上限，默认 200000
+	NoiseClusters    int     // OPS_MEMLIMIT_NOISE_CLUSTERS 内存簇（活跃+历史）上限，默认 50000
+	NoiseSigCache    int     // OPS_MEMLIMIT_NOISE_SIGCACHE 簇落库签名缓存上限，默认 50000
+	Audit            int     // OPS_MEMLIMIT_AUDIT 审计内存兜底上限，默认 50000
+}
+
 // MetricsSection 服务暴露面口径（HTTP 超时与请求体上限）。
 //
 // 与其余分组不同：**当前没有 env 通道**——这些是安全/稳定性口径
@@ -217,6 +234,7 @@ type Config struct {
 	Notify    NotifySection
 	Retention RetentionSection
 	Topology  TopologySection
+	MemLimit  MemLimitSection
 	Metrics   MetricsSection
 }
 
@@ -234,6 +252,9 @@ func (c *Config) Validate() error {
 	}
 	if err := c.Redis.Alert.Validate(); err != nil {
 		return err
+	}
+	if r := c.MemLimit.WarnRatio; r <= 0 || r > 1 {
+		return fmt.Errorf("memlimit warn ratio must be in (0, 1], got %g", r)
 	}
 	return c.Redis.Cache.Validate()
 }
@@ -285,6 +306,20 @@ const (
 
 	DefaultChangePruneInterval = time.Hour
 
+	// 内存有界化默认上限（优化方案 #6）。取值依据：开发/演示环境规模
+	// （百台节点、每批数百告警、7 天影子期）距这些数字还差 2~3 个数量级
+	// ——**正常规模行为与不设限完全一致**；触限即淘汰最久未活跃并计
+	// WARN + opscopilot_mem_evictions_total，是"最后一道保险"不是日常策略。
+	DefaultMemWarnRatio        = 0.8    // 告警水位 = max*ratio（size 过线先 WARN，不等淘汰）
+	DefaultMemTopologyNodes    = 100000 // 拓扑图节点（Builder 过度淘汰伤降噪故障域/RCA 取证，取 1e5 保守值）
+	DefaultMemTopologyEdges    = 400000 // 拓扑图边（端点必为图内节点，取节点×4）
+	DefaultMemIncidents        = 50000  // 事件 MemStore（仅 DB 缺席降级路径）
+	DefaultMemEscalationLedger = 100000 // 升级台账内存降级路径（幂等键条数）
+	DefaultMemNoiseDedup       = 200000 // 去重指纹表（窗口清扫之外的基数洪峰保险）
+	DefaultMemNoiseClusters    = 50000  // 内存簇（活跃+历史；历史区 resolved 是唯一只进不出的区）
+	DefaultMemNoiseSigCache    = 50000  // 簇落库签名缓存（与簇上限同源）
+	DefaultMemAudit            = 50000  // 审计内存降级路径条数
+
 	// HTTP / 请求体口径（MetricsSection 默认值，无 env 通道，见其注释）。
 	DefaultHTTPReadHeaderTimeout       = 5 * time.Second
 	DefaultHTTPWriteTimeout            = 30 * time.Second
@@ -322,6 +357,15 @@ func Defaults() *Config {
 	c.Topology.ChangeWindow = DefaultChangeRetention
 	c.Topology.ChangeEnabled = true
 	c.Topology.ChangePruneInterval = DefaultChangePruneInterval
+	c.MemLimit.WarnRatio = DefaultMemWarnRatio
+	c.MemLimit.TopologyNodes = DefaultMemTopologyNodes
+	c.MemLimit.TopologyEdges = DefaultMemTopologyEdges
+	c.MemLimit.Incidents = DefaultMemIncidents
+	c.MemLimit.EscalationLedger = DefaultMemEscalationLedger
+	c.MemLimit.NoiseDedup = DefaultMemNoiseDedup
+	c.MemLimit.NoiseClusters = DefaultMemNoiseClusters
+	c.MemLimit.NoiseSigCache = DefaultMemNoiseSigCache
+	c.MemLimit.Audit = DefaultMemAudit
 	c.Metrics.HTTPReadHeaderTimeout = DefaultHTTPReadHeaderTimeout
 	c.Metrics.HTTPWriteTimeout = DefaultHTTPWriteTimeout
 	c.Metrics.HTTPIdleTimeout = DefaultHTTPIdleTimeout

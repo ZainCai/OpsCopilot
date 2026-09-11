@@ -49,6 +49,7 @@ func TestLoadFromDefaults(t *testing.T) {
 		{"notify", got.Notify, want.Notify},
 		{"retention", got.Retention, want.Retention},
 		{"topology", got.Topology, want.Topology},
+		{"memlimit", got.MemLimit, want.MemLimit},
 		{"metrics", got.Metrics, want.Metrics},
 	}
 	for _, c := range table {
@@ -232,6 +233,65 @@ func TestParseRetention(t *testing.T) {
 			t.Errorf("ParseRetention(%q) = %v,%v,%v; want %v,%v,nil", c.raw, w, on, err, c.window, c.on)
 		}
 	}
+}
+
+// TestMemLimitKeys OPS_MEMLIMIT_* 组（优化方案 #6）表驱动：
+// 缺失 = 保守默认（演示规模不可能触发）、合法覆盖逐项生效、
+// 非法值汇入统一聚合报错。
+func TestMemLimitKeys(t *testing.T) {
+	t.Run("defaults", func(t *testing.T) {
+		c, err := LoadFrom(envMap(redisEnv("127.0.0.1:6380", "127.0.0.1:6381")))
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		want := Defaults().MemLimit
+		if c.MemLimit != want {
+			t.Fatalf("memlimit defaults drifted:\n got %+v\nwant %+v", c.MemLimit, want)
+		}
+		if want.TopologyNodes < 100000 || want.Incidents < 10000 {
+			t.Fatal("默认上限必须保守到演示规模不可能触发（#6 要求）")
+		}
+	})
+	t.Run("overrides", func(t *testing.T) {
+		env := redisEnv("127.0.0.1:6380", "127.0.0.1:6381")
+		env[EnvMemLimitWarnRatio] = "0.5"
+		env[EnvMemLimitTopologyNodes] = "1000"
+		env[EnvMemLimitTopologyEdges] = "4000"
+		env[EnvMemLimitIncidents] = "50"
+		env[EnvMemLimitEscalationLedger] = "60"
+		env[EnvMemLimitNoiseDedup] = "70"
+		env[EnvMemLimitNoiseClusters] = "80"
+		env[EnvMemLimitNoiseSigCache] = "90"
+		env[EnvMemLimitAudit] = "42"
+		c, err := LoadFrom(envMap(env))
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		ok := c.MemLimit.WarnRatio == 0.5 && c.MemLimit.TopologyNodes == 1000 &&
+			c.MemLimit.TopologyEdges == 4000 && c.MemLimit.Incidents == 50 &&
+			c.MemLimit.EscalationLedger == 60 && c.MemLimit.NoiseDedup == 70 &&
+			c.MemLimit.NoiseClusters == 80 && c.MemLimit.NoiseSigCache == 90 &&
+			c.MemLimit.Audit == 42
+		if !ok {
+			t.Fatalf("memlimit overrides not applied: %+v", c.MemLimit)
+		}
+	})
+	t.Run("invalid-aggregate", func(t *testing.T) {
+		env := redisEnv("127.0.0.1:6380", "127.0.0.1:6381")
+		env[EnvMemLimitTopologyNodes] = "0" // 非正 → 拒绝
+		env[EnvMemLimitWarnRatio] = "1.5"   // 比例出界 → 拒绝
+		env[EnvMemLimitAudit] = "plenty"    // 非数字 → 拒绝
+		_, err := LoadFrom(envMap(env))
+		var agg *Error
+		if !errors.As(err, &agg) || len(agg.Errs) != 3 {
+			t.Fatalf("want 3 aggregated errors, got %v", err)
+		}
+		for _, key := range []string{EnvMemLimitTopologyNodes, EnvMemLimitWarnRatio, EnvMemLimitAudit} {
+			if !strings.Contains(err.Error(), key) {
+				t.Errorf("aggregate must mention %s: %v", key, err)
+			}
+		}
+	})
 }
 
 // TestValidateCORSOrigin 跨源白名单规则（原 SetCORSOrigin 校验上移）：
