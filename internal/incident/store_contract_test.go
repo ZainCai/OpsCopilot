@@ -14,52 +14,32 @@
 // 子测试整体 skip，本机 / CI 恒绿。
 //
 // ---------------------------------------------------------------------------
-// 漂移清单（代码走查 + 探针实测；★=疑似 bug）
+// 漂移清单（编号对齐 docs 附录；#5 第二步重构后的处置状态）
 //
-//	D1 ack_by 读不回      ★PG：Transition 会写 ack_by 列（resolved+actor 时），
-//	                       但 Get/List/ListPage/Upsert 的查询与 RETURNING 均不
-//	                       SELECT ack_by → 驱动侧永远读成 ""。Mem 会把 AckBy
-//	                       带回并读出。probe: ack_by_never_read_back
-//	D2 空串字段 NULLIF 误用 ★PG：Create 对 severity/created_by 用 NULLIF(x,'')，
-//	                       而列是 NOT NULL DEFAULT …——显式 NULL 不走 DEFAULT，
-//	                       空串直接 23502 违例报错；Mem 接受并原样存 ""。
-//	                       （生产未爆仅因 REST 层先把 severity 兜底成 info、
-//	                       created_by 必填 400。）probe: create_empty_*
-//	D3 复发代际语义键      结构差：Mem 沿 incident_id 链（base,#2,#3…）逐代走，
-//	                       PG 按 generation 列 ORDER BY DESC 取当前代。合法流程
-//	                       下可观测结果一致（本文件已锁），但"id 恰为
-//	                       origin:ref 的人工单"会暴露分歧 → probe:
-//	                       external_id_hijack（Mem 静默刷新人工单，PG 8 次
-//	                       重试后报 cannot allocate generation——两边都可疑）。
-//	D4 source_meta 类型面   PG 列是 JSONB：""→强制 "{}"，非法 JSON 报错，回读
-//	                       是规范化文本；Mem 是自由文本原样进出。probe:
-//	                       source_meta_surface
-//	D5 upsert 刷新返回值    Mem 刷新返回带 ClusterKeys（clone），PG upsert 返回
-//	                       不做 fillClusters → 恒空。probe: refresh_return_clusters
-//	D6 合并簇转移          ★Mem：MergeInto 里 `if _, taken := s.byCluster[k];
-//	                       !taken` 对已挂载的簇恒为 taken==true → 转移整段是
-//	                       no-op：目标单拿不到簇、byCluster 仍指旧单、
-//	                       IncidentForCluster 反查返回已合并的旧单。PG 真实
-//	                       转移（UPDATE incident_cluster）。Mem 违背了自己的
-//	                       文档注释"簇关联转移给主单"。probe: merge_cluster_transfer
-//	D7 List 排序基底        Mem=插入序（s.order），PG=ORDER BY created_at ASC
-//	                       且**无第二排序键**（同刻顺序不稳）。单调时钟下两者
-//	                       重合（本文件 List 契约即按"创建序"断言），时钟回拨
-//	                       /同微秒插入即漂移。ListPage 双方均已锁
-//	                       (created_at DESC, id DESC)——List 未对齐 ListPage。
-//	D8 ExternalActive 判据  Mem 只看 byExternal 指向的**当前代**，PG 看**任意
-//	                       代**存在 state<>'resolved'。合法流程下旧代必已
-//	                       resolved，结果等价（已锁）；语义面不同，记录之。
-//	D9 归档/审计不在接口    Store 无归档与审计方法：MemStore 数据永驻、resolved
-//	                       单永远可见可转；PG 侧 retention（cmd/opscopilot/
-//	                       retention.go，迁移 000009）会把到期 resolved 单移出
-//	                       热表 → 归档后 Get=ErrNotFound、List/stats 不再计入，
-//	                       且归档数据无 API 找回路径（ADR-010 已知代价）。审计
-//	                       （迁移 000006）由 REST 层外挂 cmd/opscopilot/audit.go，
-//	                       两个 Store 现状都无审计钩子——此项一致但缺位。
-//	D10 时间戳来源          Mem 全部可注入时钟（SetClock），PG 恒 DB now()。
-//	                       本文件只断言跨实现可比的**关系**（单调、同时刻相
-//	                       等），不断言绝对值。
+//	D1 ack_by 有写无读      ✅ 已修+硬断言（TestContractAckByRoundTrip）：
+//	                         PG 全部查询/RETURNING 补 ack_by 列，两实现一致回读。
+//	D2 Create 空 severity    ✅ 已修+硬断言（TestContractCreateEmptyDefaults）：
+//	                         入口统一 normalizeSeverity（空→"info"，与 REST 层
+//	                         兜底、DB 默认值同向）；PG 弃用 NULLIF 误用。
+//	D3 Create 空 created_by  ✅ 已修+硬断言（同上）：两实现都接受 "" 并原样存
+//	                         （PG 去 NULLIF；REST 层必填 400 护栏保持不变）。
+//	D4 Upsert 空 severity    ✅ 已修+硬断言（TestContractUpsertSeverityNeverEmpty）：
+//	                         新建/刷新分支统一入口收口，PG 刷新分支不再写空。
+//	D5 source_meta 类型面    仍为探针（本次范围外，schema 未定义）：PG JSONB
+//	                         规范化/拒绝非法 JSON；Mem 自由文本原样进出。
+//	D6 Upsert 刷新返回缺簇   ✅ 已修+硬断言（TestContractUpsertRefreshReturnsClusters）：
+//	                         PG 刷新返回值回填 ClusterKeys，与 Get/List 一致。
+//	D7 MergeInto 簇转移     ✅ 已修+硬断言（TestContractMergeTransfersClusters）：
+//	                         以 PG"真实簇转移"为准——簇归主单、反查返回主单、
+//	                         被合并单释放；Mem 修复 no-op（违背自身注释的 bug）。
+//	D8 人工单 ID 撞外部     ✅ 加护栏+硬断言（TestContractExternalHijackRejected）：
+//	                         外部 upsert 代链撞上非外部同名单 → 两实现统一拒绝，
+//	                         人工单绝不被动（Mem 原静默改写是 bug；PG 本就报错）。
+//	D9 归档可见性           只锁不修：契约 10 已硬断言"接口面上 resolved 单双方
+//	                         均可见"；PG retention 物理删属接口外（ADR-010 代价）。
+//	D10 排序/Active 判据    只锁不修：契约 6 锁 List=创建序（单调时钟下双方一致；
+//	                         PG 缺第二排序键，时钟回拨仍漂，见文件末注）；
+//	                         契约 4 锁 ExternalActive 合法时序下的可观测生命周期。
 //
 // ---------------------------------------------------------------------------
 package incident
@@ -1011,55 +991,194 @@ func containsStr(list []string, s string) bool {
 }
 
 // ---------------------------------------------------------------------------
-// 漂移快照：Mem 与 PG 现状不一致处——只记录，不修正（测试永远通过）
+// 契约 11（原 D1 探针升级硬断言）：ack_by 写后必须读得回
+// ---------------------------------------------------------------------------
+
+func TestContractAckByRoundTrip(t *testing.T) {
+	runContract(t, func(t *testing.T, s Store, px string) {
+		inc := contractCreate(t, s, px, "ACKBY", "critical", "ops")
+		// acked 不记处置人（ack_by 仅在 resolved 落，与两实现现状一致）。
+		if _, err := s.Transition(inc.ID, StateAcked, "bob"); err != nil {
+			t.Fatalf("ack: %v", err)
+		}
+		if got := contractGet(t, s, inc.ID); got.AckBy != "" {
+			t.Fatalf("acked must not record ack_by: %+v", got)
+		}
+		ret, err := s.Transition(inc.ID, StateResolved, "alice")
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		if ret.AckBy != "alice" {
+			t.Fatalf("transition return AckBy = %q, want alice", ret.AckBy)
+		}
+		if got := contractGet(t, s, inc.ID); got.AckBy != "alice" {
+			t.Fatalf("Get read-back AckBy = %q, want alice（D1：PG 有写无读）", got.AckBy)
+		}
+		var found bool
+		for _, x := range mustListAll(t, s) {
+			if x.ID == inc.ID {
+				found = true
+				if x.AckBy != "alice" {
+					t.Fatalf("List row AckBy = %q, want alice", x.AckBy)
+				}
+			}
+		}
+		if !found {
+			t.Fatal("resolved row missing from List")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// 契约 12（原 D2/D3 探针升级硬断言）：Create 空字段的统一缺省
+// ---------------------------------------------------------------------------
+
+func TestContractCreateEmptyDefaults(t *testing.T) {
+	runContract(t, func(t *testing.T, s Store, px string) {
+		// 空 severity → "info"（与 REST 兜底、DB 默认值同向）。
+		a, err := s.Create(px+"-E1", "blank severity", "", "ops")
+		if err != nil {
+			t.Fatalf("create empty severity: %v", err)
+		}
+		if a.Severity != "info" {
+			t.Fatalf("create return severity = %q, want info", a.Severity)
+		}
+		if got := contractGet(t, s, px+"-E1"); got.Severity != "info" {
+			t.Fatalf("read-back severity = %q, want info", got.Severity)
+		}
+		// 空 created_by：两实现都接受并原样存 ""（REST 层的必填 400 不归 Store 管）。
+		if _, err := s.Create(px+"-E2", "blank created_by", "critical", ""); err != nil {
+			t.Fatalf("create empty created_by: %v", err)
+		}
+		if got := contractGet(t, s, px+"-E2"); got.CreatedBy != "" {
+			t.Fatalf("read-back created_by = %q, want empty", got.CreatedBy)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// 契约 13（原 D4 探针升级硬断言）：外部链路 severity 永不落空
+// ---------------------------------------------------------------------------
+
+func TestContractUpsertSeverityNeverEmpty(t *testing.T) {
+	runContract(t, func(t *testing.T, s Store, px string) {
+		ref := px + "-sev"
+		inc, isNew, err := s.UpsertExternal(OriginWebhook, ref, "sev-blank", "", "sys", "{}")
+		if err != nil || !isNew {
+			t.Fatalf("first upsert: isNew=%v err=%v", isNew, err)
+		}
+		if inc.Severity != "info" {
+			t.Fatalf("new-gen severity = %q, want info", inc.Severity)
+		}
+		// 刷新分支同样不得写空（PG 曾自相矛盾：新建拒绝、刷新写空）。
+		r, isNew, err := s.UpsertExternal(OriginWebhook, ref, "sev-refresh", "", "sys", "{}")
+		if err != nil || isNew {
+			t.Fatalf("refresh: isNew=%v err=%v", isNew, err)
+		}
+		if r.Severity != "info" {
+			t.Fatalf("refresh return severity = %q, want info", r.Severity)
+		}
+		if got := contractGet(t, s, inc.ID); got.Severity != "info" {
+			t.Fatalf("refresh read-back severity = %q, want info", got.Severity)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// 契约 14（原 D6 探针升级硬断言）：Upsert 刷新返回值回填 ClusterKeys
+// ---------------------------------------------------------------------------
+
+func TestContractUpsertRefreshReturnsClusters(t *testing.T) {
+	runContract(t, func(t *testing.T, s Store, px string) {
+		ref := px + "-d6"
+		inc, _ := expectExternal(t, s, OriginAlertmanager, ref, "v1", "critical")
+		for _, ck := range []string{px + "-ck1", px + "-ck2"} {
+			if err := s.AttachCluster(inc.ID, ck); err != nil {
+				t.Fatalf("attach %s: %v", ck, err)
+			}
+		}
+		r, isNew, err := s.UpsertExternal(OriginAlertmanager, ref, "v2", "warning", "sys", "{}")
+		if err != nil || isNew {
+			t.Fatalf("refresh: isNew=%v err=%v", isNew, err)
+		}
+		want := []string{px + "-ck1", px + "-ck2"}
+		if !equalStrings(r.ClusterKeys, want) {
+			t.Fatalf("refresh return ClusterKeys = %v, want %v（须与 Get/List 一致）", r.ClusterKeys, want)
+		}
+		if got := contractGet(t, s, inc.ID); !equalStrings(got.ClusterKeys, want) {
+			t.Fatalf("Get ClusterKeys = %v, want %v", got.ClusterKeys, want)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// 契约 15（原 D7 探针升级硬断言）：MergeInto 真实簇转移（以 PG 语义为准）
+// ---------------------------------------------------------------------------
+
+func TestContractMergeTransfersClusters(t *testing.T) {
+	runContract(t, func(t *testing.T, s Store, px string) {
+		a := contractCreate(t, s, px, "SRC", "critical", "ops")
+		b := contractCreate(t, s, px, "TGT", "critical", "ops")
+		for _, ck := range []string{px + "-ck1", px + "-ck2"} {
+			if err := s.AttachCluster(a.ID, ck); err != nil {
+				t.Fatalf("attach %s: %v", ck, err)
+			}
+		}
+		if err := s.MergeInto(a.ID, b.ID); err != nil {
+			t.Fatalf("merge: %v", err)
+		}
+		// 反查归主单；被合并单释放全部簇。
+		for _, ck := range []string{px + "-ck1", px + "-ck2"} {
+			if inc, ok := s.IncidentForCluster(ck); !ok || inc.ID != b.ID {
+				t.Fatalf("for-cluster %s = %+v ok=%v, want 主单 %s（D7：Mem 曾 no-op）", ck, inc, ok, b.ID)
+			}
+		}
+		if ga := contractGet(t, s, a.ID); len(ga.ClusterKeys) != 0 {
+			t.Fatalf("merged src still holds clusters: %v", ga.ClusterKeys)
+		}
+		gb := contractGet(t, s, b.ID)
+		if !equalStrings(gb.ClusterKeys, []string{px + "-ck1", px + "-ck2"}) {
+			t.Fatalf("target clusters = %v, want both", gb.ClusterKeys)
+		}
+		// 幂等重复合并不改变转移结果。
+		if err := s.MergeInto(a.ID, b.ID); err != nil {
+			t.Fatalf("re-merge: %v", err)
+		}
+		if got := contractGet(t, s, b.ID); !equalStrings(got.ClusterKeys, gb.ClusterKeys) {
+			t.Fatalf("re-merge diverged clusters: %v vs %v", got.ClusterKeys, gb.ClusterKeys)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// 契约 16（原 D8 探针升级硬断言）：外部 upsert 不得静默改写人工占用单
+// ---------------------------------------------------------------------------
+
+func TestContractExternalHijackRejected(t *testing.T) {
+	runContract(t, func(t *testing.T, s Store, px string) {
+		ref := px + "-h"
+		id := "alertmanager:" + ref // gen1 的外部 id 与人工占用者同名
+		if _, err := s.Create(id, "manual-original", "info", "ops"); err != nil {
+			t.Fatalf("precreate manual: %v", err)
+		}
+		_, isNew, err := s.UpsertExternal(OriginAlertmanager, ref, "HIJACKED", "critical", "sys", "{}")
+		if err == nil {
+			t.Fatalf("external upsert silently took over manual incident %q (isNew=%v)", id, isNew)
+		}
+		if got := contractGet(t, s, id); got.Title != "manual-original" || got.Origin != OriginManual {
+			t.Fatalf("manual incident mutated by rejected upsert: %+v", got)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// 漂移快照（余下）：本次不修的漂移——只记录，不修正（测试永远通过）
 // ---------------------------------------------------------------------------
 
 func TestContractDriftSnapshot(t *testing.T) {
 
-	runProbe(t, "D1_ack_by_never_read_back",
-		"PG：ack_by 列有写无读（所有查询/RETURNING 都不含 ack_by），驱动侧永远读空——疑似 PG bug",
-		func(t *testing.T, s Store, px string) string {
-			inc := contractCreate(t, s, px, "ACKBY", "critical", "ops")
-			ret, err := s.Transition(inc.ID, StateResolved, "alice")
-			if err != nil {
-				return "transition-err"
-			}
-			got := contractGet(t, s, inc.ID)
-			return fmt.Sprintf("transition-return.AckBy=%q get.AckBy=%q", ret.AckBy, got.AckBy)
-		})
-
-	runProbe(t, "D2_create_empty_severity",
-		"PG：NULLIF('','')→显式 NULL 撞 severity NOT NULL（DEFAULT 不生效）直接报错；Mem 原样接受存空串——PG 侧 SQL 误用",
-		func(t *testing.T, s Store, px string) string {
-			_, err := s.Create(px+"-E1", "blank severity", "", "ops")
-			if err != nil {
-				return "err"
-			}
-			return "ok(severity=" + strconv.Quote(contractGet(t, s, px+"-E1").Severity) + ")"
-		})
-
-	runProbe(t, "D3_create_empty_created_by",
-		"同 D2 一族：created_by NULLIF 误用；生产未爆仅因 REST 层强制 created_by 非空",
-		func(t *testing.T, s Store, px string) string {
-			_, err := s.Create(px+"-E2", "blank by", "critical", "")
-			if err != nil {
-				return "err"
-			}
-			return "ok"
-		})
-
-	runProbe(t, "D4_upsert_external_empty_severity",
-		"D2 同款在外部链路：PG 新建代时报 NOT NULL；Mem 接受。注意 PG 的刷新分支（不新建）反而能写空串——PG 内部自相矛盾",
-		func(t *testing.T, s Store, px string) string {
-			_, _, err := s.UpsertExternal(OriginWebhook, px+"-sev", "sev-blank", "", "sys", "{}")
-			if err != nil {
-				return "create-rejects"
-			}
-			return "create-accepts"
-		})
-
 	runProbe(t, "D5_source_meta_surface",
-		"PG 列是 JSONB（空→'{}'、非法 JSON 报错、回读是规范化文本）；Mem 是自由文本。类型差异非 bug，但依赖 meta 原文回读的行为会漂",
+		"PG 列是 JSONB（空→'{}'、非法 JSON 报错、回读是规范化文本）；Mem 是自由文本。类型差异非 bug，但依赖 meta 原文回读的行为会漂（D5 待定义 schema 后收敛）",
 		func(t *testing.T, s Store, px string) string {
 			i1, _, err1 := s.UpsertExternal(OriginWebhook, px+"-m1", "meta-empty", "info", "sys", "")
 			meta1 := "n/a"
@@ -1070,70 +1189,7 @@ func TestContractDriftSnapshot(t *testing.T) {
 			return fmt.Sprintf("emptyMeta=%s nonJSON=%v", meta1, err2 == nil)
 		})
 
-	runProbe(t, "D6_refresh_return_omits_clusters",
-		"PG：UpsertExternal 刷新分支不 fillClusters → 返回体 ClusterKeys 恒空；Mem 返回带簇。Get/List 双方都带，仅返回值漂移",
-		func(t *testing.T, s Store, px string) string {
-			ref := px + "-d6"
-			inc, _ := expectExternal(t, s, OriginAlertmanager, ref, "v1", "critical")
-			if err := s.AttachCluster(inc.ID, px+"-ck"); err != nil {
-				return "attach-err"
-			}
-			r, _ := expectExternal(t, s, OriginAlertmanager, ref, "v2", "critical")
-			return fmt.Sprintf("refresh-return.ClusterKeys=%v", r.ClusterKeys)
-		})
-
-	runProbe(t, "D7_merge_cluster_transfer",
-		"★Mem bug 嫌疑最大：MergeInto 的簇转移被 `!taken` 判空挡（已挂簇必 taken）→ 目标单没拿到簇、IncidentForCluster 反查仍命中已合并旧单，与函数文档注释相悖；PG 真正转移",
-		func(t *testing.T, s Store, px string) string {
-			a := contractCreate(t, s, px, "SRC", "critical", "ops")
-			b := contractCreate(t, s, px, "TGT", "critical", "ops")
-			ck := px + "-ck"
-			if err := s.AttachCluster(a.ID, ck); err != nil {
-				return "attach-err"
-			}
-			if err := s.MergeInto(a.ID, b.ID); err != nil {
-				return "merge-err"
-			}
-			owner := "none"
-			if inc, ok := s.IncidentForCluster(ck); ok {
-				if inc.ID == a.ID {
-					owner = "SRC"
-				} else {
-					owner = "TGT"
-				}
-			}
-			return fmt.Sprintf("forCluster=%s tgt.Clusters=%d src.Clusters=%d",
-				owner, len(contractGet(t, s, b.ID).ClusterKeys), len(contractGet(t, s, a.ID).ClusterKeys))
-		})
-
-	runProbe(t, "D8_external_id_hijack_vs_retry_error",
-		"incident_id 空间分叉：Mem 按 id 链找代（人工单若恰好占用 origin:ref 会被外部 upsert 静默刷新改写），PG 按 (origin,source_ref) 找代再插 id（撞 UNIQUE 重试 8 次后报错）。两种行为都可疑，重构时须定一个",
-		func(t *testing.T, s Store, px string) string {
-			ref := px + "-h"
-			id := "alertmanager:" + ref // Mem 的 gen1 id 与人工占用者同名
-			if _, err := s.Create(id, "manual-original", "info", "ops"); err != nil {
-				return "precreate-err"
-			}
-			inc, isNew, err := s.UpsertExternal(OriginAlertmanager, ref, "HIJACKED", "critical", "sys", "{}")
-			switch {
-			case err != nil:
-				return fmt.Sprintf("upsert-error(isNew=%v) stored-title=%q", isNew, contractGet(t, s, id).Title)
-			default:
-				return fmt.Sprintf("upsert-ok(isNew=%v,origin=%s) stored-title=%q", isNew, inc.Origin, contractGet(t, s, id).Title)
-			}
-		})
-
-	runProbe(t, "D9_resolved_visibility_archival_gap",
-		"接口外归档面（D9）：Mem 单永驻；PG resolved 满期由 retention 删热表→Get/List/stats 全部消失且无 API 找回（ADR-010 已知代价）。当前接口层面双方一致（均可见）",
-		func(t *testing.T, s Store, px string) string {
-			if pgs, ok := s.(*PGStore); ok {
-				var n int
-				_ = pgs.pool.QueryRow(context.Background(),
-					`SELECT count(*) FROM information_schema.tables WHERE table_name='incident_archive'`).Scan(&n)
-				return fmt.Sprintf("visible=true;archive-table-exists=%v;NOTE:retention 会把到期 resolved 单物理移出热表", n > 0)
-			}
-			return "visible=true;archive-table-exists=false;NOTE:MemStore 无归档概念，数据只随进程生死"
-		})
-
-	t.Log("[drift-note] D7-list-ordering（List 基底不同：Mem=插入序、PG=ORDER BY created_at 无第二排序键，同刻不稳）与 D8-ExternalActive 判据（Mem 只看当前代索引、PG 看任意代）在合法时序/单调时钟下不可区分，探针无法复现，详见文件头清单")
+	t.Log("[drift-note] D9（归档可见性）由契约 10 锁定接口面现状：双方 resolved 单均可见，PG retention 物理删属接口外（ADR-010）；" +
+		"D10（List 排序基底：Mem=插入序、PG=ORDER BY created_at 无第二排序键；ExternalActive 判据：Mem 只看当前代、PG 看任意代）" +
+		"在单调时钟/合法流程下由契约 4/6 锁定为不可区分，时钟回拨或跨代脏数据时才漂移——本次不改生产代码。")
 }
