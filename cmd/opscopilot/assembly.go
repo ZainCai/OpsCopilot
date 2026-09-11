@@ -176,6 +176,8 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 		return nil, err
 	}
 	rest.SetLogf(logf)
+	// 告警中心数据源（仅 DB 部署有值；内存态该端点 503 并透出口径）。
+	rest.SetDB(pgPool, DefaultTenant)
 
 	asm := &Assembly{
 		Sink:      sink,

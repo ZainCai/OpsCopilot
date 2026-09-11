@@ -2,9 +2,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -245,5 +247,74 @@ func TestRESTIncidentsEndpoint(t *testing.T) {
 	code, _ = getJSON(t, h, "/api/v1/incidents?state=bogus")
 	if code != http.StatusBadRequest {
 		t.Fatalf("bogus state: code = %d, want 400", code)
+	}
+}
+
+// TestAlertsEndpointPG 第七轮配套（D12=B）：告警中心读 alert_event 影子判决；
+// 未接 DB 时 503 透出口径（R6-4）。
+func TestAlertsEndpointPG(t *testing.T) {
+	dsn := os.Getenv("OPS_TEST_PG_DSN")
+	if dsn == "" {
+		t.Skip("OPS_TEST_PG_DSN not set — alerts integration skipped")
+	}
+	t.Setenv("OPS_DB_DSN", dsn)
+	asm, err := NewAssembly(newQuietLogger(), "")
+	if err != nil {
+		t.Fatalf("assembly: %v", err)
+	}
+	defer asm.Close()
+	ctx := context.Background()
+	fp := "fp-alerts-" + time.Now().Format("150405.000000")
+	t.Cleanup(func() {
+		asm.pool.Exec(ctx, `DELETE FROM alert_event WHERE fingerprint=$1`, fp)
+	})
+	if _, err := asm.pool.Exec(ctx, `
+INSERT INTO alert_event (tenant_id, cluster_key, fingerprint, source, occurred_at, payload)
+VALUES ($1, 'c:alertstest', $2, 'shadow', now(), '{"reason":"new-incident"}'::jsonb)`,
+		DefaultTenant, fp); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	h := asm.Handler()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/alerts?limit=50", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("alerts code = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Count  int `json:"count"`
+		Alerts []struct {
+			Fingerprint string `json:"fingerprint"`
+			Reason      string `json:"reason"`
+			ClusterKey  string `json:"cluster_key"`
+		} `json:"alerts"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	found := false
+	for _, a := range out.Alerts {
+		if a.Fingerprint == fp && a.Reason == "new-incident" && a.ClusterKey == "c:alertstest" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("seeded verdict not in response: %s", rec.Body.String())
+	}
+	// 非法 limit → 400。
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/alerts?limit=-1", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad limit code = %d, want 400", rec.Code)
+	}
+}
+
+// TestAlertsEndpointNoDB：内存装配（无 DB）→ 503 且口径透出。
+func TestAlertsEndpointNoDB(t *testing.T) {
+	_, h := restTest(t)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/alerts", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("no-db alerts code = %d, want 503", rec.Code)
 	}
 }

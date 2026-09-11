@@ -214,6 +214,18 @@ label.toggle { display: inline-flex; gap: 6px; align-items: center; font-size: 1
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
 .topo-wrap { background: var(--panel-2); border-radius: 8px; overflow: hidden; }
 svg text { fill: var(--text); font-family: var(--font-mono); font-size: 11px; }
+/* ---- 响应式（原型 README P1 主题：修复响应式溢出）---- */
+@media (max-width: 960px) {
+  .page-head { flex-direction: column; align-items: flex-start; gap: 8px; }
+  .page-head > div[style*="margin-left"] { margin-left: 0 !important; }
+  .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tbl { min-width: 620px; }
+}
+@media (max-width: 640px) {
+  body { font-size: 13px; }
+  .tb-nav { flex-wrap: wrap; gap: 4px; }
+  .kpi-grid { grid-template-columns: 1fr; }
+}
 </style>
 </head>
 <body>
@@ -228,6 +240,7 @@ svg text { fill: var(--text); font-family: var(--font-mono); font-size: 11px; }
   </div>
   <nav class="tb-nav" id="tbNav">
     <button class="tb-tab on" data-view="overview">降噪总览</button>
+    <button class="tb-tab" data-view="alerts">告警中心</button>
     <button class="tb-tab" data-view="events">事件</button>
   </nav>
   <span class="tb-meta" id="buildStamp" title="当前构建（vcs 短哈希 · 提交时间）——排查“功能不见了”先看这里">{{BUILD}}</span>
@@ -307,6 +320,30 @@ svg text { fill: var(--text); font-family: var(--font-mono); font-size: 11px; }
   </div><!-- /view-overview -->
 
   <!-- ===== 视图二：事件（W9 双链路：人工建单 ∥ 外部自动导入） ===== -->
+  <div id="view-alerts" style="display:none">
+    <div class="page-head">
+      <div>
+        <div class="page-title">告警中心</div>
+        <div class="page-desc">影子判决流 · 与降噪评估同源（alert_event）· 最新 200 条</div>
+      </div>
+      <div style="margin-left:auto">
+        <button class="btn btn--sm" onclick="loadAlerts()">刷新</button>
+      </div>
+    </div>
+    <div id="alertMsg"></div>
+    <div class="panel">
+      <div class="panel-h">
+        <span class="panel-t">影子判决流</span>
+        <span class="panel-sub" id="alertCount"></span>
+      </div>
+      <div class="tbl-wrap">
+        <table class="tbl">
+          <thead><tr><th>时间</th><th>结论</th><th>指纹</th><th>簇</th></tr></thead>
+          <tbody id="alertRows"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
   <div id="view-events" style="display:none">
     <div class="page-head">
       <div>
@@ -666,10 +703,39 @@ const needToken = (e) => e.message.includes("unauthorized") ? "（写操作需�
 function switchView(v) {
   curView = v;
   $("view-overview").style.display = v === "overview" ? "" : "none";
+  $("view-alerts").style.display = v === "alerts" ? "" : "none";
   $("view-events").style.display = v === "events" ? "" : "none";
   document.querySelectorAll("#tbNav .tb-tab").forEach(b => b.classList.toggle("on", b.dataset.view === v));
   if (v === "events") { connectStream(); loadIncidents(); }
   else { disconnectStream(); } // 离开事件页：长连接不该常驻（资源卫生）
+  if (v === "alerts") loadAlerts();
+}
+
+// ---- 告警中心（原型 pages/alerts.jsx 对齐）：影子判决流 ----
+// 结论徽章：new-incident 新建 / cluster-merge 并簇 / dedup-window 窗口去重
+const REASON_BADGE = { "new-incident": ["新增", "chip--open"], "cluster-merge": ["并簇", "chip--acked"], "dedup-window": ["窗口去重", ""] };
+const reasonBadge = (r) => {
+  const m = REASON_BADGE[r];
+  return m ? `<span class="chip ${m[1]}">${m[0]}</span> <span class="faint mono">${esc(r)}</span>` : `<span class="chip">${esc(r)}</span>`;
+};
+async function loadAlerts() {
+  msg($("alertMsg"), "loading", "加载告警…");
+  try {
+    const data = await fetchJSON("/api/v1/alerts?limit=200");
+    const list = data.alerts || [];
+    $("alertCount").textContent = list.length + " 条（最新）";
+    $("alertRows").innerHTML = list.map(a => `
+      <tr>
+        <td class="time">${timeAgo(a.occurred_at)}</td>
+        <td>${reasonBadge(a.reason)}</td>
+        <td class="mono">${esc(a.fingerprint)}</td>
+        <td class="mono">${a.cluster_key ? esc(a.cluster_key) : '<span class="faint">—</span>'}</td>
+      </tr>`).join("") || emptyState("暂无影子判决", "降噪引擎影子模式下每次告警处理都会在此留痕（需 OPS_DB_DSN）");
+    msg($("alertMsg"), "", "");
+  } catch (e) {
+    $("alertRows").innerHTML = emptyState("加载失败", e.message);
+    msg($("alertMsg"), "err", "加载失败：" + e.message);
+  }
 }
 
 // ---- W11 实时推送（SSE）：事件变更即推，替代 30s 轮询 ----
@@ -974,7 +1040,7 @@ if ($("autoRefresh").checked) timer = setInterval(pollTick, 30000);
 // 设定 curView，刷新方可落在正确视图；events 视图由 switchView 自行拉取，
 // 避免重复请求。
 const initView = new URLSearchParams(location.search).get("view");
-if (initView === "events" || initView === "overview") switchView(initView);
+if (initView === "events" || initView === "alerts" || initView === "overview") switchView(initView);
 if (curView === "overview") refreshAll();
 </script>
 </body>

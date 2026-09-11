@@ -15,12 +15,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	"net/http"
-	"opscopilot/internal/incident"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"opscopilot/internal/incident"
 )
 
 // incidentBodyLimit 人工建单请求体上限（建单是几行 JSON，1MiB 足够）。
@@ -51,6 +53,10 @@ type RESTGateway struct {
 	corsOrigin string
 	// logf 服务端错误日志（500 脱敏后细节只进日志，不回客户端）。
 	logf func(string, ...any)
+	// db 告警中心数据源（alert_event 只读）。nil = 未接 DB，告警端点 503
+	//（与 R6-4"落库形态透出"口径一致）。tenant 为告警查询租户。
+	db     *pgxpool.Pool
+	tenant string
 }
 
 // SetCORSOrigin 设置跨源放行白名单（装配期调用；空串 = 仅同源）。
@@ -73,6 +79,9 @@ func (g *RESTGateway) SetCORSOrigin(origin string) error {
 	g.corsOrigin = o
 	return nil
 }
+
+// SetDB 挂载告警中心数据源（装配期；仅 DB 部署时有值）。
+func (g *RESTGateway) SetDB(pool *pgxpool.Pool, tenant string) { g.db, g.tenant = pool, tenant }
 
 // SetLogf 注入服务端错误日志（装配期调用；nil = 静默）。
 func (g *RESTGateway) SetLogf(f func(string, ...any)) {
@@ -120,6 +129,8 @@ func (g *RESTGateway) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/auth/status", g.handleAuthStatus)
 	// W11 实时推送：SSE 事件流（控制台事件页订阅）。
 	mux.Handle("GET /api/v1/events/stream", h)
+	// 告警中心：影子判决流（与 W6-3 评估同源数据，alerts.jsx 对齐）。
+	mux.Handle("GET /api/v1/alerts", h)
 }
 
 // route 按 path 分发（CORS 包装层之下）。
@@ -133,6 +144,8 @@ func (g *RESTGateway) route(w http.ResponseWriter, r *http.Request) {
 		g.handleChanges(w, r)
 	case "/api/v1/events/stream":
 		g.handleEventStream(w, r)
+	case "/api/v1/alerts":
+		g.handleAlerts(w, r)
 	case "/api/v1/incidents":
 		// POST /api/v1/incidents 由 mux 精确模式（method+path）接管，不会进到这里。
 		g.handleIncidents(w, r)
