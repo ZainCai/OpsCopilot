@@ -2,6 +2,7 @@
 
 > 基于 2026-09-11 全仓扫描（main @ 6f433b9，~23.8k 行 Go，55 测试文件）与 M1 出口验收报告。
 > **09-11 拍板**：纯开发环境（配置可一次性 fail-fast）；4–5 人团队（并行推进）；M2 越快越好；console 分离为独立前端工程；**多副本为未来规划 → #11 水平扩展改造升 P1，压测按多实例拓扑设计**。
+> **进度**：✅ #1 `ad8acd6`；✅ #3 `d77f812`（渠道分发移出锁外，新增锁外计时测试）；✅ #4 `f2acd05`（复用 000002 change_record 表 + 000015 回放索引，写失败降级不阻塞采集）；✅ #5 契约测试 `680f625`（**发现 10 项双实现漂移，见附录**）。待做：#2 配置收敛 → #10 → #6。
 
 ## 一、现状评估
 
@@ -13,7 +14,7 @@
 | 配置管理 | 90+ `OPS_*` env 散读于 cmd，无 schema，非法值处理不一致 | **D** | 最大系统性风险源 |
 | 性能/容量 | 无容量模型；ChangeStore 等多处内存结构无上限 | C | 慢 DB 阻塞、内存无上界 |
 | 可维护性 | 巨型文件（incident.go 679 行、内嵌 console.html 1213 行）；魔法数字；全局变量 | C | 改一处漏一处 |
-| 仓库卫生 | 磁盘残留 ~40MB exe、日志、tmp_pgstat/、.demo/；根级 11 份中文文档不在 git | **D** | 文档与代码版本脱节 |
+| 仓库卫生 | ~~磁盘残留与文档脱节~~ 已于 #1 清理，D→B | 残余：`.demo/` 评估数据待纳入归档策略 |
 
 **结论：** 核心链路设计成熟（降级哲学、双存储、幂等队列都好），主要欠账在配置收敛、并发正确性收尾、仓库/文档卫生三类——全部可增量修复，无需推翻架构。
 
@@ -23,7 +24,7 @@
 
 | # | 措施 | 具体做法 | 预期收益 | 工作量 | 风险 |
 |---|---|---|---|---|---|
-| 1 | 仓库清理 | 删 `opscopilot.exe`/`faultinjector.exe`/`ops.log`/`w94_injector.log`/`.demo/` 残留；`tmp_pgstat/` 加 .gitignore 或删除；根级中文 md 归档进 `docs/history/` 并入 git（只留 v1.3 为现行基线） | 消除误发布/混淆；文档进版本控制 | 0.5d | 极低 |
+| 1 | ~~仓库清理~~ ✅ 已完成 `ad8acd6` | 已删磁盘残留 exe/日志（回收站可恢复），14 份根级文档归档进 `docs/` 与 `docs/history/`（v1.3 为现行基线）；tmp_pgstat 已消失 | 文档进版本控制、~100MB 垃圾出清 | — | — |
 | 2 | 配置收敛 | `internal/config` 建统一结构体（解析+校验+默认值+非法值统一 fail-fast），cmd 侧逐步改注入；先收敛噪声大、后果重的：noise 模式、dedupWindow、burst 限流 | 行为一致、env 有清单可查 | 3d 一次做完 | 低：纯开发环境，统一 fail-fast 无生产错配风险，compose 起服即验证 |
 | 3 | Gate.Admit 锁内 IO 修复 | 锁内仅判决+计数，`Dispatch` 移到锁外（快照渠道列表或投递 buffered channel） | 通知出口不再被单渠道慢响应串行化 | 0.5d | 低，有 notify 测试兜底 |
 | 4 | ChangeStore 持久化 | 新增 migration（变更记录表，含保留窗），写 PG、读走内存缓存；替换 `topology/change.go:20` 纯内存实现 | 重启不丢 RCA/变更取证证据 | 1–1.5d | 低 |
@@ -82,3 +83,19 @@ D6–D8：
 - M2：越快越好 → 压测/备份演练产出即 M2 出口材料；W11 留给 RCA。
 - 前端：console.html 冻结，以 console_source_sample 为种子分离独立前端工程。
 - **部署形态：多副本为未来规划 → #11 升 P1**（租约认领 + escalation 入 PG + 拓扑 Builder 归属 ADR + leader 门禁），#7 压测增加双实例扩展性一轮。
+
+## 附录：incident 双 store 漂移清单（#5 契约测试实测，重构时的输入）
+
+| # | 点位 | 摘要 | 修复方向 |
+|---|---|---|---|
+| D1 | ack_by | PG 列**有写无读**，Get/Transition 永远返回空 | PG 侧确定性修复 |
+| D2/D3 | Create 空 severity / createdBy | Mem 接受，PG NOT NULL 报错（DEFAULT 未生效路径） | PG 侧对齐或入口统一校验 |
+| D4 | UpsertExternal 空 severity | PG 新建分支报错、**刷新分支反而能写空**（自相矛盾） | 随 D2 一并收敛 |
+| D5 | source_meta | Mem 自由文本 vs PG JSONB 规范化/拒绝 | 定义 schema 统一 |
+| D6 | Upsert 刷新返回值 | PG 不回填 ClusterKeys | PG 小修 |
+| D7 | **MergeInto 簇转移** | **Mem 是 no-op**，违背自身注释与 PG 行为——嫌疑最大的真 bug | 以 PG 语义为准修 Mem |
+| D8 | 人工单 ID 撞外部 `origin:ref` | Mem 静默改写人工单；PG 重试 8 代后报错 | 统一 ID 空间规则 |
+| D9 | 归档可见性 | Mem 永驻 vs PG retention 物理删（ADR-010 已知代价） | 文档化，契约测试锁现状 |
+| D10 | List 排序无第二键 / ExternalActive 判据 | 同刻时间戳下 PG 排序不稳；Mem 只看当前代、PG 看任意代 | 加排序键（000010 索引顺带）|
+
+**#5 重构建议起点**：D1/D2/D3/D4/D6 为 PG 侧小修；D7 是 Mem/注释/PG 三方矛盾，动状态机前先拍 D7 语义；其余随状态机抽取一并收敛。
