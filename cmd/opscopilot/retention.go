@@ -118,8 +118,29 @@ func (r *RetentionSweeper) Run(ctx context.Context) {
 			if n > 0 {
 				r.logf("retention: archived %d incident(s)", n)
 			}
+			if d, err := r.sweepDeadLetters(ctx); err != nil {
+				r.logf("WARNING: retention dead letters: %v", err)
+			} else if d > 0 {
+				r.logf("retention: purged %d dead-letter message(s)", d)
+			}
 		}
 	}
+}
+
+// deadLetterRetention 死信行保留期：达 maxIngestAttempts 的行不再被领取、
+// 也不是事件（事件归档覆盖不到它），失败详情已在审计里——留 7 天供排查后清除。
+const deadLetterRetention = 7 * 24 * time.Hour
+
+// sweepDeadLetters 清理过期死信（第七轮 L11：否则永久占表）。
+func (r *RetentionSweeper) sweepDeadLetters(ctx context.Context) (int64, error) {
+	tag, err := r.pool.Exec(ctx, `
+DELETE FROM ingest_queue
+WHERE tenant_id=$1 AND processed_at IS NULL AND attempts >= $2
+  AND received_at < $3`, r.tenant, maxIngestAttempts, time.Now().Add(-deadLetterRetention))
+	if err != nil {
+		return 0, fmt.Errorf("retention: dead letters: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // sweepOnce 归档一批。返回归档条数。

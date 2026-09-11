@@ -256,6 +256,17 @@ func (w *IngestWorker) drain() {
 	}
 }
 
+// sanitizeLog 去除控制字符，防日志/审计注入（第七轮 L3）：
+// SourceRef 来自外部告警载荷，内容不可控，含 \n/\r 可伪造日志行。
+func sanitizeLog(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return '?'
+		}
+		return r
+	}, s)
+}
+
 // processSafely 执行 process，把 panic 转换为本条失败（隔离坏输入）。
 func (w *IngestWorker) processSafely(it Item) (err error) {
 	defer func() {

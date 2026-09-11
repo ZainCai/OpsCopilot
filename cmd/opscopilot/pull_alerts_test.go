@@ -250,3 +250,19 @@ func TestApplyRateLimitCountsOnlyNew(t *testing.T) {
 		t.Fatalf("sub-second window must be safe (treated as unlimited): ref=%q burst=%v", ref, burst)
 	}
 }
+
+// TestSanitizeLog 第七轮 L3：外部 SourceRef 含控制字符时可伪造日志行/审计
+// 明细——必须净化为 '?'。
+func TestSanitizeLog(t *testing.T) {
+	in := "fp-a\r\nINJECTED audit line\x00tail\tok"
+	got := sanitizeLog(in)
+	if strings.ContainsAny(got, "\r\n\x00") {
+		t.Fatalf("control chars must be stripped: %q", got)
+	}
+	if !strings.Contains(got, "INJECTED audit line") || !strings.Contains(got, "ok") {
+		t.Fatalf("printable content must be preserved: %q", got)
+	}
+	if sanitizeLog("normal-fp-1.2") != "normal-fp-1.2" {
+		t.Fatal("clean input must pass through unchanged")
+	}
+}
