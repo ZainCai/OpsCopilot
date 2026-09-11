@@ -112,6 +112,23 @@ curl -X POST http://127.0.0.1:8080/api/v1/changes \
 - `200` 入库成功；**重复 ID 也返回 200**（响应带 `"duplicate": true` 与原记录）——幂等键的意义就是"重复提交 = 已经成功"，自动重试的发送方不会形成重试风暴；
 - `400` 请求体/字段校验失败；`401` Token 缺失或不匹配；`405` 非 POST；`413` 请求体超 1MiB；`422` 关联节点不在拓扑图中。
 
+### 通知渠道配置（W9-2）
+
+`OPS_NOISE_MODE=enforce` 时，降噪判定为**新事件**的告警会经渠道发出通知（窗口重复 / 故障域并入不重复通知）。渠道配置存 DB（`notify_channel`，迁移 000012），**保存即热生效，无需重启**：
+
+```bash
+# 新增/更新渠道（kind：generic 自建 JSON | feishu 飞书机器人 | wecom 企业微信机器人）
+curl -X POST http://127.0.0.1:8080/api/v1/notify/channels \
+  -H "Content-Type: application/json" -H "X-OpsCopilot-Token: <OPS_WEBHOOK_TOKEN>" \
+  -d '{"name":"ops-feishu","kind":"feishu","url":"https://open.feishu.cn/open-apis/bot/v2/hook/xxx","enabled":true}'
+
+curl http://127.0.0.1:8080/api/v1/notify/channels                       # 列表（读路径）
+curl -X POST .../api/v1/notify/channels/ops-feishu/enabled -d '{"enabled":false}' -H 'Content-Type: application/json' -H 'X-OpsCopilot-Token: <key>'
+curl -X DELETE .../api/v1/notify/channels/ops-feishu -H 'X-OpsCopilot-Token: <key>'
+```
+
+内置 `console` 兜底渠道（落服务日志）恒在且**不可覆盖/删除**——enforce 下零渠道意味着通知静默丢失，兜底至少留痕。装配启动时若 enforce 且零 webhook 渠道会打 WARNING。控制台「设置」页提供同样的能力（列表/新增/启停/删除）。
+
 ### 本地 compose 环境
 
 `make env-up` 启动 TimescaleDB + 双 Redis + 应用。compose 已配置 `OPS_LISTEN_ADDR=0.0.0.0:8080`（容器隔离即安全边界）与 Redis healthcheck；应用容器为 distroless（无 shell），探活用 `GET /healthz` 由外部编排层负责。默认 DB 口令仅限本地开发（见 `.env.example` 注释）。

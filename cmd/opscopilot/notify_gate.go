@@ -60,16 +60,17 @@ SELECT suppressed, dispatched FROM notify_gate_stats WHERE tenant_id = $1`, tena
 // attachNoiseGate 按模式挂载通知闸门（enforce 才挂；影子模式不碰闸门，
 // 装配代码直接可读出配置意图与运行时行为的对应）。pool 为事件域共享池
 // （nil = 无 DB，计数只累计内存、重启清零——降级语义与簇落库一致）。
-func attachNoiseGate(ne *NoiseEngine, pool *pgxpool.Pool, logf func(string, ...any)) {
+//
+// reg 由装配层统一持有（渠道 CRUD 后要重载进同一个 Registry，见
+// Assembly.reloadNotifyChannels），故此处只做"闸门挂载"这一件事。
+func attachNoiseGate(ne *NoiseEngine, reg *notify.Registry, pool *pgxpool.Pool, logf func(string, ...any)) {
 	if ne == nil || ne.Mode() != ModeEnforce {
 		if ne != nil {
 			logf("noise mode: shadow (verdicts recorded, nothing intercepted)")
 		}
 		return
 	}
-	registry := notify.NewRegistry()
-	registry.Register(&notify.ConsoleChannel{Logf: logf}) // W9-2 换真实渠道
-	gate := notify.NewGate(registry)
+	gate := notify.NewGate(reg)
 	var gs GateStatsSink
 	if pool != nil {
 		gs = &pgPoolGateStats{pool: pool}

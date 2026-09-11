@@ -246,13 +246,15 @@ func (n *NoiseEngine) ProcessAlerts(alerts []connector.Alert) {
 		}
 		if n.enforce && n.gate != nil {
 			// enforce 模式（ADR-011）：每条判决都过闸门——
-			// WouldSuppress=true 拦截计数；false 放行并全渠道通知。
+			// W9-2 语义只有新事件放行（dedup/merge 都不重复通知）；
 			// 判决照常落库：enforce 首周与影子基线对比的数据基础。
 			decisions = append(decisions, notify.Decision{
+				TenantID:      n.tenant,
 				ClusterKey:    v.ClusterKey,
 				Severity:      v.Severity,
 				Title:         v.Summary,
 				WouldSuppress: v.WouldSuppress,
+				Reason:        v.Reason,
 			})
 		}
 	}

@@ -71,6 +71,27 @@ func (r *Registry) Register(n Notifier) {
 	r.channels[n.Name()] = n
 }
 
+// Remove 注销渠道（配置删除/禁用后重载时调用）。
+func (r *Registry) Remove(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.channels, name)
+}
+
+// Clear 清空全部渠道（配置整体重载用：先清后注册，禁用/删除不留残影）。
+func (r *Registry) Clear() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.channels = map[string]Notifier{}
+}
+
+// Len 已注册渠道数。
+func (r *Registry) Len() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.channels)
+}
+
 // Names 已注册渠道名（稳定序）。
 func (r *Registry) Names() []string {
 	r.mu.RLock()
@@ -124,16 +145,39 @@ func NewGate(r *Registry) *Gate { return &Gate{registry: r} }
 
 // Decision 影子判决输入（只取判定所需字段，字符串接口解耦）。
 type Decision struct {
+	TenantID      string
 	ClusterKey    string
 	Severity      string
 	Title         string
-	WouldSuppress bool // noise 影子判决：true = 判定为噪声应拦截
+	WouldSuppress bool // noise 影子判决：true = 判定为窗口内重复，应拦截
+	// Reason 收敛原因（noise.Reason* 取值）：
+	//   "new-incident"  → 放行通知（新事件，人要第一次知道）
+	//   "cluster-merge" → 拦截（同一故障域并入既有簇，通知过一次了）
+	//   "dedup-window"  → 拦截（窗口内重复）
+	// 空串按 new-incident 处理（无指纹/未参与判定的告警：宁可多通知）。
+	Reason string
 }
 
 // Stats 闸门计数。
+// Suppressed 是"未发通知"的总数（窗口去重 + 故障域并入两类之和）——
+// 细分原因看 alert_event 的 payload.reason（每告警一条判决，可对账）。
 type Stats struct{ Suppressed, Dispatched int }
 
-// Admit 判定入口：WouldSuppress=true → 拦截（计数，不发）；false → 放行
+// ShouldNotify 通知判定（W9-2 语义，验收口径"dedup/merge 不重复通知"）：
+// 只有新事件放行；窗口重复与故障域并入都不发通知——一个故障域一个通知，
+// 这正是降噪要交付的价值。
+func ShouldNotify(d Decision) bool {
+	if d.WouldSuppress {
+		return false
+	}
+	switch d.Reason {
+	case "dedup-window", "cluster-merge":
+		return false
+	}
+	return true
+}
+
+// Admit 判定入口：ShouldNotify=false → 拦截（计数，不发）；true → 放行
 // 全渠道。返回是否放行 + 错误（放行失败才算错误；拦截是正常结果）。
 func (g *Gate) Admit(d Decision) (admitted bool, err error) {
 	if strings.TrimSpace(d.ClusterKey) == "" && strings.TrimSpace(d.Title) == "" {
@@ -141,15 +185,18 @@ func (g *Gate) Admit(d Decision) (admitted bool, err error) {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if d.WouldSuppress {
+	if !ShouldNotify(d) {
 		g.suppressed++
 		return false, nil
 	}
-	if err := g.registry.Dispatch(Message{
-		ClusterKey: d.ClusterKey, Title: d.Title,
-		Body:     "cluster " + d.ClusterKey + " 未被降噪判定收敛，需要人工关注",
-		Severity: d.Severity,
-	}); err != nil {
+	err = g.registry.Dispatch(Message{
+		TenantID:   d.TenantID,
+		ClusterKey: d.ClusterKey,
+		Title:      d.Title,
+		Body:       "新事件簇 " + d.ClusterKey + "（降噪后首个告警）需要人工关注",
+		Severity:   d.Severity,
+	})
+	if err != nil {
 		return false, err
 	}
 	g.dispatched++

@@ -57,6 +57,15 @@ type RESTGateway struct {
 	//（与 R6-4"落库形态透出"口径一致）。tenant 为告警查询租户。
 	db     *pgxpool.Pool
 	tenant string
+	// channels 通知渠道配置存储（W9-2；nil = 无 DB，渠道端点 503）。
+	channels *ChannelStore
+	// reloadChannels 渠道写操作后的热重载回调（装配层注入；nil = 不重载）。
+	reloadChannels func() (int, error)
+}
+
+// SetChannels 挂载通知渠道配置存储与重载回调（装配期调用）。
+func (g *RESTGateway) SetChannels(store *ChannelStore, reload func() (int, error)) {
+	g.channels, g.reloadChannels = store, reload
 }
 
 // SetCORSOrigin 设置跨源放行白名单（装配期调用；空串 = 仅同源）。
@@ -131,6 +140,12 @@ func (g *RESTGateway) Register(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/events/stream", h)
 	// 告警中心：影子判决流（与 W6-3 评估同源数据，alerts.jsx 对齐）。
 	mux.Handle("GET /api/v1/alerts", h)
+	// W9-2 通知渠道配置（读 GET 走 CORS 包装；写 POST/DELETE 走独立 handler
+	// 做 Token 鉴权 + requireJSON，与其他写端点一致）。
+	mux.Handle("GET /api/v1/notify/channels", h)
+	mux.HandleFunc("POST /api/v1/notify/channels", g.handleNotifyChannels)
+	mux.HandleFunc("POST /api/v1/notify/channels/{name}/enabled", g.handleNotifyChannelItem)
+	mux.HandleFunc("DELETE /api/v1/notify/channels/{name}", g.handleNotifyChannelItem)
 }
 
 // route 按 path 分发（CORS 包装层之下）。
@@ -146,6 +161,9 @@ func (g *RESTGateway) route(w http.ResponseWriter, r *http.Request) {
 		g.handleEventStream(w, r)
 	case "/api/v1/alerts":
 		g.handleAlerts(w, r)
+	case "/api/v1/notify/channels":
+		// GET 列表（POST 由 mux 精确模式接管，不会进到这里）。
+		g.handleNotifyChannels(w, r)
 	case "/api/v1/incidents":
 		// POST /api/v1/incidents 由 mux 精确模式（method+path）接管，不会进到这里。
 		g.handleIncidents(w, r)

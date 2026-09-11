@@ -25,6 +25,7 @@ import (
 	"opscopilot/internal/connector"
 	pb "opscopilot/internal/contracts/pb"
 	"opscopilot/internal/incident"
+	"opscopilot/internal/notify"
 	"opscopilot/internal/topology"
 )
 
@@ -56,10 +57,38 @@ type Assembly struct {
 	Poller *AlertPoller
 	// Events 实时广播器（W11：控制台事件页 SSE 订阅源）。
 	Events *EventHub
+	// NotifyReg 通知渠道注册表（W9-2）：渠道 CRUD 后由 reloadNotifyChannels
+	// 整体重载；enforce 模式下 Gate 持有同一实例。
+	NotifyReg *notify.Registry
+	// Channels 渠道配置存储（nil = 无 DB，渠道配置不可管）。
+	Channels *ChannelStore
 	// audit 审计日志（人工操作与外部自动动作统一留痕）。
 	audit AuditLog
+	// logf 装配期日志函数（渠道重载等运行期回调需要，nil 安全）。
+	logf func(string, ...any)
 	// pool DB 连接池（事件 Store / 导入队列 / 审计共享；生命周期归装配）。
 	pool *pgxpool.Pool
+}
+
+// reloadNotifyChannels 从 DB 重载启用渠道到注册表（先清后注册：
+// 禁用/删除/改 URL 都不留残影）。装配期与渠道 CRUD 后调用。
+// 返回**生效渠道总数**（含 console 兜底）——运维问的是"现在有几个
+// 渠道在发"，不是"DB 里配了几个"。
+func (a *Assembly) reloadNotifyChannels() (int, error) {
+	if a.NotifyReg == nil {
+		return 0, nil
+	}
+	a.NotifyReg.Clear()
+	// 兜底 console 渠道必须重新挂上（Clear 会连它一起清掉）。
+	a.NotifyReg.Register(&notify.ConsoleChannel{Logf: a.logf})
+	if a.Channels == nil {
+		return a.NotifyReg.Len(), nil
+	}
+	if _, err := loadChannelsIntoRegistry(context.Background(), a.Channels, a.NotifyReg,
+		func(string, ...any) {}); err != nil { // 静默：调用方统一记日志
+		return a.NotifyReg.Len(), err
+	}
+	return a.NotifyReg.Len(), nil
 }
 
 // Close 释放装配持有的资源：先停实时推送（关闭 SSE 连接），再关 DB 池
@@ -134,6 +163,9 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 	var incStore incident.Store = incident.NewMemStore()
 	var audit AuditLog = NewMemAuditLog()
 	var pgPool *pgxpool.Pool
+	// W9-2：通知注册表与渠道存储（channel store 需 DB，注册表恒有）。
+	var notifyReg *notify.Registry
+	var chStore *ChannelStore
 	if dsn := os.Getenv("OPS_DB_DSN"); dsn != "" {
 		// D7 决策 A：显式配置连接池容量。pgx 默认 max(4,NumCPU) 偏小——
 		// 这个池被**事件 Store + 导入队列 + 审计**三方共用，且队列批处理
@@ -164,6 +196,32 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 			}
 		}
 	}
+	// W9-2 通知渠道：DB 为配置真相源，装配期装载启用渠道进注册表；
+	// W9-1 闸门接线（ADR-011）：enforce 才挂（计数用共享池）。顺序要紧：
+	// 先建注册表 → 装渠道 → 挂闸门（Gate 持有同一 registry，CRUD 后
+	// reload 即可生效，无需重建 Gate）。**必须早于 asm 字面量**（否则
+	// Assembly 抓到 nil 注册表——踩过）。
+	notifyReg = notify.NewRegistry()
+	// 兜底渠道：enforce 下零渠道 = 通知静默丢失，console 落日志至少留痕
+	//（运维能在服务日志里看到"本该发出去的告警"）。真实渠道按需叠加。
+	notifyReg.Register(&notify.ConsoleChannel{Logf: logf})
+	webhookChannels := 0
+	if pgPool != nil {
+		chStore = NewChannelStore(pgPool, DefaultTenant)
+		if n, err := loadChannelsIntoRegistry(context.Background(), chStore, notifyReg, logf); err != nil {
+			logf("WARNING: notify channels load failed (console sink only): %v", err)
+		} else {
+			webhookChannels = n
+			if n > 0 {
+				logf("notify channels loaded: %d enabled", n)
+			}
+		}
+	}
+	attachNoiseGate(noiseEngine, notifyReg, pgPool, logf)
+	if noiseEngine != nil && noiseEngine.Mode() == ModeEnforce && webhookChannels == 0 {
+		logf("WARNING: enforce mode with zero webhook channels — notifications are only logged (configure via POST /api/v1/notify/channels)")
+	}
+
 	// W11 实时推送：Hub + 事件 Store 装饰器（写成功即广播）。装饰必须早于
 	// REST 网关与 IngestWorker 构造——worker 的自动建单（链路 A）也要推给
 	// 控制台，否则"外部导入在页面上看不见"。
@@ -188,14 +246,18 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 		REST:      rest,
 		Incidents: incStore,
 		Events:    hub,
+		NotifyReg: notifyReg,
+		Channels:  chStore,
 		audit:     audit,
+		logf:      logf,
 		pool:      pgPool,
 	}
+	// 渠道 CRUD 后热生效：REST 写入配置即回调重载注册表（否则新渠道要
+	// 重启才生效——"配置改了没反应"是运维最恨的一类 bug）。
+	rest.SetChannels(asm.Channels, asm.reloadNotifyChannels)
 
 	// W9 双链路链路 A（外部导入）：入队通道需要 DB 队列（持久化/可积压/可重放）。
 	// 无 DB 时不注册队列——入队端点显式 503（见 Handler），比 404 可诊断。
-	// W9-1 转正（ADR-011）：闸门接线也在装配层（enforce 才挂，计数用共享池）。
-	attachNoiseGate(noiseEngine, pgPool, logf)
 	if pgPool != nil {
 		queue := NewPGIngestQueue(pgPool, DefaultTenant)
 		owner := &QueueOwner{}
