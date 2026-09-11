@@ -15,6 +15,7 @@
 | [ADR-009](ADR-009-listen-security-gate.md) | 监听×写密钥组合启动期 fail-fast 门禁 + CORS 白名单（D1/D2） | 已接受 |
 | [ADR-010](ADR-010-incident-archival.md) | 工单 resolved 满期归档（JSONB 快照），审计随单长留（D8） | 已接受 |
 | [ADR-011](ADR-011-noise-enforce-mode.md) | 影子降噪转正模式开关（`OPS_NOISE_MODE=shadow\|enforce`）+ Gate 计数持久化 | 已接受 |
+| [ADR-012](ADR-012-single-owner-horizontal-scaling.md) | 水平扩展：拓扑单 owner（PG advisory lock 选主）+ 后台循环门禁 + ingest 认领租约 | 已接受 |
 
 ## 写新 ADR 时的检查清单
 
