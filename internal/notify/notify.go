@@ -30,8 +30,9 @@ type Message struct {
 // Notifier 通知渠道接口。
 // 实现契约（R6 审核固化，W10 实渠道必须遵守）：
 //  1. 并发安全；
-//  2. **自带超时**（建议 ≤5s）——Gate.Admit 同步调用 Send，实现若长期
-//     阻塞会拖垮调用方（告警处理路径）；
+//  2. **自带超时**（建议 ≤5s）——Gate.Admit 同步调用 Send（锁外），
+//     实现长期阻塞会拖垮本次放行（告警处理路径），但不再串行化
+//     其余判决；
 //  3. 失败返回 error 由 Gate/调用方计数，不得 panic。
 type Notifier interface {
 	Name() string
@@ -147,20 +148,23 @@ func (r *Registry) Names() []string {
 	return out
 }
 
-// Dispatch 全渠道分发（W9-3：按严重级路由——低于渠道 MinSeverity 的
-// 渠道跳过；单渠道失败不拖累其余；全失败才报错）。
-//
-// 路由跳过不计入错误：通知已由其它渠道送达，且 console 兜底渠道
-// 恒接收全部，不存在"全被路由掉导致静默丢失"的组合。
-func (r *Registry) Dispatch(m Message) error {
+// channelsFor 按严重级快照"应收"渠道列表（复制 slice）：Registry 读锁
+// 只保护查表，Send 一律在调用方锁外执行——渠道网络 IO 不得持有任何锁。
+func (r *Registry) channelsFor(severity string) []Notifier {
 	r.mu.RLock()
+	defer r.mu.RUnlock()
 	chs := make([]Notifier, 0, len(r.channels))
 	for _, c := range r.channels {
-		if channelAccepts(c, m.Severity) {
+		if channelAccepts(c, severity) {
 			chs = append(chs, c)
 		}
 	}
-	r.mu.RUnlock()
+	return chs
+}
+
+// dispatchTo 向快照渠道逐个 Send（单渠道失败不拖累其余；有失败才聚合
+// 报错）。零渠道 = ErrNoChannel（静默丢通知比报错危险）。
+func dispatchTo(chs []Notifier, m Message) error {
 	if len(chs) == 0 {
 		return ErrNoChannel
 	}
@@ -174,6 +178,15 @@ func (r *Registry) Dispatch(m Message) error {
 		return fmt.Errorf("notify: dispatch failures: %s", strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+// Dispatch 全渠道分发（W9-3：按严重级路由——低于渠道 MinSeverity 的
+// 渠道跳过；单渠道失败不拖累其余；全失败才报错）。
+//
+// 路由跳过不计入错误：通知已由其它渠道送达，且 console 兜底渠道
+// 恒接收全部，不存在"全被路由掉导致静默丢失"的组合。
+func (r *Registry) Dispatch(m Message) error {
+	return dispatchTo(r.channelsFor(m.Severity), m)
 }
 
 // Gate 抑制闸门（F-11 核心判定，落地）：影子判决 → 决定放行或拦截。
@@ -223,17 +236,25 @@ func ShouldNotify(d Decision) bool {
 
 // Admit 判定入口：ShouldNotify=false → 拦截（计数，不发）；true → 放行
 // 全渠道。返回是否放行 + 错误（放行失败才算错误；拦截是正常结果）。
+//
+// 锁边界（优化方案 #3）：g.mu 只保护判决 + 计数 + 待发渠道快照，
+// 渠道 Send（网络 IO）全部在锁外执行——单渠道慢响应不再串行化
+// 整个通知出口，也不阻塞 Stats/SetStats。返回值语义不变：Admit
+// 返回时全渠道 Send 已完成（同步投递，调用方据此打端到端延迟点）。
 func (g *Gate) Admit(d Decision) (admitted bool, err error) {
 	if strings.TrimSpace(d.ClusterKey) == "" && strings.TrimSpace(d.Title) == "" {
 		return false, errors.New("notify: empty decision (no cluster/title)")
 	}
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	if !ShouldNotify(d) {
 		g.suppressed++
+		g.mu.Unlock()
 		return false, nil
 	}
-	err = g.registry.Dispatch(Message{
+	chs := g.registry.channelsFor(d.Severity) // 快照复制，锁内不 Send
+	g.mu.Unlock()
+
+	err = dispatchTo(chs, Message{
 		TenantID:   d.TenantID,
 		ClusterKey: d.ClusterKey,
 		Title:      d.Title,
@@ -243,7 +264,9 @@ func (g *Gate) Admit(d Decision) (admitted bool, err error) {
 	if err != nil {
 		return false, err
 	}
+	g.mu.Lock()
 	g.dispatched++
+	g.mu.Unlock()
 	return true, nil
 }
 

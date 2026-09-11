@@ -4,7 +4,9 @@ package notify
 import (
 	"errors"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 type chanStub struct {
@@ -140,5 +142,136 @@ func TestDispatchAllFilteredNoChannel(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("crit channel received %v, want none", got)
+	}
+}
+
+// ---- 优化方案 #3：Gate.Admit 锁边界（渠道网络 IO 不持锁）----
+
+// blockingSendChan 假慢渠道：Send 阻塞直到 release 关闭（模拟单渠道网络
+// 慢响应）。min 严重级路由：info 消息不会被它收走。
+type blockingSendChan struct {
+	name    string
+	min     string
+	entered chan struct{} // Send 进入时关闭一次
+	release chan struct{} // 关闭后 Send 返回
+}
+
+func (c *blockingSendChan) Name() string        { return c.name }
+func (c *blockingSendChan) MinSeverity() string { return c.min }
+func (c *blockingSendChan) Send(m Message) error {
+	select {
+	case <-c.entered: // 只报第一次进入
+	default:
+		close(c.entered)
+	}
+	<-c.release
+	return nil
+}
+
+// countedChan 并发安全计数渠道（不带 SeverityFilter = 全收）。
+type countedChan struct {
+	mu   sync.Mutex
+	name string
+	n    int
+}
+
+func (c *countedChan) Name() string { return c.name }
+func (c *countedChan) Send(m Message) error {
+	c.mu.Lock()
+	c.n++
+	c.mu.Unlock()
+	return nil
+}
+func (c *countedChan) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.n
+}
+
+// TestGateAdmitSendsOutsideLock 慢渠道 Send 期间，闸门锁必须已释放：
+// ① 拦截判决不被串行阻塞；② Stats 不被阻塞；③ 只路由到快渠道的
+// 放行不被慢渠道拖住。修复前（Dispatch 在 g.mu 临界区内）这三条都会
+// 卡到 release 关闭才返回 → 各自 2s 超时判负。
+func TestGateAdmitSendsOutsideLock(t *testing.T) {
+	slow := &blockingSendChan{
+		name: "slow", min: "critical",
+		entered: make(chan struct{}), release: make(chan struct{}),
+	}
+	fast := &countedChan{name: "fast"}
+	r := NewRegistry()
+	r.Register(slow)
+	r.Register(fast)
+	g := NewGate(r)
+
+	admit1 := make(chan error, 1)
+	go func() {
+		_, err := g.Admit(Decision{ClusterKey: "c:slow", Title: "慢渠道阻塞中", Severity: "critical"})
+		admit1 <- err
+	}()
+	select {
+	case <-slow.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("慢渠道 Send 未启动（Admit #1 没走到分发？）")
+	}
+
+	// 慢渠道仍阻塞时，锁必须已交出：三件事都得在毫秒级完成。
+	t.Run("拦截判决不被慢渠道串行", func(t *testing.T) {
+		done := make(chan struct{})
+		go func() {
+			ok, err := g.Admit(Decision{ClusterKey: "c:dup", Title: "dup",
+				WouldSuppress: true, Reason: "dedup-window"})
+			if err != nil || ok {
+				t.Errorf("suppress admit: ok=%v err=%v, want false/nil", ok, err)
+			}
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("拦截判决被慢渠道 Send 阻塞 —— Admit 持锁跨网络 IO")
+		}
+	})
+	t.Run("Stats不被慢渠道阻塞", func(t *testing.T) {
+		done := make(chan Stats)
+		go func() { done <- g.Stats() }()
+		select {
+		case st := <-done:
+			if st.Suppressed != 1 {
+				t.Fatalf("stats = %+v, want suppressed=1", st)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("Stats 被慢渠道 Send 阻塞 —— Admit 持锁跨网络 IO")
+		}
+	})
+	t.Run("快渠道不被慢渠道串行", func(t *testing.T) {
+		done := make(chan error, 1)
+		go func() {
+			// info 被 slow(min=critical) 路由掉 → 只发 fast，不该等慢渠道。
+			_, err := g.Admit(Decision{ClusterKey: "c:fast", Title: "快", Severity: "info"})
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("fast admit: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("快渠道放行被慢渠道 Send 阻塞 —— Admit 持锁跨网络 IO")
+		}
+		// 计数不在这里断言：Admit #1（critical）的快照里 fast 可能排在
+		// slow 之前已先行送达，快照顺序不稳定；总送达数在 release 后校验。
+	})
+
+	close(slow.release)
+	if err := <-admit1; err != nil {
+		t.Fatalf("slow admit: %v", err)
+	}
+	// critical 那单也送达 fast（slow+fast 都收）；计数与放行语义不变。
+	if got := fast.count(); got != 2 {
+		t.Fatalf("fast count = %d, want 2", got)
+	}
+	st := g.Stats()
+	if st.Dispatched != 2 || st.Suppressed != 1 {
+		t.Fatalf("gate stats = %+v, want dispatched=2 suppressed=1", st)
 	}
 }
