@@ -77,7 +77,7 @@ func TestAssemblyWiresIngestEndToEnd(t *testing.T) {
 
 	// 审计留痕（PGAuditLog 经共享池写入）。
 	hasCreate := false
-	for _, e := range asm.audit.List(incID) {
+	for _, e := range mustAuditList(t, asm.audit, incID) {
 		if e.Action == AuditCreate {
 			hasCreate = true
 		}

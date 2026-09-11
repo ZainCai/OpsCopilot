@@ -219,7 +219,15 @@ func (g *RESTGateway) handleAudit(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "audit not wired")
 		return
 	}
-	list := g.audit.List(r.PathValue("id"))
+	list, err := g.audit.List(r.PathValue("id"))
+	if err != nil {
+		// D5 决策 A + 第八轮 D1：审计后端故障必须如实回 500，不能把
+		// "查不到" 当成"没有记录"（空 200 会让人以为这一步没人操作过）。
+		// 细节只进日志——err 含主机/schema/连接信息。
+		g.logf("WARNING: audit list: %v", err)
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"incident_id": r.PathValue("id"), "entries": list, "count": len(list)})
 }
 

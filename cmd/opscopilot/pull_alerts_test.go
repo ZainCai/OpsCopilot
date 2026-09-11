@@ -221,7 +221,7 @@ func TestIngestWorkerHandlesPrometheusOrigin(t *testing.T) {
 	if n := len(mustList(store, "")); n != 1 {
 		t.Fatalf("after reprocess incidents=%d, want 1 (idempotent)", n)
 	}
-	if entries := audit.List(got[0].ID); len(entries) == 0 {
+	if entries := mustAuditList(t, audit, got[0].ID); len(entries) == 0 {
 		t.Fatal("expected audit entry for created incident")
 	}
 }

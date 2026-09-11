@@ -7,11 +7,24 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// ErrAuditUnavailable 审计查询失败的类型化根因（第八轮审核 D1）。
+//
+// 为什么必须类型化：调用方要区分"审计后端故障"与"该事件没有审计记录"——
+// 前者必须回 5xx（D5 决策 A：DB 故障如实暴露），后者是正常的空列表。
+// 此前 PGAuditLog.List 查库失败直接 `return nil`，把**故障静默降级成"没有
+// 记录"**：排障时会得出"这一步没人操作过"这种完全相反的结论，且 200 空响应
+// 掩盖了后端已经不可用的事实。
+//
+// 错误里保留底层原因（%w/%v）供日志排查，客户端只看到脱敏后的 general 500。
+var ErrAuditUnavailable = errors.New("audit: backend unavailable")
 
 // AuditAction 审计动作（对齐 incident_audit.action CHECK）。
 type AuditAction string
@@ -40,9 +53,13 @@ type AuditEntry struct {
 }
 
 // AuditLog 审计写入口（内存/PG 双实现）。
+//
+// Append 刻意不返回错误（审计失败不阻断业务动作，见 PGAuditLog 注释）；
+// List 则**必须**返回错误——读路径要把"后端不可用"与"没有记录"分开，
+// 否则故障会被静默当成空结果（D1）。
 type AuditLog interface {
 	Append(e AuditEntry)
-	List(incidentID string) []AuditEntry
+	List(incidentID string) ([]AuditEntry, error)
 }
 
 // MemAuditLog 内存审计（无 DB 场景；进程重启即丢，与 MemStore 同口径）。
@@ -66,7 +83,9 @@ func (l *MemAuditLog) Append(e AuditEntry) {
 //
 // 返回**深拷贝**：AuditEntry.Detail 是 map（引用类型），浅拷贝会让调用方的
 // 改动写回库内状态，也与并发读构成竞争。
-func (l *MemAuditLog) List(incidentID string) []AuditEntry {
+//
+// 内存实现不会失败，error 恒为 nil（接口统一形态）。
+func (l *MemAuditLog) List(incidentID string) ([]AuditEntry, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	out := []AuditEntry{}
@@ -75,7 +94,7 @@ func (l *MemAuditLog) List(incidentID string) []AuditEntry {
 			out = append(out, cloneAuditEntry(l.entries[i]))
 		}
 	}
-	return out
+	return out, nil
 }
 
 // cloneAuditEntry 深拷贝一条审计（只 Detail 是引用类型）。
@@ -121,7 +140,14 @@ VALUES ($1, $2, $3, $4, $5::jsonb)`,
 }
 
 // List 按事件过滤（倒序，最多 200 条）。
-func (l *PGAuditLog) List(incidentID string) []AuditEntry {
+//
+// 失败一律返回以 ErrAuditUnavailable 为根因的错误（D1）——**不返回半截列表**：
+// 部分数据 + 错误会让调用方在两难中做选择，而"审计轨迹缺几行"在排障场景里
+// 与"没有这几行"无法区分，宁可整体失败让上层回 5xx。
+func (l *PGAuditLog) List(incidentID string) ([]AuditEntry, error) {
+	if l == nil || l.pool == nil {
+		return nil, fmt.Errorf("%w: no database pool", ErrAuditUnavailable)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), ingestTimeout)
 	defer cancel()
 	rows, err := l.pool.Query(ctx, `
@@ -129,7 +155,7 @@ SELECT incident_id, action, actor, detail, occurred_at FROM incident_audit
 WHERE tenant_id=$1 AND ($2='' OR incident_id=$2)
 ORDER BY occurred_at DESC LIMIT 200`, l.tenant, incidentID)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("%w: query: %v", ErrAuditUnavailable, err)
 	}
 	defer rows.Close()
 	out := []AuditEntry{}
@@ -137,10 +163,16 @@ ORDER BY occurred_at DESC LIMIT 200`, l.tenant, incidentID)
 		var e AuditEntry
 		var detail string
 		if err := rows.Scan(&e.IncidentID, &e.Action, &e.Actor, &detail, &e.OccurredAt); err != nil {
-			return out
+			return nil, fmt.Errorf("%w: scan: %v", ErrAuditUnavailable, err)
 		}
 		_ = json.Unmarshal([]byte(detail), &e.Detail)
 		out = append(out, e)
 	}
-	return out
+	// 迭代错误此前也从未检查（rows.Err()）——与吞错是同一类问题：
+	// 中途断连时 rows.Next() 返回 false，循环正常结束，返回一个"看起来
+	// 完整"的短列表。一并修。
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("%w: iterate: %v", ErrAuditUnavailable, err)
+	}
+	return out, nil
 }

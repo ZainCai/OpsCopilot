@@ -258,7 +258,7 @@ func TestMergeEndpointRequiresAuthAndAudits(t *testing.T) {
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("merge: code=%d body=%s", rec2.Code, rec2.Body.String())
 	}
-	entries := asm.REST.audit.List("M2")
+	entries := mustAuditList(t, asm.REST.audit, "M2")
 	if len(entries) != 1 || entries[0].Action != AuditMerge || entries[0].Actor != "ops" {
 		t.Fatalf("audit = %+v, want 1 merge entry by ops", entries)
 	}
@@ -300,7 +300,7 @@ func TestRateLimitFoldsIntoBurstIncident(t *testing.T) {
 	}
 	// 限流动作有审计（3 条被折叠）。
 	limited := 0
-	for _, e := range audit.List("") {
+	for _, e := range mustAuditList(t, audit, "") {
 		if e.Action == AuditRateLimited {
 			limited++
 		}
@@ -379,7 +379,7 @@ func TestTransitionEndpoint(t *testing.T) {
 		t.Fatalf("auto_close_policy = %s, want manual_only (R2)", inc.AutoClosePolicy)
 	}
 	// 审计留痕。
-	entries := asm.REST.audit.List("T1")
+	entries := mustAuditList(t, asm.REST.audit, "T1")
 	if len(entries) != 1 || entries[0].Action != AuditTransition || entries[0].Actor != "ops" {
 		t.Fatalf("audit = %+v, want 1 transition entry by ops", entries)
 	}
@@ -419,7 +419,7 @@ func TestManualCreatePersistsActorAndIngestFallback(t *testing.T) {
 	}
 	// 人工建单留痕（create 审计，与外部单 worker 侧对齐）。
 	audited := false
-	for _, e := range asm.audit.List("MC-1") {
+	for _, e := range mustAuditList(t, asm.audit, "MC-1") {
 		if e.Action == AuditCreate && e.Actor == "zhangsan" {
 			audited = true
 		}
