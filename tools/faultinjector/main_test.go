@@ -112,3 +112,49 @@ func TestScenarioSequencing(t *testing.T) {
 	}
 	t.Fatalf("playbook did not cover all scenarios in time: seen=%v", seen)
 }
+
+// TestCurrentWrapsAcrossCycles 第七轮 W6-3 二轮评估实锤的回归：current()
+// 原实现缺周期回绕，走完一个 totalCycle 后永远钉在场景 A——首个周期
+// 全 PASS、其后静默段持续收到 A 的告警（20.6% 假象的根因）。
+func TestCurrentWrapsAcrossCycles(t *testing.T) {
+	inj := newInjector(1.0, 60) // 6 段 × 300s = 1800s 周期
+	base := inj.startedAt.Add(time.Duration(inj.warmupSec) * time.Second)
+	// 周期回绕边界前后：周期 1 末段是 D，周期 2 首段应回到 A。
+	cases := []struct {
+		afterPlayback time.Duration // 剧本播放起点后多久
+		want          string
+	}{
+		// 剧本顺序（半开区间 [start,start+dur)，边界瞬间归后一段）：
+		//   A[0,300) C[300,600) B[600,900) C[900,1200) D[1200,1500) C[1500,1800)
+		{0 * time.Second, "A"}, {299 * time.Second, "A"}, {300 * time.Second, "C"},
+		{899 * time.Second, "B"}, {900 * time.Second, "C"}, {1200 * time.Second, "D"},
+		{1499 * time.Second, "D"}, {1500 * time.Second, "C"}, {1799 * time.Second, "C"},
+		{1800 * time.Second, "A"}, {2400 * time.Second, "B"}, {3600 * time.Second, "A"},
+		{5400 * time.Second, "A"},
+	}
+	for _, c := range cases {
+		sc, segStart := inj.current(base.Add(c.afterPlayback)) // afterPlayback 已是 Duration
+		if testing.Verbose() {
+			t.Logf("t=+%v -> %s (segStart %v, base %v, startedAt %v)", c.afterPlayback, sc.Code, segStart, base, inj.startedAt)
+		}
+		if sc.Code != c.want {
+			t.Fatalf("t=+%ds: scenario = %s, want %s", c.afterPlayback, sc.Code, c.want)
+		}
+		// 段起点必须落在当前周期的时间线上（不能是 startedAt 原点）。
+		cycle := 1800 * time.Second
+		cycleOff := (c.afterPlayback / cycle) * cycle
+		wantStart := base.Add(cycleOff)
+		rem := c.afterPlayback - cycleOff
+		for _, s := range inj.scenarios {
+			d := time.Duration(s.Duration) * time.Second
+			if rem < d {
+				break
+			}
+			rem -= d
+			wantStart = wantStart.Add(d)
+		}
+		if segStart.Sub(wantStart).Abs() > time.Second {
+			t.Fatalf("t=+%ds: segStart = %v, want ~%v", c.afterPlayback, segStart, wantStart)
+		}
+	}
+}

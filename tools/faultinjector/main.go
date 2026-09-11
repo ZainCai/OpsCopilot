@@ -119,13 +119,22 @@ func (inj *injector) current(now time.Time) (Scenario, time.Time) {
 			Expected: "无告警；opscopilot 完成首轮发现",
 		}, inj.startedAt
 	}
-	elapsed -= inj.warmupSec
-	segStart := inj.startedAt.Add(time.Duration(inj.warmupSec) * time.Second)
+	// 第七轮评估实锤（W6-3 二轮 20.6% 的根因）：此处原实现没有周期回绕——
+	// 走完一个 totalCycle 后落入下方兜底分支，**永远钉在场景 A**（注释写的
+	// "循环取模"从未实现）。表现为：首个周期全 PASS，其后静默段持续收到
+	// A 的告警、后续段全部 new=0。
+	raw := elapsed - inj.warmupSec // 剧本播放起点起算
+	if inj.totalCycle <= 0 || raw < 0 {
+		return inj.scenarios[0], inj.startedAt
+	}
+	cycle := raw / inj.totalCycle   // 第几个周期（0 起）
+	inCycle := raw % inj.totalCycle // 周期内偏移
+	segStart := inj.startedAt.Add(time.Duration(inj.warmupSec+cycle*inj.totalCycle) * time.Second)
 	for _, s := range inj.scenarios {
-		if elapsed < s.Duration {
+		if inCycle < s.Duration {
 			return s, segStart
 		}
-		elapsed -= s.Duration
+		inCycle -= s.Duration
 		segStart = segStart.Add(time.Duration(s.Duration) * time.Second)
 	}
 	return inj.scenarios[0], inj.startedAt // 不可达
