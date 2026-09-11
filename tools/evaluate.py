@@ -21,6 +21,7 @@
 # 输出：控制台报告 + 每段的判定明细；退出码 0=达标(>85%)、1=不达标。
 import argparse
 import json
+import os
 import subprocess
 import sys
 import urllib.request
