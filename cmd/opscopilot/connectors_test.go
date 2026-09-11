@@ -1,10 +1,12 @@
-// W4-1.1 连接器装配测试：锁定 env → 连接器注册的行为契约。
+// W4-1.1 连接器装配测试：锁定"已装载配置 → 连接器注册"的行为契约。
+// （#2/#10：测试改为直接构造 config.ConnectorSection，不再 t.Setenv。）
 package main
 
 import (
 	"log"
 	"testing"
 
+	"opscopilot/internal/config"
 	"opscopilot/internal/credential"
 )
 
@@ -15,9 +17,15 @@ type discardWriter struct{}
 
 func (d *discardWriter) Write(p []byte) (int, error) { return len(p), nil }
 
+// quietConnCfg 空连接器基线（默认周期/超时，与生产默认同源）。
+func quietConnCfg() config.ConnectorSection {
+	d := config.Defaults()
+	return d.Connector
+}
+
 func TestNewConnectorHost_NoEnv(t *testing.T) {
 	creds := credential.NewStore()
-	host, registered, err := newConnectorHost(newQuietLogger(), creds)
+	host, registered, err := newConnectorHost(newQuietLogger(), creds, quietConnCfg(), testTenant)
 	if err != nil {
 		t.Fatalf("no env should not error: %v", err)
 	}
@@ -30,11 +38,12 @@ func TestNewConnectorHost_NoEnv(t *testing.T) {
 }
 
 func TestNewConnectorHost_Prometheus(t *testing.T) {
-	t.Setenv("OPS_PROM_URL", "http://localhost:9090")
-	t.Setenv("OPS_PROM_TOKEN", "test-token")
+	conn := quietConnCfg()
+	conn.PromURL = "http://localhost:9090"
+	conn.PromToken = "test-token"
 
 	creds := credential.NewStore()
-	host, registered, err := newConnectorHost(newQuietLogger(), creds)
+	host, registered, err := newConnectorHost(newQuietLogger(), creds, conn, testTenant)
 	if err != nil {
 		t.Fatalf("prometheus assembly: %v", err)
 	}
@@ -52,9 +61,10 @@ func TestNewConnectorHost_Prometheus(t *testing.T) {
 
 func TestNewConnectorHost_AzureRequiresBoth(t *testing.T) {
 	// 只配订阅 ID 不配令牌：视为未配置该数据源，不注册、不报错。
-	t.Setenv("OPS_AZURE_SUBSCRIPTION_ID", "sub-000")
+	conn := quietConnCfg()
+	conn.AzureSubscriptionID = "sub-000"
 	creds := credential.NewStore()
-	host, registered, err := newConnectorHost(newQuietLogger(), creds)
+	host, registered, err := newConnectorHost(newQuietLogger(), creds, conn, testTenant)
 	if err != nil {
 		t.Fatalf("partial azure env should not error: %v", err)
 	}
@@ -63,8 +73,8 @@ func TestNewConnectorHost_AzureRequiresBoth(t *testing.T) {
 	}
 
 	// 齐备才注册。
-	t.Setenv("OPS_AZURE_TOKEN", "arm-token")
-	host, registered, err = newConnectorHost(newQuietLogger(), creds)
+	conn.AzureToken = "arm-token"
+	host, registered, err = newConnectorHost(newQuietLogger(), creds, conn, testTenant)
 	if err != nil {
 		t.Fatalf("azure assembly: %v", err)
 	}
@@ -80,13 +90,14 @@ func TestNewConnectorHost_AzureRequiresBoth(t *testing.T) {
 }
 
 func TestNewConnectorHost_BothSources(t *testing.T) {
-	t.Setenv("OPS_PROM_URL", "http://prom:9090")
-	t.Setenv("OPS_PROM_TOKEN", "prom-token")
-	t.Setenv("OPS_AZURE_SUBSCRIPTION_ID", "sub-000")
-	t.Setenv("OPS_AZURE_TOKEN", "arm-token")
+	conn := quietConnCfg()
+	conn.PromURL = "http://prom:9090"
+	conn.PromToken = "prom-token"
+	conn.AzureSubscriptionID = "sub-000"
+	conn.AzureToken = "arm-token"
 
 	creds := credential.NewStore()
-	_, registered, err := newConnectorHost(newQuietLogger(), creds)
+	_, registered, err := newConnectorHost(newQuietLogger(), creds, conn, testTenant)
 	if err != nil {
 		t.Fatalf("both-source assembly: %v", err)
 	}

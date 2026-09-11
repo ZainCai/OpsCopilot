@@ -3,46 +3,31 @@
 //
 // 本文件是 connector / topology / noise 三个 internal 模块的唯一汇合点
 // （v1.3 §5.2：internal 禁互 import，编排只落在 cmd/）。
+//
+// #2 配置收敛：本文件不再 os.Getenv——OPS_NOISE_* 的读取、默认值与非法值
+// fail-fast 统一在 internal/config.Load；这里只消费解析好的 config.NoiseSection。
 package main
 
 import (
-	"os"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"opscopilot/internal/config"
 	"opscopilot/internal/connector"
 	"opscopilot/internal/noise"
 	"opscopilot/internal/notify"
 )
 
-// 影子降噪环境变量。
+// 降噪模式常量（env 解析与白名单校验在 config；这里保留运行期比对取值）。
+// shadow——只标注不拦截，告警全量放行（影子纪律）；
+// enforce——WouldSuppress 判决交给 Gate 真拦截 + 放行通知（W9-1，ADR-011）。
+// 判决落库两种模式都在跑——enforce 首周与 shadow 双跑对比的数据基础。
 const (
-	// envNoiseWindow 聚类/去重时间窗（Go duration，如 10m；默认 10m）。
-	envNoiseWindow = "OPS_NOISE_WINDOW"
-	// envNoiseShadow 影子开关："off" 关闭采集侧降噪处理（默认开）。
-	// 关闭 = 完全不处理（连影子判决都不产生），回到 W3 只计数行为。
-	envNoiseShadow = "OPS_NOISE_SHADOW"
-	// envNoiseMode 降噪模式（W9-1 转正，ADR-011）：
-	//   shadow（默认）——只标注不拦截，告警全量放行（影子纪律）；
-	//   enforce —— WouldSuppress 判决交给 Gate 真拦截 + 放行通知；
-	// 非法值启动失败（与 OPS_NOISE_WINDOW 同纪律：静默回退会让运维
-	// 以为配置生效了）。判决落库两种模式都在跑——enforce 首周
-	// shadow 双跑对比的数据基础（ADR-011）。
-	envNoiseMode = "OPS_NOISE_MODE"
+	ModeShadow  = config.NoiseModeShadow
+	ModeEnforce = config.NoiseModeEnforce
 )
-
-// 降噪模式常量。
-const (
-	ModeShadow  = "shadow"
-	ModeEnforce = "enforce"
-)
-
-// defaultNoiseWindow 影子期默认窗口：30s 采集轮询下，10 分钟足以覆盖
-// 同一故障的重复告警，又不至于把相隔较远的两次独立故障并成一簇。
-const defaultNoiseWindow = 10 * time.Minute
 
 // NoiseEngine 影子降噪引擎的 cmd 侧持有者。
 // 并发安全：内部互斥——域函数快照重建与 Process 串行化（采集宿主当前
@@ -56,13 +41,14 @@ type NoiseEngine struct {
 	// total / converged 影子统计（启动以来累计）。
 	total, converged int
 	// tenant 租户标识（M1 单租户；落库记录与键空间前缀用）。
+	// #10：由装配层构造参数显式注入，取代原包级变量 DefaultTenant
+	// （init 读 env 的全局态：测试内 Setenv 改不动、跨测试互相污染）。
 	tenant string
 	// records 簇落库出口（W4-1.5，可选；nil = 只跑影子不落库）。
 	records noise.RecordSink
 	// verdicts 逐告警判决落库出口（W6-1 评估数据链，可选）。
 	verdicts noise.VerdictSink
 	// saveFailures / verdictFailures 落库失败累计（不中断告警链路）。
-	//
 	// W9-5（第八轮审核建议 11）：改 atomic.Uint64。这两个计数在**锁外**自增
 	// （persistClusters / persistVerdicts 都在 n.mu.Unlock() 之后运行），
 	// 此前是裸 int++——采集宿主与任何潜在并发调用方同时进入就是数据竞争
@@ -91,53 +77,26 @@ type NoiseEngine struct {
 	m *AppMetrics
 }
 
-// DefaultTenant M1 单租户缺省值（alert_cluster.tenant_id 对齐）。
-//
-// 可用 OPS_TENANT 覆盖。动机：评估/演示环境常需与既有数据隔离——
-// 本机 8080/19090 上还有一组旧实例在持续写判决，新评估若同租户会互相
-// 污染时间窗。改为包级 var（进程启动时读一次 env），测试不受影响
-// （不设 OPS_TENANT 即得 "default"）。
-var DefaultTenant = func() string {
-	if v := strings.TrimSpace(os.Getenv("OPS_TENANT")); v != "" {
-		return v
-	}
-	return "default"
-}()
-
-// NewNoiseEngine 按 env 构造。返回 nil 表示影子降噪关闭（envNoiseShadow=off），
-// 调用方须容忍 nil（挂载点与 ProcessAlerts 均做 nil 检查）。
-// 窗口解析失败视为配置错误返回 error——静默回退默认值会让运维以为
-// 配置生效了。
-func NewNoiseEngine(sink *TopologySink, logger connector.Logger) (*NoiseEngine, error) {
-	if os.Getenv(envNoiseShadow) == "off" {
-		return nil, nil
-	}
-	window := defaultNoiseWindow
-	if raw := os.Getenv(envNoiseWindow); raw != "" {
-		d, err := time.ParseDuration(raw)
-		if err != nil || d <= 0 {
-			return nil, &invalidNoiseWindowError{raw: raw, err: err}
-		}
-		window = d
-	}
-	mode := ModeShadow
-	if raw := strings.TrimSpace(os.Getenv(envNoiseMode)); raw != "" {
-		switch strings.ToLower(raw) {
-		case ModeShadow, ModeEnforce:
-			mode = strings.ToLower(raw)
-		default:
-			return nil, &invalidNoiseModeError{raw: raw}
-		}
+// NewNoiseEngine 按显式参数构造（#2：env 读取与非法值 fail-fast 已在
+// config.Load 完成，构造函数不触环境；#4 测试直接构造参数、不依赖全局 env）。
+// spec.Enabled=false 时返回 nil，表示影子降噪整体关闭（OPS_NOISE_SHADOW=off，
+// 连影子判决都不产生，回到 W3 只计数行为）——调用方须容忍 nil
+// （挂载点与 ProcessAlerts 均做 nil 检查）。
+// spec.Window 默认 10m：30s 采集轮询下，10 分钟足以覆盖同一故障的重复告警，
+// 又不至于把相隔较远的两次独立故障并成一簇。
+func NewNoiseEngine(sink *TopologySink, logger connector.Logger, tenant string, spec config.NoiseSection) *NoiseEngine {
+	if !spec.Enabled {
+		return nil
 	}
 	return &NoiseEngine{
-		shadow:       noise.NewShadow(window, nil), // 域函数按批经 SetDomain 注入
+		shadow:       noise.NewShadow(spec.Window, nil), // 域函数按批经 SetDomain 注入
 		sink:         sink,
 		enabled:      true,
 		logger:       logger,
-		tenant:       DefaultTenant,
+		tenant:       tenant,
 		persistedSig: make(map[string]string),
-		enforce:      mode == ModeEnforce,
-	}, nil
+		enforce:      spec.Mode == ModeEnforce,
+	}
 }
 
 // SetRecordSink 挂载簇落库出口（W4-1.5 双写管道）。传 nil 卸载。
@@ -160,27 +119,6 @@ func (n *NoiseEngine) SetVerdictSink(vs noise.VerdictSink) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.verdicts = vs
-}
-
-type invalidNoiseWindowError struct {
-	raw string
-	err error
-}
-
-// Error 对 err == nil 容错（第四轮扫描 F1）：值非法（如 "0s"）与解析
-// 失败都会走到这里——前者没有底层 err，直接解引用会 panic，
-// 把配置错误变成进程崩溃而非干净的启动失败。
-func (e *invalidNoiseWindowError) Error() string {
-	if e.err == nil {
-		return "noise: invalid " + envNoiseWindow + " " + e.raw + ": must be a positive duration"
-	}
-	return "noise: invalid " + envNoiseWindow + " " + e.raw + ": " + e.err.Error()
-}
-
-type invalidNoiseModeError struct{ raw string }
-
-func (e *invalidNoiseModeError) Error() string {
-	return "noise: invalid " + envNoiseMode + " " + e.raw + ": must be \"shadow\" or \"enforce\""
 }
 
 // GateStatsSink Gate 拦截/放行计数的真相源出口（R6-6：转正后拦截数是

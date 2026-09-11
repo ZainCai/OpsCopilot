@@ -29,7 +29,7 @@ func (g *RESTGateway) handleCreateIncident(w http.ResponseWriter, r *http.Reques
 		writeErr(w, http.StatusServiceUnavailable, "incident store not wired")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, incidentBodyLimit)
+	r.Body = http.MaxBytesReader(w, r.Body, g.limits.IncidentBodyLimit)
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeErr(w, http.StatusRequestEntityTooLarge, "body too large")
@@ -108,7 +108,7 @@ func (g *RESTGateway) handleDuplicates(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	cands := incident.SimilarCandidates(target, all, dedupWindow)
+	cands := incident.SimilarCandidates(target, all, g.limits.DedupWindow)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"incident_id": id, "candidates": cands, "count": len(cands),
 		"auto_merge": false, // 契约声明：本系统永不自动合并
@@ -129,7 +129,7 @@ func (g *RESTGateway) handleMergeIncident(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusServiceUnavailable, "incident store not wired")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, incidentBodyLimit)
+	r.Body = http.MaxBytesReader(w, r.Body, g.limits.IncidentBodyLimit)
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeErr(w, http.StatusRequestEntityTooLarge, "body too large")
@@ -173,7 +173,7 @@ func (g *RESTGateway) handleTransitionIncident(w http.ResponseWriter, r *http.Re
 		writeErr(w, http.StatusServiceUnavailable, "incident store not wired")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, incidentBodyLimit)
+	r.Body = http.MaxBytesReader(w, r.Body, g.limits.IncidentBodyLimit)
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeErr(w, http.StatusRequestEntityTooLarge, "body too large")

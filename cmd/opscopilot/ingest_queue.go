@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"opscopilot/internal/config"
 	"opscopilot/internal/incident"
 )
 
@@ -34,15 +35,20 @@ const ingestTimeout = 5 * time.Second
 // 重复建单，但重放会重复走 ExternalActive/applyRateLimit，极端下把重放计成
 // 新建、提前折叠进 burst 单。单条最坏路径 ≈ ExternalActive + UpsertExternal
 // （+ 恢复语 Transition）三次 5s 语句超时 ≈ 15s，故超时随批量线性放大。
+// perItem（15s/条）与批量下限/封顶都收敛为 config 的默认值（#10 去魔法数字），
+// 装配层经 OPS_INGEST_BATCH_TIMEOUT_PER_ITEM 可调。
 //
 // 注意：整批一个事务的前提是**单 worker**（多 worker 也安全——FOR UPDATE
 // SKIP LOCKED 各领各的——但"行锁覆盖处理全程"的互斥语义只在单连接池内成立）。
 // 多实例部署时需改为按条短事务（列入 M2）。
-func batchTimeoutFor(batch int) time.Duration {
+func batchTimeoutFor(batch int, perItem time.Duration) time.Duration {
 	if batch <= 0 {
-		batch = 20
+		batch = config.DefaultIngestBatch
 	}
-	d := time.Duration(batch) * 15 * time.Second
+	if perItem <= 0 {
+		perItem = config.DefaultIngestBatchPerItem
+	}
+	d := time.Duration(batch) * perItem
 	if d < 30*time.Second {
 		d = 30 * time.Second
 	}
@@ -60,11 +66,16 @@ const maxIngestAttempts = 5
 type PGIngestQueue struct {
 	pool   *pgxpool.Pool
 	tenant string
+	// batchPerItem 批超时随批量线性放大的单条系数（config.Ingest.BatchTimeoutPerItem）。
+	batchPerItem time.Duration
 }
 
-// NewPGIngestQueue 构造。
-func NewPGIngestQueue(pool *pgxpool.Pool, tenant string) *PGIngestQueue {
-	return &PGIngestQueue{pool: pool, tenant: tenant}
+// NewPGIngestQueue 构造。batchPerItem<=0 时回退 config 默认（15s/条）。
+func NewPGIngestQueue(pool *pgxpool.Pool, tenant string, batchPerItem time.Duration) *PGIngestQueue {
+	if batchPerItem <= 0 {
+		batchPerItem = config.DefaultIngestBatchPerItem
+	}
+	return &PGIngestQueue{pool: pool, tenant: tenant, batchPerItem: batchPerItem}
 }
 
 // Enqueue 入队：待处理态 (tenant, origin, source_ref) 唯一索引兜底，
@@ -102,7 +113,7 @@ type Item struct {
 // 失败语义：单条失败只累加 attempts（事务照常提交），不因一条坏消息回滚整批；
 // 达 maxIngestAttempts 后该行不再被领取（死信，attempts/last_error 留存可查）。
 func (q *PGIngestQueue) processBatch(limit int, process func(Item) error) (int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), batchTimeoutFor(limit))
+	ctx, cancel := context.WithTimeout(context.Background(), batchTimeoutFor(limit, q.batchPerItem))
 	defer cancel()
 	tx, err := q.pool.Begin(ctx)
 	if err != nil {
@@ -184,18 +195,21 @@ type IngestWorker struct {
 }
 
 // NewIngestWorker 构造。autoCreate=false 时 Run 立即返回（不消费）。
+// interval/batch/rateLimit/rateWindow 传零值时回退 config 默认（与
+// OPS_INGEST_* 缺省值同源，#10 单一定义）。
 func NewIngestWorker(q *PGIngestQueue, s incident.Store, audit AuditLog, interval time.Duration, batch int, autoCreate bool, rateLimit int, rateWindow time.Duration, logf func(string, ...any)) *IngestWorker {
 	if interval <= 0 {
-		interval = 5 * time.Second
+		interval = config.DefaultIngestInterval
 	}
 	if batch <= 0 {
-		batch = 20
+		batch = config.DefaultIngestBatch
 	}
 	if rateLimit <= 0 {
-		rateLimit = 50 // 默认：5 分钟内最多建 50 单，其余进聚合单
+		// 默认：5 分钟内最多建 50 单，其余进聚合单（R1 建单风暴）。
+		rateLimit = config.DefaultIngestRateLimit
 	}
 	if rateWindow <= 0 {
-		rateWindow = 5 * time.Minute
+		rateWindow = config.DefaultIngestRateWindow
 	}
 	if logf == nil { // nil logger 容忍（测试/嵌入式场景不再空指针）
 		logf = func(string, ...any) {}

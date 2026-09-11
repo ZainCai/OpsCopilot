@@ -9,21 +9,25 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"opscopilot/internal/config"
 )
 
 // TestNewHTTPServerTimeouts 超时口径：三个超时必须都在，且 **ReadTimeout 必须
 // 保持 0**——Go 会把读截止时间覆盖到整个请求，长连接期间的后台读超时会被当作
 // 读错误并取消 request context，SSE 会被服务端主动掐断（见 newHTTPServer 注释）。
+// 超时值唯一来源是 config.MetricsSection（#10 单一定义），断言取 config 默认。
 func TestNewHTTPServerTimeouts(t *testing.T) {
-	srv := newHTTPServer("127.0.0.1:0", http.NewServeMux())
-	if srv.ReadHeaderTimeout != httpReadHeaderTimeout {
-		t.Fatalf("ReadHeaderTimeout = %v, want %v", srv.ReadHeaderTimeout, httpReadHeaderTimeout)
+	m := config.Defaults().Metrics
+	srv := newHTTPServer(m, "127.0.0.1:0", http.NewServeMux())
+	if srv.ReadHeaderTimeout != m.HTTPReadHeaderTimeout {
+		t.Fatalf("ReadHeaderTimeout = %v, want %v", srv.ReadHeaderTimeout, m.HTTPReadHeaderTimeout)
 	}
-	if srv.WriteTimeout != httpWriteTimeout {
-		t.Fatalf("WriteTimeout = %v, want %v", srv.WriteTimeout, httpWriteTimeout)
+	if srv.WriteTimeout != m.HTTPWriteTimeout {
+		t.Fatalf("WriteTimeout = %v, want %v", srv.WriteTimeout, m.HTTPWriteTimeout)
 	}
-	if srv.IdleTimeout != httpIdleTimeout {
-		t.Fatalf("IdleTimeout = %v, want %v", srv.IdleTimeout, httpIdleTimeout)
+	if srv.IdleTimeout != m.HTTPIdleTimeout {
+		t.Fatalf("IdleTimeout = %v, want %v", srv.IdleTimeout, m.HTTPIdleTimeout)
 	}
 	if srv.ReadTimeout != 0 {
 		t.Fatalf("ReadTimeout must stay 0 (it would cancel long-lived SSE streams), got %v", srv.ReadTimeout)

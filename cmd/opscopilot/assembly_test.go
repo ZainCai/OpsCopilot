@@ -14,7 +14,7 @@ import (
 
 func newTestAssembly(t *testing.T) *Assembly {
 	t.Helper()
-	a, err := NewAssembly(nil, "")
+	a, err := NewAssembly(nil, testAssemblyConfig(""))
 	if err != nil {
 		t.Fatalf("NewAssembly: %v", err)
 	}
@@ -23,7 +23,7 @@ func newTestAssembly(t *testing.T) *Assembly {
 
 func TestAssembly_WebhookTokenWired(t *testing.T) {
 	// S1：装配层必须把共享密钥接到 webhook（写路径准入）。
-	a, err := NewAssembly(nil, "s3cret")
+	a, err := NewAssembly(nil, testAssemblyConfig("s3cret"))
 	if err != nil {
 		t.Fatal(err)
 	}

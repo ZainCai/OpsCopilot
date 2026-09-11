@@ -10,20 +10,20 @@
 //   - ChangeWebhook：POST /api/v1/changes 手动提交变更事件。
 //
 // 装配放在 cmd/（package main）：跨模块引用的唯一合法汇合点（v1.3 §5.2）。
+// #2 配置收敛：本文件不再 os.Getenv——全部配置经 NewAssembly 的 cfg 参数注入，
+// env 解析与非法值 fail-fast 唯一发生在 internal/config.Load。
 package main
 
 import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"os"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
 
+	"opscopilot/internal/config"
 	"opscopilot/internal/connector"
 	pb "opscopilot/internal/contracts/pb"
 	"opscopilot/internal/incident"
@@ -41,7 +41,7 @@ type Assembly struct {
 	// 启动回放），否则纯内存 ChangeStore——消费方只认 topology.ChangeBackend。
 	Changes topology.ChangeBackend
 	Webhook *ChangeWebhook
-	// Noise 影子降噪引擎（W4-1.4）；nil = envNoiseShadow=off 已关闭。
+	// Noise 影子降噪引擎（W4-1.4）；nil = Noise.Enabled=false 已关闭。
 	Noise *NoiseEngine
 	// GRPC 进程内 gRPC server（W5-2.1）：承载 SemanticModel 服务，
 	// 供 transport.DialInProcess 消费。生命周期归 main（Stop 必调，
@@ -110,24 +110,21 @@ func (a *Assembly) Close() {
 	}
 }
 
-// NewAssembly 组装 W3+W4+W5 组件并接线。
+// NewAssembly 组装 W3+W4+W5 组件并接线。配置唯一来源是 cfg（#2）：
 //
-// webhookToken：变更 webhook 的共享密钥；非空时 POST /api/v1/changes
-// 必须携带匹配的 X-OpsCopilot-Token 头（S1 写路径准入）。传空表示
-// 不鉴权——仅限回环/内网部署。
+//   - cfg.Security.WebhookToken：变更 webhook 的共享密钥；非空时
+//     POST /api/v1/changes 必须携带匹配的 X-OpsCopilot-Token 头
+//     （S1 写路径准入）。传空表示不鉴权——仅限回环/内网部署。
+//   - cfg.Noise：影子降噪开关/窗口/模式（非法值已在 config.Load 拒绝启动，
+//     装配层不再处理解析错误）。
+//   - cfg.DB：共享连接池（DSN 空 = 内存降级；MaxConns 默认 16——事件 Store +
+//     导入队列 + 审计三方共用，worker 批处理持一条事务连接再做 Store 写需要
+//     第二条；pgx 默认 max(4,NumCPU) 在并发下易耗尽，D7 决策 A）。
+//   - cfg.Tenant：全链路租户（#10：取代包级 DefaultTenant，显式注入）。
 //
 // 变更库的节点校验钩子经 Sink.HasNode（锁内读图）实现——变更事件只能
 // 关联到拓扑图里真实存在的节点，防止"幽灵节点"静默失败。
-//
-// 影子降噪（W4-1.4）：OPS_NOISE_SHADOW=off 可整体关闭；OPS_NOISE_WINDOW
-// 配置去重/聚类时间窗（默认 10m，解析失败启动失败）。
-//
-// dbDefaultMaxConns 共享连接池默认上限（D7 决策 A）：事件 Store + 导入队列 +
-// 审计三方共用，worker 批处理持一条事务连接再做 Store 写需要第二条；
-// pgx 默认 max(4,NumCPU) 在并发下易耗尽。可用 OPS_DB_MAX_CONNS 覆盖。
-const dbDefaultMaxConns = 16
-
-func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error) {
+func NewAssembly(logger connector.Logger, cfg *config.Config) (*Assembly, error) {
 	// nil logger 容忍（装配测试惯用 nil）：本函数内日志一律走 logf，
 	// 不再直接调 logger.Printf，避免 nil logger 触发空指针。
 	logf := func(format string, args ...any) {
@@ -135,6 +132,7 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 			logger.Printf(format, args...)
 		}
 	}
+	tenant := cfg.Tenant
 	builder := topology.NewBuilder()
 	sink, err := NewTopologySink(builder, logger)
 	if err != nil {
@@ -145,10 +143,7 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 
 	// 影子降噪：挂在 sink 上（告警经 IngestCollect 转交），引擎持有
 	// sink 引用做拓扑快照——互相引用只能后挂（见 AttachNoise 注释）。
-	noiseEngine, err := NewNoiseEngine(sink, logger)
-	if err != nil {
-		return nil, err
-	}
+	noiseEngine := NewNoiseEngine(sink, logger, tenant, cfg.Noise)
 	sink.AttachNoise(noiseEngine)
 
 	// W9-4 延迟打点集：挂在噪声引擎上——告警→判决→通知全链路都在它手里，
@@ -159,43 +154,31 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 
 	// W5-2.2：REST 只读查询面（复用 SemanticModelServer 的校验与映射，
 	// gRPC/REST 一套语义不漂移）。M2 主干：事件 Store 同源挂载。
-	// W9：事件 Store 双实现——OPS_DB_DSN 设置用 TimescaleDB（重启不丢），
-	// 否则内存（Persistence 标注提醒）。pg 池错误不阻塞启动（降级内存）。
-	// 事件 Store 双实现；DB 可用时事件 Store / 导入队列 / 审计 / 变更库**共用
-	// 一条池**（R9：多池各占连接无收益）。pg 不可用不阻塞启动（降级内存，
-	// Persistence 字段提醒消费者；见 R6-4）。
+	// W9：事件 Store 双实现；DB 可用时事件 Store / 导入队列 / 审计 / 变更库
+	// **共用一条池**（R9：多池各占连接无收益）。pg 不可用不阻塞启动
+	// （降级内存，Persistence 字段提醒消费者；见 R6-4）。
 	var incStore incident.Store = incident.NewMemStore()
 	var audit AuditLog = NewMemAuditLog()
 	var pgPool *pgxpool.Pool
 	// W9-2：通知注册表与渠道存储（channel store 需 DB，注册表恒有）。
 	var notifyReg *notify.Registry
 	var chStore *ChannelStore
-	if dsn := os.Getenv("OPS_DB_DSN"); dsn != "" {
-		// D7 决策 A：显式配置连接池容量。pgx 默认 max(4,NumCPU) 偏小——
-		// 这个池被**事件 Store + 导入队列 + 审计**三方共用，且队列批处理
-		// 会持一条连接（事务）再做 Store 写，压测下易"等连接直到超时"。
-		poolCfg, err := pgxpool.ParseConfig(dsn)
+	if cfg.DB.DSN != "" {
+		// D7 决策 A：显式配置连接池容量（cfg.DB.MaxConns，config 已校验正数）。
+		poolCfg, err := pgxpool.ParseConfig(cfg.DB.DSN)
 		if err != nil {
 			logf("WARNING: db pool unavailable (bad DSN, incident memory only): %v", err)
 		} else {
-			if raw := strings.TrimSpace(os.Getenv("OPS_DB_MAX_CONNS")); raw != "" {
-				if n, e := strconv.Atoi(raw); e == nil && n > 0 {
-					poolCfg.MaxConns = int32(n)
-				} else {
-					logf("WARNING: invalid OPS_DB_MAX_CONNS %q — using pgx default", raw)
-				}
-			} else {
-				poolCfg.MaxConns = dbDefaultMaxConns
-			}
+			poolCfg.MaxConns = int32(cfg.DB.MaxConns)
 			pool, err := pgxpool.NewWithConfig(context.Background(), poolCfg)
 			if err != nil {
 				logf("WARNING: db pool unavailable (incident memory only): %v", err)
-			} else if pgInc, err := incident.NewPGStoreWithPool(context.Background(), pool, DefaultTenant); err != nil {
+			} else if pgInc, err := incident.NewPGStoreWithPool(context.Background(), pool, tenant); err != nil {
 				logf("WARNING: incident pg store unavailable (memory only): %v", err)
 				pool.Close()
 			} else {
 				pgPool, incStore = pool, pgInc
-				audit = NewPGAuditLog(pool, DefaultTenant, logf) // 审计随真相源持久化
+				audit = NewPGAuditLog(pool, tenant, logf) // 审计随真相源持久化
 				logf("incident persistence: timescaledb (shared pool: store+queue+audit+changes, max_conns=%d)", poolCfg.MaxConns)
 			}
 		}
@@ -205,18 +188,14 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 	// 则包一层 PGChangeStore（PG=真相源、内存=读缓存）并**启动回放**保留窗
 	// 内的历史证据：重启不丢 RCA 取证输入。回放失败只 WARNING、继续纯内存
 	// ——变更持久化故障绝不阻塞启动（与事件 Store 同款降级纪律）。
-	// 回放窗口与 OPS_CHANGE_RETENTION（清理器保留窗）对齐：两侧同窗，
-	// "回放读到的"与"清理保留的"才一致（off = 不清理，则全量回放）。
+	// 回放窗口与 OPS_CHANGE_RETENTION（清理器保留窗）对齐（cfg.Topology，
+	// #4 新读取已并入 schema）：两侧同窗，"回放读到的"与"清理保留的"才
+	// 一致（off = 不清理，则全量回放）。
 	memChanges := topology.NewChangeStore(sink.HasNode)
 	var changes topology.ChangeBackend = memChanges
 	if pgPool != nil {
-		pg := topology.NewPGChangeStore(memChanges, pgPool, DefaultTenant, logf)
-		window, on, err := ParseRetentionDefault(os.Getenv(envChangeRetention), changeRetentionDefault)
-		if err != nil {
-			// 非法配置由 main 的 NewChangePrunerFromEnv fail-fast 拦截；
-			// 装配这里按默认窗口回放，不重复报错。
-			window, on = changeRetentionDefault, true
-		}
+		pg := topology.NewPGChangeStore(memChanges, pgPool, tenant, logf)
+		window, on := cfg.Topology.ChangeWindow, cfg.Topology.ChangeEnabled
 		since := time.Time{}
 		if on {
 			since = time.Now().Add(-window)
@@ -236,7 +215,8 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 	if err != nil {
 		return nil, err
 	}
-	hook.Token = webhookToken
+	hook.Token = cfg.Security.WebhookToken
+	hook.MaxBodyBytes = cfg.Metrics.ChangeBodyLimit
 
 	// W5-2.1：SemanticModel gRPC 服务（进程内形态，契约测试经
 	// transport.DialInProcess 回环验证；独立进程形态只换 Dial 实现）。
@@ -255,7 +235,7 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 	notifyReg.Register(&notify.ConsoleChannel{Logf: logf})
 	webhookChannels := 0
 	if pgPool != nil {
-		chStore = NewChannelStore(pgPool, DefaultTenant)
+		chStore = NewChannelStore(pgPool, tenant)
 		if n, err := loadChannelsIntoRegistry(context.Background(), chStore, notifyReg, logf); err != nil {
 			logf("WARNING: notify channels load failed (console sink only): %v", err)
 		} else {
@@ -286,15 +266,22 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 	// 控制台，否则"外部导入在页面上看不见"。
 	hub := NewEventHub()
 	incStore = NewPublishStore(incStore, hub)
-	rest := NewRESTGateway(noiseEngine, semantic, incStore, webhookToken, audit, hub)
-	// D2 决策 B+C：跨源放行改为显式白名单（默认不设置 = 仅同源）；
-	// "*" 与非法形态直接让装配失败（第七轮 M2：不能让错误配置静默生效）。
-	if err := rest.SetCORSOrigin(os.Getenv("OPS_CORS_ORIGIN")); err != nil {
+	rest := NewRESTGateway(noiseEngine, semantic, incStore, cfg.Security.WebhookToken, audit, hub,
+		RESTLimits{
+			DedupWindow:       cfg.Noise.DedupWindow,
+			IncidentBodyLimit: cfg.Metrics.IncidentBodyLimit,
+			NotifyBodyLimit:   cfg.Metrics.NotifyBodyLimit,
+		})
+	// D2 决策 B+C：跨源放行改为显式白名单（默认不设置 = 仅同源）。
+	// 合法性校验已在 config.Load 前置（"*"/畸形值启动失败）；SetCORSOrigin
+	// 再校验一遍同源规则，装配期错误仍然拒绝启动（第七轮 M2：不能让错误
+	// 配置静默生效）。
+	if err := rest.SetCORSOrigin(cfg.Security.CORSOrigin); err != nil {
 		return nil, err
 	}
 	rest.SetLogf(logf)
 	// 告警中心数据源（仅 DB 部署有值；内存态该端点 503 并透出口径）。
-	rest.SetDB(pgPool, DefaultTenant)
+	rest.SetDB(pgPool, tenant)
 
 	asm := &Assembly{
 		Sink:      sink,
@@ -318,90 +305,69 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 
 	// W9-3 值班升级：未 ack 超时重发一次。需事件 Store（读 open）+ 通知
 	// 注册表（出口）。台账优先 PG（多实例安全），无库降级内存并告警。
-	asm.Escalation = buildEscalationPoller(asm.Incidents, asm.NotifyReg, pgPool, logf)
+	asm.Escalation = buildEscalationPoller(cfg, asm.Incidents, asm.NotifyReg, pgPool, logf)
 
 	// W9 双链路链路 A（外部导入）：入队通道需要 DB 队列（持久化/可积压/可重放）。
 	// 无 DB 时不注册队列——入队端点显式 503（见 Handler），比 404 可诊断。
 	if pgPool != nil {
-		queue := NewPGIngestQueue(pgPool, DefaultTenant)
+		queue := NewPGIngestQueue(pgPool, tenant, cfg.Ingest.BatchTimeoutPerItem)
 		owner := &QueueOwner{}
 		owner.SetWriter(queue)
-		autoCreate := strings.EqualFold(strings.TrimSpace(os.Getenv("OPS_INCIDENT_AUTOCREATE")), "on")
 		asm.Queue = queue
-		asm.Ingest = &AlertmanagerWebhook{Owner: owner, Token: webhookToken, Tenant: DefaultTenant}
-		asm.Worker = NewIngestWorker(queue, incStore, audit, 0, 0, autoCreate, 0, 0, logf)
-		// W11 拉取侧：OPS_PULL_ALERTS=on 且配了源地址时启用（需 DB 队列）。
+		asm.Ingest = &AlertmanagerWebhook{Owner: owner, Token: cfg.Security.WebhookToken,
+			Tenant: tenant, BodyLimit: cfg.Ingest.AlertBodyLimit}
+		asm.Worker = NewIngestWorker(queue, incStore, audit, cfg.Ingest.Interval, cfg.Ingest.Batch,
+			cfg.Ingest.AutoCreate, cfg.Ingest.RateLimit, cfg.Ingest.RateWindow, logf)
+		// W11 拉取侧：Pull.Enabled 且配了源地址时启用（需 DB 队列）。
 		// 未配置即空转——不因"没接拉取源"而报错，骨架照常可用。
-		asm.Poller = buildAlertPoller(owner, logf)
+		asm.Poller = buildAlertPoller(cfg, owner, logf)
 	} else {
 		logf("WARNING: external import disabled (set OPS_DB_DSN to enable ingest queue)")
 	}
 	return asm, nil
 }
 
-// buildAlertPoller 按环境变量装配拉取调度器（未启用返回 nil）。
+// buildAlertPoller 按已装载的配置装配拉取调度器（未启用返回 nil）。
 //
 //	OPS_PULL_ALERTS=on        启用（默认关；避免与 push 并存时重复导入）
-//	OPS_PROM_URL              源地址（复用连接器同款 env）
+//	OPS_PROM_URL              源地址（复用连接器同款配置，见 ConnectorSection）
 //	OPS_PROM_TOKEN            可选 Bearer
-//	OPS_PULL_INTERVAL         轮询周期（默认 30s；非法值告警后取默认）
-func buildAlertPoller(owner *QueueOwner, logf func(string, ...any)) *AlertPoller {
-	if !strings.EqualFold(strings.TrimSpace(os.Getenv("OPS_PULL_ALERTS")), "on") {
+//	OPS_PULL_INTERVAL         轮询周期（默认 30s；非法值在 config.Load 即失败）
+func buildAlertPoller(cfg *config.Config, owner *QueueOwner, logf func(string, ...any)) *AlertPoller {
+	if !cfg.Pull.Enabled {
 		return nil
 	}
-	url := strings.TrimSpace(os.Getenv("OPS_PROM_URL"))
+	url := cfg.Connector.PromURL
 	if url == "" {
 		logf("WARNING: OPS_PULL_ALERTS=on but OPS_PROM_URL unset — alert pull disabled")
 		return nil
 	}
-	interval := 30 * time.Second
-	if raw := strings.TrimSpace(os.Getenv("OPS_PULL_INTERVAL")); raw != "" {
-		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
-			interval = d
-		} else {
-			logf("WARNING: invalid OPS_PULL_INTERVAL %q — using 30s", raw)
-		}
-	}
-	src := NewPrometheusAlertsSource(url, os.Getenv("OPS_PROM_TOKEN"))
-	return NewAlertPoller(src, owner, incident.OriginPrometheus, interval, logf)
+	src := NewPrometheusAlertsSource(url, cfg.Connector.PromToken, cfg.Ingest.AlertBodyLimit)
+	return NewAlertPoller(src, owner, incident.OriginPrometheus, cfg.Pull.Interval, logf)
 }
 
-// buildEscalationPoller 按环境变量装配值班升级调度器（未启用返回 nil）。
+// buildEscalationPoller 按已装载的配置装配值班升级调度器（未启用返回 nil）。
 //
 //	OPS_ESCALATION=on         启用（默认关；避免"没人管"在配置不当时刷通知）
-//	OPS_ESCALATION_AFTER      创建后多久未 ack 触发升级（默认 15m；非法值告警取默认）
-//	OPS_ESCALATION_INTERVAL   扫描周期（默认 60s；非法值告警取默认）
+//	OPS_ESCALATION_AFTER      创建后多久未 ack 触发升级（默认 15m；非法值启动失败）
+//	OPS_ESCALATION_INTERVAL   扫描周期（默认 60s；非法值启动失败）
 //
 // 台账优先 PG（incident_escalation 主键幂等，多实例安全）；无库退化为内存
 // 台账（重启即丢、仅单实例正确）——显式告警，不让运维误以为已持久化。
-func buildEscalationPoller(store incident.Store, dispatcher EscalationDispatcher, pool *pgxpool.Pool, logf func(string, ...any)) *EscalationPoller {
-	if !strings.EqualFold(strings.TrimSpace(os.Getenv("OPS_ESCALATION")), "on") {
+func buildEscalationPoller(cfg *config.Config, store incident.Store, dispatcher EscalationDispatcher,
+	pool *pgxpool.Pool, logf func(string, ...any)) *EscalationPoller {
+	if !cfg.Notify.EscalationEnabled {
 		return nil
 	}
-	after := parseDurEnv("OPS_ESCALATION_AFTER", 15*time.Minute, logf)
-	interval := parseDurEnv("OPS_ESCALATION_INTERVAL", 60*time.Second, logf)
 	var ledger EscalationLedger
 	if pool != nil {
-		ledger = newPGEscalationLedger(pool, DefaultTenant)
+		ledger = newPGEscalationLedger(pool, cfg.Tenant)
 	} else {
 		logf("WARNING: escalation ledger is in-memory (no DB) — restart loses state, single-instance only")
 		ledger = newMemEscalationLedger()
 	}
-	return NewEscalationPoller(store, dispatcher, ledger, DefaultTenant, after, interval, logf)
-}
-
-// parseDurEnv 解析 duration 型环境变量（空/非法 → 取默认并告警）。
-func parseDurEnv(key string, def time.Duration, logf func(string, ...any)) time.Duration {
-	raw := strings.TrimSpace(os.Getenv(key))
-	if raw == "" {
-		return def
-	}
-	d, err := time.ParseDuration(raw)
-	if err != nil || d <= 0 {
-		logf("WARNING: invalid %s %q — using %v", key, raw, def)
-		return def
-	}
-	return d
+	return NewEscalationPoller(store, dispatcher, ledger, cfg.Tenant,
+		cfg.Notify.EscalationAfter, cfg.Notify.EscalationInterval, logf)
 }
 
 // Handler 装配 HTTP 路由：

@@ -76,8 +76,9 @@ func TestAuditEndpointSurfacesBackendFailure(t *testing.T) {
 	if dsn == "" {
 		t.Skip("OPS_TEST_PG_DSN not set")
 	}
-	t.Setenv("OPS_DB_DSN", dsn)
-	asm, err := NewAssembly(newQuietLogger(), "")
+	cfg := testAssemblyConfig("")
+	cfg.DB.DSN = dsn // #2：DSN 经 Config 注入，测试不依赖全局 env
+	asm, err := NewAssembly(newQuietLogger(), cfg)
 	if err != nil {
 		t.Fatalf("assembly: %v", err)
 	}

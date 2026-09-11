@@ -88,12 +88,8 @@ func TestRedisSinkLoadDeterministicOrder(t *testing.T) {
 // 从落库记录重建 → 继续喂告警命中同一批 cluster_key。
 // 对应生产场景"清 Redis 后从真相源拉平"，本测试用 miniredis 扮演存储侧。
 func TestClearMemoryAndRebuild(t *testing.T) {
-	t.Setenv("OPS_NOISE_WINDOW", "10m")
 	sink := noiseTestSink(t)
-	engine, err := NewNoiseEngine(sink, newQuietLogger())
-	if err != nil {
-		t.Fatalf("engine: %v", err)
-	}
+	engine := newTestNoiseEngine(t, sink)
 	rdb, _ := newTestRedis(t)
 	engine.SetRecordSink(NewRedisClusterSink(rdb, "default"))
 
@@ -109,10 +105,7 @@ func TestClearMemoryAndRebuild(t *testing.T) {
 	}
 
 	// ---- 模拟"清 Redis / 进程重启"：全新引擎（内存为空），从存储侧拉平 ----
-	engine2, err := NewNoiseEngine(sink, newQuietLogger())
-	if err != nil {
-		t.Fatalf("engine2: %v", err)
-	}
+	engine2 := newTestNoiseEngine(t, sink)
 	records, err := NewRedisClusterSink(rdb, "default").LoadClusters(context.Background())
 	if err != nil {
 		t.Fatalf("load for rebuild: %v", err)
@@ -141,8 +134,7 @@ func TestClearMemoryAndRebuild(t *testing.T) {
 // TestRebuildInvalidRecordsRejected 重建的防线：空 key / 重复 key 拒绝，
 // 且失败后内存状态不变。
 func TestRebuildInvalidRecordsRejected(t *testing.T) {
-	t.Setenv("OPS_NOISE_WINDOW", "10m")
-	engine, _ := NewNoiseEngine(noiseTestSink(t), newQuietLogger())
+	engine := newTestNoiseEngine(t, noiseTestSink(t))
 	// 先留一个正常状态。
 	engine.shadow.Process(noise.Event{Fingerprint: "fpKeep", OccurredAt: time.Now()})
 
@@ -161,8 +153,7 @@ func TestRebuildInvalidRecordsRejected(t *testing.T) {
 }
 
 func TestPersistFailureDoesNotBreakAlertPath(t *testing.T) {
-	t.Setenv("OPS_NOISE_WINDOW", "10m")
-	engine, _ := NewNoiseEngine(noiseTestSink(t), newQuietLogger())
+	engine := newTestNoiseEngine(t, noiseTestSink(t))
 	engine.SetRecordSink(failSink{})
 	// 落库全失败：处理照常，统计照常，不 panic。
 	engine.ProcessAlerts([]connector.Alert{

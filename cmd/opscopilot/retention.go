@@ -16,8 +16,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -46,45 +44,13 @@ type RetentionSweeper struct {
 }
 
 // NewRetentionSweeper 构造。retention<=0 表示关闭（Run 立即返回）。
+// retention 由 config.Load 解析（OPS_INCIDENT_RETENTION，默认 90d，off 关闭；
+// 解析实现与非法值 fail-fast 唯一在 internal/config，见 config.ParseRetention）。
 func NewRetentionSweeper(pool *pgxpool.Pool, tenant string, retention time.Duration, logf func(string, ...any)) *RetentionSweeper {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
 	return &RetentionSweeper{pool: pool, tenant: tenant, retention: retention, logf: logf}
-}
-
-// retentionDefault 保留期默认值（D8 决策 C：工单 resolved 后 90 天归档）。
-const retentionDefault = 90 * 24 * time.Hour
-
-// ParseRetention 解析保留期配置：接受 Go duration（"2160h"）或 "<N>d"（天数，
-// 如 "90d"）；"off"/"0" 表示关闭。**空值 = 默认 90d（决策 C 的默认行为）**。
-// 非法值返回错误（调用方 fail-fast）。
-func ParseRetention(raw string) (time.Duration, bool, error) {
-	return ParseRetentionDefault(raw, retentionDefault)
-}
-
-// ParseRetentionDefault 同 ParseRetention，但显式给定"空值时的默认保留期"。
-//
-// 抽出动机（W9-5）：变更事件库的保留窗（见 change_prune.go）口径与工单
-// 归档完全相同——接受 duration / "<N>d" / off——只是默认值不同（7d vs 90d）。
-// 两处各写一份解析必然漂移（"7d" 只在一处被支持这类差异），故共用实现。
-func ParseRetentionDefault(raw string, def time.Duration) (time.Duration, bool, error) {
-	raw = strings.TrimSpace(strings.ToLower(raw))
-	switch raw {
-	case "", "-":
-		return def, true, nil
-	case "off", "0", "never":
-		return 0, false, nil
-	}
-	if d, err := time.ParseDuration(raw); err == nil {
-		return d, true, nil
-	}
-	if strings.HasSuffix(raw, "d") {
-		if n, err := strconv.Atoi(strings.TrimSuffix(raw, "d")); err == nil && n > 0 {
-			return time.Duration(n) * 24 * time.Hour, true, nil
-		}
-	}
-	return 0, false, fmt.Errorf("invalid retention %q (want a duration like 168h/2160h, days like 7d/90d, or off)", raw)
 }
 
 // Run 周期归档；首轮延迟一分钟（避开启动风暴），ctx 取消即退出。

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"opscopilot/internal/config"
 	"opscopilot/internal/connector"
 	"opscopilot/internal/topology"
 )
@@ -17,7 +18,13 @@ import (
 // restTest 起带种子数据的装配，返回 handler。
 func restTest(t *testing.T) (*Assembly, http.Handler) {
 	t.Helper()
-	asm, err := NewAssembly(newQuietLogger(), "")
+	return restTestWith(t, testAssemblyConfig(""))
+}
+
+// restTestWith 同 restTest，但由调用方直接给配置（#10：测试不依赖 env）。
+func restTestWith(t *testing.T, cfg *config.Config) (*Assembly, http.Handler) {
+	t.Helper()
+	asm, err := NewAssembly(newQuietLogger(), cfg)
 	if err != nil {
 		t.Fatalf("assembly: %v", err)
 	}
@@ -173,8 +180,9 @@ func TestRESTChangesEndpoint(t *testing.T) {
 }
 
 func TestRESTClustersDisabledWhenNoiseOff(t *testing.T) {
-	t.Setenv("OPS_NOISE_SHADOW", "off")
-	_, h := restTest(t)
+	cfg := testAssemblyConfig("")
+	cfg.Noise.Enabled = false // #2/#10：参数直注（OPS_NOISE_SHADOW=off 的等价配置）
+	_, h := restTestWith(t, cfg)
 
 	code, body := getJSON(t, h, "/api/v1/clusters")
 	if code != http.StatusServiceUnavailable || body["error"] == nil {
@@ -257,8 +265,9 @@ func TestAlertsEndpointPG(t *testing.T) {
 	if dsn == "" {
 		t.Skip("OPS_TEST_PG_DSN not set — alerts integration skipped")
 	}
-	t.Setenv("OPS_DB_DSN", dsn)
-	asm, err := NewAssembly(newQuietLogger(), "")
+	cfg := testAssemblyConfig("")
+	cfg.DB.DSN = dsn // #2：DSN 经 Config 注入
+	asm, err := NewAssembly(newQuietLogger(), cfg)
 	if err != nil {
 		t.Fatalf("assembly: %v", err)
 	}
@@ -272,7 +281,7 @@ func TestAlertsEndpointPG(t *testing.T) {
 INSERT INTO alert_event (tenant_id, cluster_key, fingerprint, source, occurred_at, payload)
 VALUES ($1, 'c:alertstest', $2, 'shadow', now(),
   '{"reason":"new-incident","summary":"HighDiskUsage","severity":"critical","node_key":"prometheus://nodes/n1"}'::jsonb)`,
-		DefaultTenant, fp); err != nil {
+		testTenant, fp); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 

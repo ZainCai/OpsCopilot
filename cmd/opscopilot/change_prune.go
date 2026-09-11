@@ -17,32 +17,18 @@ package main
 
 import (
 	"context"
-	"os"
 	"time"
 
+	"opscopilot/internal/config"
 	"opscopilot/internal/topology"
 )
 
-// 变更库清理的环境变量。
-const (
-	// envChangeRetention 保留窗（Go duration 或 "<N>d"；默认 7d；off 关闭）。
-	envChangeRetention = "OPS_CHANGE_RETENTION"
-	// envChangePruneInterval 清理周期（默认 1h）。
-	envChangePruneInterval = "OPS_CHANGE_PRUNE_INTERVAL"
-)
+// changePruneStartupDelay 首轮延迟：避开启动风暴（与 retention 同）。
+const changePruneStartupDelay = time.Minute
 
-const (
-	// changeRetentionDefault 默认保留窗：7 天（见文件头）。
-	changeRetentionDefault = 7 * 24 * time.Hour
-	// changePruneIntervalDefault 默认清理周期。变更事件量级小，每小时一次
-	// 足够；频率再高只是徒增一次 O(n) 遍历。
-	changePruneIntervalDefault = time.Hour
-	// changePruneStartupDelay 首轮延迟：避开启动风暴（与 retention 同）。
-	changePruneStartupDelay = time.Minute
-	// changeStoreWarnSize 容量告警阈值。超过它说明保留窗配得过长或写入
-	// 速率异常——内存 map 的膨胀是不可回收的，必须在日志里看得见。
-	changeStoreWarnSize = 100000
-)
+// changeStoreWarnSize 容量告警阈值。超过它说明保留窗配得过长或写入
+// 速率异常——内存 map 的膨胀是不可回收的，必须在日志里看得见。
+const changeStoreWarnSize = 100000
 
 // ChangePruner 变更事件库的周期清理器。
 // 持 ChangeBackend 接口：PG 持久化后端（优化方案 #4）的 PruneBefore
@@ -62,42 +48,15 @@ func NewChangePruner(store topology.ChangeBackend, retention, interval time.Dura
 	return &ChangePruner{store: store, retention: retention, interval: interval, logf: logf}
 }
 
-// NewChangePrunerFromEnv 按环境变量构造。
-//
-//	OPS_CHANGE_RETENTION       保留窗，默认 7d；off/0 关闭
-//	OPS_CHANGE_PRUNE_INTERVAL  清理周期，默认 1h
-//
-// 两者任一非法即返回错误（fail-fast，与保留策略解析同纪律：静默回退会让
-// 运维以为配置生效了）。
-func NewChangePrunerFromEnv(store topology.ChangeBackend, logf func(string, ...any)) (*ChangePruner, error) {
-	retention, on, err := ParseRetentionDefault(os.Getenv(envChangeRetention), changeRetentionDefault)
-	if err != nil {
-		return nil, err
+// NewChangePrunerFromConfig 按已装载的配置构造清理器（#2：env 读取与
+// 非法值 fail-fast 收敛进 config.Load——OPS_CHANGE_RETENTION 默认 7d、
+// off 关闭；OPS_CHANGE_PRUNE_INTERVAL 默认 1h；原"非法即启动失败"的
+// fail-fast 纪律由聚合报错统一承接，构造函数不再返回 error）。
+func NewChangePrunerFromConfig(store topology.ChangeBackend, topo config.TopologySection, logf func(string, ...any)) *ChangePruner {
+	if !topo.ChangeEnabled {
+		return NewChangePruner(nil, 0, 0, logf)
 	}
-	if !on {
-		return NewChangePruner(nil, 0, 0, logf), nil
-	}
-	interval := changePruneIntervalDefault
-	if raw := os.Getenv(envChangePruneInterval); raw != "" {
-		d, err := time.ParseDuration(raw)
-		if err != nil || d <= 0 {
-			return nil, &invalidChangePruneIntervalError{raw: raw, err: err}
-		}
-		interval = d
-	}
-	return NewChangePruner(store, retention, interval, logf), nil
-}
-
-type invalidChangePruneIntervalError struct {
-	raw string
-	err error
-}
-
-func (e *invalidChangePruneIntervalError) Error() string {
-	if e.err == nil {
-		return "change prune: invalid " + envChangePruneInterval + " " + e.raw + ": must be a positive duration"
-	}
-	return "change prune: invalid " + envChangePruneInterval + " " + e.raw + ": " + e.err.Error()
+	return NewChangePruner(store, topo.ChangeWindow, topo.ChangePruneInterval, logf)
 }
 
 // Run 周期清理；首轮延迟一分钟（避开启动风暴），ctx 取消即退出。

@@ -1,6 +1,7 @@
 // noise_gate_assembly_test.go W9-1 运行态验证：装配级 enforce 闸门
 // ——告警经 TopologySink.IngestCollect 真实链路进闸门（"组件写了+
 // 单测过了 ≠ 运行态生效"纪律：接线必须有测试）。
+// （#2/#10：模式/窗口经 Config 参数直注，测试不动全局 env。）
 package main
 
 import (
@@ -16,9 +17,10 @@ import (
 // NoiseEngine → Gate）新指纹放行、窗口重复拦截；shadow 装配闸门为零。
 // 无 DB（计数内存态）——持久化语义由 noise_gate_pg_test 单独覆盖。
 func TestAssemblyEnforceGateWiring(t *testing.T) {
-	t.Setenv("OPS_NOISE_MODE", "enforce")
-	t.Setenv("OPS_NOISE_WINDOW", "10m")
-	asm, err := NewAssembly(newQuietLogger(), "tok")
+	cfg := testAssemblyConfig("tok")
+	cfg.Noise.Mode = ModeEnforce
+	cfg.Noise.Window = 10 * time.Minute // 与原 OPS_NOISE_WINDOW=10m 等价
+	asm, err := NewAssembly(newQuietLogger(), cfg)
 	if err != nil {
 		t.Fatalf("assembly: %v", err)
 	}
@@ -53,8 +55,7 @@ func TestAssemblyEnforceGateWiring(t *testing.T) {
 
 // TestAssemblyShadowNoGate 影子装配：闸门不挂（默认模式行为与 M1 一致）。
 func TestAssemblyShadowNoGate(t *testing.T) {
-	t.Setenv("OPS_NOISE_MODE", "")
-	asm, err := NewAssembly(newQuietLogger(), "tok")
+	asm, err := NewAssembly(newQuietLogger(), testAssemblyConfig("tok")) // 默认 shadow
 	if err != nil {
 		t.Fatalf("assembly: %v", err)
 	}
@@ -69,28 +70,29 @@ func TestAssemblyShadowNoGate(t *testing.T) {
 // TestAssemblyEnforceGatePGPersistence enforce + DB：闸门计数经共享池
 // 真实落库（migrations/000011），装配断言无 gap。
 //
-// 密闭性：DefaultTenant 是包 init 时读 env 的 var，测试内 Setenv 改不动
-// ——本测试以 default 租户写库，**必须先清零再装配**（NewAssembly 的
-// SetGate 会恢复历史累计，装配后清零已经晚了）。
+// 密闭性：租户由 Config 注入（#10 去 DefaultTenant 全局）——本测试以
+// default 租户写库，**必须先清零再装配**（NewAssembly 的 SetGate 会恢复
+// 历史累计，装配后清零已经晚了）。
 func TestAssemblyEnforceGatePGPersistence(t *testing.T) {
 	dsn := os.Getenv("OPS_TEST_PG_DSN")
 	if dsn == "" {
 		t.Skip("OPS_TEST_PG_DSN not set")
 	}
-	t.Setenv("OPS_DB_DSN", dsn)
-	t.Setenv("OPS_NOISE_MODE", "enforce")
-	t.Setenv("OPS_NOISE_WINDOW", "10m")
+	cfg := testAssemblyConfig("tok")
+	cfg.DB.DSN = dsn
+	cfg.Noise.Mode = ModeEnforce
+	cfg.Noise.Window = 10 * time.Minute
 
 	// 装配前清零历史累计（default 租户行可能由上次运行写入）。
 	pre := pgSinkForTest(t)
 	gsPre := &pgPoolGateStats{pool: pre.pool}
-	tenant := DefaultTenant
+	tenant := testTenant
 	if err := gsPre.SaveGateStats(tenant, notify.Stats{}); err != nil {
 		t.Fatalf("pre-clean: %v", err)
 	}
 	t.Cleanup(func() { _ = gsPre.SaveGateStats(tenant, notify.Stats{}) })
 
-	asm, err := NewAssembly(newQuietLogger(), "tok")
+	asm, err := NewAssembly(newQuietLogger(), cfg)
 	if err != nil {
 		t.Fatalf("assembly: %v", err)
 	}

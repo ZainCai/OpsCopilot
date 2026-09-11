@@ -16,17 +16,28 @@ import (
 	"strings"
 	"time"
 
+	"opscopilot/internal/config"
 	"opscopilot/internal/incident"
 )
-
-// amWebhookBodyLimit AM 通知体上限（一批告警可能上百条，给 4MiB）。
-const amWebhookBodyLimit = 4 << 20
 
 // AlertmanagerWebhook AM webhook 接收器。
 type AlertmanagerWebhook struct {
 	Token  string // 共享密钥；非空时请求须携带匹配头（401 拒绝）
 	Tenant string
 	Owner  *QueueOwner // 队列写入口（nil = 只校验不入队，测试用）
+	// BodyLimit 通知体字节上限（一批告警可能上百条，默认 4MiB）。
+	// #10：与拉取侧响应上限共用 config 的**单一定义**
+	// （config.DefaultAlertBodyLimit / OPS_INGEST_ALERT_BODY_LIMIT）；
+	// 零值回退该默认（测试直接构造结构体的路径不改语义）。
+	BodyLimit int64
+}
+
+// bodyLimit 生效上限（零值回退 config 默认，同源单一定义）。
+func (h *AlertmanagerWebhook) bodyLimit() int64 {
+	if h.BodyLimit > 0 {
+		return h.BodyLimit
+	}
+	return config.DefaultAlertBodyLimit
 }
 
 type queueWriter = interface {
@@ -84,7 +95,7 @@ func (h *AlertmanagerWebhook) handle(w http.ResponseWriter, r *http.Request, ori
 		writeErr(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, amWebhookBodyLimit)
+	r.Body = http.MaxBytesReader(w, r.Body, h.bodyLimit())
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeErr(w, http.StatusRequestEntityTooLarge, "body too large")

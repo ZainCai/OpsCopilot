@@ -1,10 +1,14 @@
-// W4-1.4 cmd 接线测试：env 解析 + 拓扑域函数端到端 + Sink 挂载。
+// W4-1.4 cmd 接线测试：配置注入 + 拓扑域函数端到端 + Sink 挂载。
+// （#2/#10：env 解析与非法值 fail-fast 收敛进 internal/config；本文件改为
+// 直接构造 config.NoiseSection 参数，不再 t.Setenv。）
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 
+	"opscopilot/internal/config"
 	"opscopilot/internal/connector"
 	"opscopilot/internal/noise"
 	"opscopilot/internal/topology"
@@ -33,41 +37,76 @@ func noiseTestSink(t *testing.T) *TopologySink {
 	return sink
 }
 
+// noiseSpec 降噪配置基线（默认开、10m 窗、shadow）+ 按需覆写。
+func noiseSpec(mut func(*config.NoiseSection)) config.NoiseSection {
+	s := config.Defaults().Noise
+	if mut != nil {
+		mut(&s)
+	}
+	return s
+}
+
+// newTestNoiseEngine 构造默认启用的引擎（窗口 10m，与 config 默认同源）。
+func newTestNoiseEngine(t *testing.T, sink *TopologySink) *NoiseEngine {
+	t.Helper()
+	ne := NewNoiseEngine(sink, newQuietLogger(), testTenant, noiseSpec(nil))
+	if ne == nil {
+		t.Fatal("expected enabled engine")
+	}
+	return ne
+}
+
 func TestNewNoiseEngineOff(t *testing.T) {
-	t.Setenv("OPS_NOISE_SHADOW", "off")
-	ne, err := NewNoiseEngine(noiseTestSink(t), newQuietLogger())
-	if err != nil {
-		t.Fatalf("off mode must not error: %v", err)
-	}
+	ne := NewNoiseEngine(noiseTestSink(t), newQuietLogger(), testTenant,
+		noiseSpec(func(s *config.NoiseSection) { s.Enabled = false }))
 	if ne != nil {
-		t.Fatal("OPS_NOISE_SHADOW=off must yield nil engine")
+		t.Fatal("Enabled=false must yield nil engine")
 	}
 }
 
-func TestNewNoiseEngineInvalidWindow(t *testing.T) {
-	t.Setenv("OPS_NOISE_WINDOW", "not-a-duration")
-	if _, err := NewNoiseEngine(noiseTestSink(t), newQuietLogger()); err == nil {
-		t.Fatal("invalid window must fail loudly, not silently default")
-	}
-}
-
+// TestNewNoiseEngineDefaultWindow 默认构造：启用、shadow、10m 窗。
 func TestNewNoiseEngineDefaultWindow(t *testing.T) {
-	ne, err := NewNoiseEngine(noiseTestSink(t), newQuietLogger())
-	if err != nil || ne == nil {
-		t.Fatalf("default construction: (%v, %v)", ne, err)
-	}
+	ne := newTestNoiseEngine(t, noiseTestSink(t))
 	if !ne.Enabled() {
 		t.Fatal("engine must be enabled by default")
+	}
+	if ne.Mode() != ModeShadow {
+		t.Fatalf("mode = %q, want shadow", ne.Mode())
+	}
+}
+
+// TestNoiseInvalidValuesFailAtLoad 非法窗口/模式（原 NewNoiseEngine 的
+// 构造期错误，含 F1 "0s 不得 panic" 回归）现由 config.Load 聚合 fail-fast。
+func TestNoiseInvalidValuesFailAtLoad(t *testing.T) {
+	env := func(m map[string]string) config.LookupFunc {
+		return func(k string) (string, bool) { v, ok := m[k]; return v, ok }
+	}
+	base := map[string]string{
+		config.EnvRedisAlertAddr: "127.0.0.1:6380",
+		config.EnvRedisCacheAddr: "127.0.0.1:6381",
+	}
+	for _, c := range []struct {
+		key, val, want string
+	}{
+		{config.EnvNoiseWindow, "not-a-duration", "OPS_NOISE_WINDOW"},
+		{config.EnvNoiseWindow, "0s", "OPS_NOISE_WINDOW"}, // F1：零值同样干净拒绝，不 panic
+		{config.EnvNoiseMode, "yolo", "OPS_NOISE_MODE"},
+	} {
+		m := map[string]string{}
+		for k, v := range base {
+			m[k] = v
+		}
+		m[c.key] = c.val
+		_, err := config.LoadFrom(env(m))
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Fatalf("%s=%q: want error mentioning %s, got %v", c.key, c.val, c.want, err)
+		}
 	}
 }
 
 func TestProcessAlertsDomainMergeEndToEnd(t *testing.T) {
-	t.Setenv("OPS_NOISE_WINDOW", "10m")
 	sink := noiseTestSink(t)
-	ne, err := NewNoiseEngine(sink, newQuietLogger())
-	if err != nil {
-		t.Fatalf("engine: %v", err)
-	}
+	ne := newTestNoiseEngine(t, sink)
 	now := time.Now()
 	alerts := []connector.Alert{
 		{Fingerprint: "fpA", Labels: map[string]string{"instance": "i1", "alertname": "HighCPU"}, Severity: "warning", StartsAt: now},
@@ -104,8 +143,7 @@ func TestProcessAlertsDomainMergeEndToEnd(t *testing.T) {
 }
 
 func TestProcessAlertsEmptyFingerprintUsesFallback(t *testing.T) {
-	t.Setenv("OPS_NOISE_WINDOW", "10m")
-	ne, _ := NewNoiseEngine(noiseTestSink(t), newQuietLogger())
+	ne := newTestNoiseEngine(t, noiseTestSink(t))
 	now := time.Now()
 	ne.ProcessAlerts([]connector.Alert{
 		{Labels: map[string]string{"instance": "i1", "alertname": "X"}, StartsAt: now},
@@ -118,8 +156,7 @@ func TestProcessAlertsEmptyFingerprintUsesFallback(t *testing.T) {
 }
 
 func TestProcessAlertsUnknownInstanceNoNodeKey(t *testing.T) {
-	t.Setenv("OPS_NOISE_WINDOW", "10m")
-	ne, _ := NewNoiseEngine(noiseTestSink(t), newQuietLogger())
+	ne := newTestNoiseEngine(t, noiseTestSink(t))
 	now := time.Now()
 	// instance 不在拓扑里 → NodeKey 空 → 只能靠指纹/不聚类，不 panic。
 	ne.ProcessAlerts([]connector.Alert{
@@ -134,16 +171,12 @@ func TestProcessAlertsUnknownInstanceNoNodeKey(t *testing.T) {
 // TestSinkIngestCollectTriggersNoise 端到端：Host 投递路径
 // IngestCollect → NoiseEngine 自动转交（挂载生效）。
 func TestSinkIngestCollectTriggersNoise(t *testing.T) {
-	t.Setenv("OPS_NOISE_WINDOW", "10m")
 	sink := noiseTestSink(t)
-	ne, err := NewNoiseEngine(sink, newQuietLogger())
-	if err != nil {
-		t.Fatalf("engine: %v", err)
-	}
+	ne := newTestNoiseEngine(t, sink)
 	sink.AttachNoise(ne)
 
 	now := time.Now()
-	err = sink.IngestCollect(nil, &connector.CollectResult{
+	err := sink.IngestCollect(nil, &connector.CollectResult{
 		Alerts: []connector.Alert{
 			{Fingerprint: "fp1", Labels: map[string]string{"instance": "i1"}, StartsAt: now},
 			{Fingerprint: "fp1", Labels: map[string]string{"instance": "i1"}, StartsAt: now.Add(time.Minute)},
@@ -186,20 +219,6 @@ func TestNilEngineTolerated(t *testing.T) {
 
 // ---- 第四轮扫描修复回归 ----
 
-// TestInvalidWindowZeroNoPanic F1 回归：OPS_NOISE_WINDOW="0s"（解析成功
-// 但值非法）时 Error() 不得因 nil err 解引用而 panic。
-func TestInvalidWindowZeroNoPanic(t *testing.T) {
-	t.Setenv("OPS_NOISE_WINDOW", "0s")
-	ne, err := NewNoiseEngine(noiseTestSink(t), newQuietLogger())
-	if err == nil {
-		t.Fatal("zero window must be rejected")
-	}
-	if ne != nil {
-		t.Fatal("engine must be nil on config error")
-	}
-	_ = err.Error() // 触发格式化——修复前这里 panic
-}
-
 // countingSink 记录 SaveCluster 调用次数（F3 签名去重验证）。
 type countingSink struct {
 	calls int
@@ -210,8 +229,7 @@ func (c *countingSink) SaveCluster(noise.ClusterRecord) error { c.calls++; retur
 // TestPersistSignatureDedup F3 回归：状态未变的簇不重复落库；
 // 状态变化（新告警）后才再次落库。
 func TestPersistSignatureDedup(t *testing.T) {
-	t.Setenv("OPS_NOISE_WINDOW", "10m")
-	engine, _ := NewNoiseEngine(noiseTestSink(t), newQuietLogger())
+	engine := newTestNoiseEngine(t, noiseTestSink(t))
 	cs := &countingSink{}
 	engine.SetRecordSink(cs)
 
@@ -245,8 +263,7 @@ func TestPersistSignatureDedup(t *testing.T) {
 // TestPersistFailureRollsBackSignature G1 回归：Save 失败回滚签名，
 // 下一批必须重试补写（修复前签名已标记成功，失败写入永不补齐）。
 func TestPersistFailureRollsBackSignature(t *testing.T) {
-	t.Setenv("OPS_NOISE_WINDOW", "10m")
-	engine, _ := NewNoiseEngine(noiseTestSink(t), newQuietLogger())
+	engine := newTestNoiseEngine(t, noiseTestSink(t))
 
 	// 先让一批失败：签名应被回滚。
 	flaky := &flakySink{fail: true}
@@ -288,8 +305,7 @@ func (f *flakySink) SaveCluster(rec noise.ClusterRecord) error {
 // TestZeroStartsAtFallback G2 回归：startsAt 缺失（零值）的告警兜底为
 // 当前时刻——不进 1970 桶、不被去重吞掉。
 func TestZeroStartsAtFallback(t *testing.T) {
-	t.Setenv("OPS_NOISE_WINDOW", "10m")
-	engine, _ := NewNoiseEngine(noiseTestSink(t), newQuietLogger())
+	engine := newTestNoiseEngine(t, noiseTestSink(t))
 
 	// 两条同指纹、均零值 StartsAt 的告警：若不兜底，第二条会被判窗口内重复。
 	engine.ProcessAlerts([]connector.Alert{

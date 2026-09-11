@@ -1,5 +1,6 @@
 // D8 决策 C：保留策略测试 —— resolved 满期归档（事件+簇+审计 打包），
-// 原行清除；ParseRetention 的取值口径。
+// 原行清除。保留期解析（ParseRetention）及其表驱动测试已随 #2 收敛进
+// internal/config（唯一实现 + 唯一测试），本文件只测归档扫描行为。
 package main
 
 import (
@@ -11,38 +12,6 @@ import (
 	"opscopilot/internal/incident"
 )
 
-func TestParseRetention(t *testing.T) {
-	cases := []struct {
-		raw  string
-		want time.Duration
-		on   bool
-		bad  bool
-	}{
-		{"", 90 * 24 * time.Hour, true, false}, // 默认 90d（决策 C）
-		{"90d", 90 * 24 * time.Hour, true, false},
-		{"2160h", 2160 * time.Hour, true, false},
-		{"off", 0, false, false},
-		{"0", 0, false, false},
-		{"bogus", 0, false, true},
-		{"-5d", 0, false, true},
-	}
-	for _, c := range cases {
-		d, on, err := ParseRetention(c.raw)
-		if c.bad {
-			if err == nil {
-				t.Fatalf("%q: want error", c.raw)
-			}
-			continue
-		}
-		if err != nil {
-			t.Fatalf("%q: %v", c.raw, err)
-		}
-		if on != c.on || (on && d != c.want) {
-			t.Fatalf("%q: got (%v,%v), want (%v,true)", c.raw, d, on, c.want)
-		}
-	}
-}
-
 // TestRetentionSweepArchivesResolved PG 门控：resolved 满期的事件被归档
 // （payload 含 事件本体 + 簇 + 审计），原行与审计行被清除。
 func TestRetentionSweepArchivesResolved(t *testing.T) {
@@ -50,8 +19,9 @@ func TestRetentionSweepArchivesResolved(t *testing.T) {
 	if dsn == "" {
 		t.Skip("OPS_TEST_PG_DSN not set — retention integration skipped")
 	}
-	t.Setenv("OPS_DB_DSN", dsn)
-	asm, err := NewAssembly(newQuietLogger(), "tk")
+	cfg := testAssemblyConfig("tk")
+	cfg.DB.DSN = dsn // #2：DSN 经 Config 注入
+	asm, err := NewAssembly(newQuietLogger(), cfg)
 	if err != nil {
 		t.Fatalf("assembly: %v", err)
 	}
@@ -80,13 +50,13 @@ func TestRetentionSweepArchivesResolved(t *testing.T) {
 	// 回拨 resolved_at（模拟"早就该归档"），并补一条人工审计。
 	if _, err := asm.pool.Exec(ctx,
 		`UPDATE incident SET resolved_at = now() - interval '200 days' WHERE tenant_id=$1 AND incident_id=$2`,
-		DefaultTenant, ref); err != nil {
+		testTenant, ref); err != nil {
 		t.Fatalf("backdate: %v", err)
 	}
 	asm.audit.Append(AuditEntry{IncidentID: ref, Action: AuditTransition, Actor: "ops",
 		Detail: map[string]any{"to": "resolved"}})
 
-	sw := NewRetentionSweeper(asm.pool, DefaultTenant, 90*24*time.Hour, nil)
+	sw := NewRetentionSweeper(asm.pool, testTenant, 90*24*time.Hour, nil)
 	n, err := sw.sweepOnce(ctx)
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
@@ -98,7 +68,7 @@ func TestRetentionSweepArchivesResolved(t *testing.T) {
 	var cnt int
 	if err := asm.pool.QueryRow(ctx,
 		`SELECT count(*) FROM incident WHERE tenant_id=$1 AND incident_id=$2`,
-		DefaultTenant, ref).Scan(&cnt); err != nil {
+		testTenant, ref).Scan(&cnt); err != nil {
 		t.Fatal(err)
 	}
 	if cnt != 0 {
@@ -107,7 +77,7 @@ func TestRetentionSweepArchivesResolved(t *testing.T) {
 	// 审计行已随单清除。
 	if err := asm.pool.QueryRow(ctx,
 		`SELECT count(*) FROM incident_audit WHERE tenant_id=$1 AND incident_id=$2`,
-		DefaultTenant, ref).Scan(&cnt); err != nil {
+		testTenant, ref).Scan(&cnt); err != nil {
 		t.Fatal(err)
 	}
 	if cnt != 0 {
@@ -117,7 +87,7 @@ func TestRetentionSweepArchivesResolved(t *testing.T) {
 	var payload map[string]any
 	if err := asm.pool.QueryRow(ctx,
 		`SELECT payload FROM incident_archive WHERE tenant_id=$1 AND incident_id=$2`,
-		DefaultTenant, ref).Scan(&payload); err != nil {
+		testTenant, ref).Scan(&payload); err != nil {
 		t.Fatalf("archive row: %v", err)
 	}
 	incObj, _ := payload["incident"].(map[string]any)

@@ -20,9 +20,7 @@ import (
 )
 
 func TestAssembly_ChangeStoreMemoryWithoutDB(t *testing.T) {
-	if os.Getenv("OPS_DB_DSN") != "" {
-		t.Skip("OPS_DB_DSN set in environment — memory-default assertion not applicable")
-	}
+	// 配置注入后环境不再参与装配（#2）——基线 cfg 无 DSN 即内存，无需 env 门控。
 	a := newTestAssembly(t)
 	if got := a.Changes.Persistence(); got != "memory" {
 		t.Errorf("change persistence = %q, want memory (no DB → 降级内存)", got)
@@ -55,8 +53,10 @@ func TestAssembly_ChangePGReplaySurvivesRestart(t *testing.T) {
 	pool.Close() // 装配自持连接池，测试不共用
 
 	// —— 第一次"进程"：装配（应选中 PG 后端）→ 发现节点 → 提交变更 → 退出。
-	t.Setenv("OPS_DB_DSN", dsn)
-	a1, err := NewAssembly(nil, "")
+	// DSN 经 Config 注入（#2：测试不再 t.Setenv）。
+	cfg1 := testAssemblyConfig("")
+	cfg1.DB.DSN = dsn
+	a1, err := NewAssembly(nil, cfg1)
 	if err != nil {
 		t.Fatalf("assembly #1: %v", err)
 	}
@@ -79,7 +79,9 @@ func TestAssembly_ChangePGReplaySurvivesRestart(t *testing.T) {
 	a1.Close() // 内存全丢——PG 真相源必须兜住
 
 	// —— 第二次"进程"：新装配从 PG 回放，证据可查。
-	a2, err := NewAssembly(nil, "")
+	cfg2 := testAssemblyConfig("")
+	cfg2.DB.DSN = dsn
+	a2, err := NewAssembly(nil, cfg2)
 	if err != nil {
 		t.Fatalf("assembly #2: %v", err)
 	}

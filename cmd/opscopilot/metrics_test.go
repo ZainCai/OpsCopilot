@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"opscopilot/internal/config"
 	"opscopilot/internal/connector"
 	"opscopilot/internal/notify"
 )
@@ -55,25 +56,26 @@ func TestMetricsLatencyInstrumentation(t *testing.T) {
 	if dsn == "" {
 		t.Skip("OPS_TEST_PG_DSN not set")
 	}
-	t.Setenv("OPS_DB_DSN", dsn)
-	t.Setenv("OPS_NOISE_MODE", "enforce")
-	t.Setenv("OPS_NOISE_WINDOW", "10m")
+	cfg := testAssemblyConfig("tok")
+	cfg.DB.DSN = dsn
+	cfg.Noise.Mode = ModeEnforce
+	cfg.Noise.Window = config.DefaultNoiseWindow
 
 	sink := newMetricsSink(t)
 	pgSink := pgSinkForTest(t)
 	cleanup := func() {
-		pgExec(t, pgSink, `DELETE FROM notify_channel WHERE tenant_id = $1`, DefaultTenant)
-		pgExec(t, pgSink, `UPDATE notify_gate_stats SET suppressed=0, dispatched=0 WHERE tenant_id = $1`, DefaultTenant)
+		pgExec(t, pgSink, `DELETE FROM notify_channel WHERE tenant_id = $1`, testTenant)
+		pgExec(t, pgSink, `UPDATE notify_gate_stats SET suppressed=0, dispatched=0 WHERE tenant_id = $1`, testTenant)
 	}
 	cleanup()
 	t.Cleanup(cleanup)
 
-	store := NewChannelStore(pgSink.pool, DefaultTenant)
+	store := NewChannelStore(pgSink.pool, testTenant)
 	if err := store.Upsert(context.Background(), "m-sink", notify.KindGeneric, sink.srv.URL, "info", true); err != nil {
 		t.Fatalf("seed channel: %v", err)
 	}
 
-	asm, err := NewAssembly(newQuietLogger(), "tok")
+	asm, err := NewAssembly(newQuietLogger(), cfg)
 	if err != nil {
 		t.Fatalf("assembly: %v", err)
 	}
@@ -181,24 +183,25 @@ func TestMetricsSkipsAlertsWithoutStartsAt(t *testing.T) {
 	if dsn == "" {
 		t.Skip("OPS_TEST_PG_DSN not set")
 	}
-	t.Setenv("OPS_DB_DSN", dsn)
-	t.Setenv("OPS_NOISE_MODE", "enforce")
+	cfg := testAssemblyConfig("tok")
+	cfg.DB.DSN = dsn
+	cfg.Noise.Mode = ModeEnforce
 
 	sink := newMetricsSink(t)
 	pgSink := pgSinkForTest(t)
 	cleanup := func() {
-		pgExec(t, pgSink, `DELETE FROM notify_channel WHERE tenant_id = $1`, DefaultTenant)
-		pgExec(t, pgSink, `UPDATE notify_gate_stats SET suppressed=0, dispatched=0 WHERE tenant_id = $1`, DefaultTenant)
+		pgExec(t, pgSink, `DELETE FROM notify_channel WHERE tenant_id = $1`, testTenant)
+		pgExec(t, pgSink, `UPDATE notify_gate_stats SET suppressed=0, dispatched=0 WHERE tenant_id = $1`, testTenant)
 	}
 	cleanup()
 	t.Cleanup(cleanup)
 
-	store := NewChannelStore(pgSink.pool, DefaultTenant)
+	store := NewChannelStore(pgSink.pool, testTenant)
 	if err := store.Upsert(context.Background(), "m-sink", notify.KindGeneric, sink.srv.URL, "info", true); err != nil {
 		t.Fatalf("seed channel: %v", err)
 	}
 
-	asm, err := NewAssembly(newQuietLogger(), "tok")
+	asm, err := NewAssembly(newQuietLogger(), cfg)
 	if err != nil {
 		t.Fatalf("assembly: %v", err)
 	}

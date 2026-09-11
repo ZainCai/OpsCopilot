@@ -21,7 +21,7 @@ import (
 // 只能靠 Stop 退出）。
 func newSemanticTest(t *testing.T) (pb.SemanticModelClient, *Assembly) {
 	t.Helper()
-	asm, err := NewAssembly(newQuietLogger(), "")
+	asm, err := NewAssembly(newQuietLogger(), testAssemblyConfig(""))
 	if err != nil {
 		t.Fatalf("assembly: %v", err)
 	}

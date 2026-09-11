@@ -13,8 +13,6 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -22,14 +20,17 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"opscopilot/internal/config"
 	"opscopilot/internal/incident"
 )
 
-// incidentBodyLimit 人工建单请求体上限（建单是几行 JSON，1MiB 足够）。
-const incidentBodyLimit = 1 << 20
-
-// dedupWindow L2 相似度的时间邻近窗口。
-const dedupWindow = 30 * time.Minute
+// RESTLimits 网关侧的时间窗与请求体上限（#10 去魔法数字：值唯一来自
+// config——Noise.DedupWindow 默认 30m、Metrics 各体上限；装配层注入）。
+type RESTLimits struct {
+	DedupWindow       time.Duration // L2 相似度的时间邻近窗口
+	IncidentBodyLimit int64         // 人工建单等请求体上限（建单是几行 JSON，1MiB 足够）
+	NotifyBodyLimit   int64         // 通知渠道配置请求体上限
+}
 
 // RESTGateway 只读查询面。
 // noise 可为 nil（影子降噪关闭 → 簇端点 503，其余端点照常）。
@@ -51,6 +52,8 @@ type RESTGateway struct {
 	// 取代早期的 "*"：读端点含事件与审计数据，默认全放开等于把
 	// "任意网页可在受害者浏览器内跨源读取"当作默认行为。
 	corsOrigin string
+	// limits 时间窗与请求体上限（装配层从 config 注入）。
+	limits RESTLimits
 	// logf 服务端错误日志（500 脱敏后细节只进日志，不回客户端）。
 	logf func(string, ...any)
 	// db 告警中心数据源（alert_event 只读）。nil = 未接 DB，告警端点 503
@@ -73,19 +76,13 @@ func (g *RESTGateway) SetChannels(store *ChannelStore, reload func() (int, error
 // 第七轮 M2：拒绝 "*"——那会静默恢复"任意网页可跨源读事件/审计"，
 // 正是 D2 决策要消除的默认行为；其余值要求形如 scheme://host（或
 // "null"——file:// 调试用法），非法值 fail-fast。
+// 规则唯一来源是 config.ValidateCORSOrigin（与 OPS_CORS_ORIGIN 装载期
+// 校验同一实现，两处不漂移）；装配调用保留作直接构造路径的兜底。
 func (g *RESTGateway) SetCORSOrigin(origin string) error {
-	o := strings.TrimSpace(origin)
-	if o == "" {
-		g.corsOrigin = ""
-		return nil
+	if err := config.ValidateCORSOrigin(origin); err != nil {
+		return err
 	}
-	if o == "*" {
-		return errors.New(`OPS_CORS_ORIGIN=* is not allowed: it re-enables any-webpage cross-origin reads of incidents/audit (see decision D2)`)
-	}
-	if o != "null" && !strings.Contains(o, "://") {
-		return fmt.Errorf("OPS_CORS_ORIGIN must be an origin like https://ops.example.com (or \"null\"), got %q", o)
-	}
-	g.corsOrigin = o
+	g.corsOrigin = strings.TrimSpace(origin)
 	return nil
 }
 
@@ -101,8 +98,20 @@ func (g *RESTGateway) SetLogf(f func(string, ...any)) {
 }
 
 // NewRESTGateway 构造。hub 为事件广播器（W11 实时推送），可为 nil。
-func NewRESTGateway(noise *NoiseEngine, sem *SemanticModelServer, incidents incident.Store, token string, audit AuditLog, hub *EventHub) *RESTGateway {
-	return &RESTGateway{noise: noise, sem: sem, incidents: incidents, token: token, audit: audit, hub: hub}
+// limits 为装配层注入的时间窗/体上限（零值字段回退 config 默认，同源单一定义）。
+func NewRESTGateway(noise *NoiseEngine, sem *SemanticModelServer, incidents incident.Store,
+	token string, audit AuditLog, hub *EventHub, limits RESTLimits) *RESTGateway {
+	if limits.DedupWindow <= 0 {
+		limits.DedupWindow = config.DefaultDedupWindow
+	}
+	if limits.IncidentBodyLimit <= 0 {
+		limits.IncidentBodyLimit = config.DefaultIncidentBodyLimit
+	}
+	if limits.NotifyBodyLimit <= 0 {
+		limits.NotifyBodyLimit = config.DefaultNotifyBodyLimit
+	}
+	return &RESTGateway{noise: noise, sem: sem, incidents: incidents, token: token,
+		audit: audit, hub: hub, limits: limits}
 }
 
 // SetAudit 挂载审计（装配期可选）。

@@ -8,11 +8,12 @@ import (
 	"testing"
 	"time"
 
+	"opscopilot/internal/config"
 	"opscopilot/internal/topology"
 )
 
 // TestParseRetentionDefaultChangeWindow 变更库保留窗的取值口径：
-// 与工单归档共用解析器，但**空值默认 7d**（而不是 90d）。
+// 与工单归档共用解析器（现居 internal/config），但**空值默认 7d**（而不是 90d）。
 func TestParseRetentionDefaultChangeWindow(t *testing.T) {
 	cases := []struct {
 		raw  string
@@ -28,7 +29,7 @@ func TestParseRetentionDefaultChangeWindow(t *testing.T) {
 		{"bogus", 0, false, true},
 	}
 	for _, c := range cases {
-		d, on, err := ParseRetentionDefault(c.raw, changeRetentionDefault)
+		d, on, err := config.ParseRetention(c.raw, config.DefaultChangeRetention)
 		if c.bad {
 			if err == nil {
 				t.Fatalf("%q: want error", c.raw)
@@ -120,13 +121,11 @@ func TestChangePrunerWarnsOnLargeStore(t *testing.T) {
 	}
 }
 
-// TestChangePrunerFromEnvOff 关闭时 Run 立即返回且不打点（store 保持不碰）。
-func TestChangePrunerFromEnvOff(t *testing.T) {
-	t.Setenv(envChangeRetention, "off")
-	p, err := NewChangePrunerFromEnv(topology.NewChangeStore(nil), nil)
-	if err != nil {
-		t.Fatalf("from env: %v", err)
-	}
+// TestChangePrunerFromConfigOff 关闭时 Run 立即返回且不打点（store 保持不碰）。
+func TestChangePrunerFromConfigOff(t *testing.T) {
+	topo := config.Defaults().Topology
+	topo.ChangeEnabled = false
+	p := NewChangePrunerFromConfig(topology.NewChangeStore(nil), topo, nil)
 	if p.store != nil || p.retention != 0 {
 		t.Fatalf("off 应当不持有 store/retention，得到 store=%v retention=%v", p.store, p.retention)
 	}
@@ -138,19 +137,37 @@ func TestChangePrunerFromEnvOff(t *testing.T) {
 	}
 }
 
-// TestChangePrunerFromEnvInvalid 非法配置 fail-fast（不静默回退默认值）。
-func TestChangePrunerFromEnvInvalid(t *testing.T) {
-	t.Setenv(envChangeRetention, "bogus")
-	if _, err := NewChangePrunerFromEnv(topology.NewChangeStore(nil), nil); err == nil {
-		t.Fatal("invalid retention must fail fast")
+// TestChangePrunerInvalidEnvFailsAtLoad 非法配置 fail-fast 的新归属：
+// OPS_CHANGE_RETENTION / OPS_CHANGE_PRUNE_INTERVAL 的非法值在 config.Load
+// 聚合报错（原 NewChangePrunerFromEnv 的构造期报错随之上移，静默回退取消）。
+func TestChangePrunerInvalidEnvFailsAtLoad(t *testing.T) {
+	env := func(m map[string]string) config.LookupFunc {
+		return func(k string) (string, bool) { v, ok := m[k]; return v, ok }
 	}
-	t.Setenv(envChangeRetention, "")
-	t.Setenv(envChangePruneInterval, "not-a-duration")
-	if _, err := NewChangePrunerFromEnv(topology.NewChangeStore(nil), nil); err == nil {
-		t.Fatal("invalid interval must fail fast")
+	base := func() map[string]string {
+		return map[string]string{
+			config.EnvRedisAlertAddr: "127.0.0.1:6380",
+			config.EnvRedisCacheAddr: "127.0.0.1:6381",
+		}
 	}
-	t.Setenv(envChangePruneInterval, "-1s")
-	if _, err := NewChangePrunerFromEnv(topology.NewChangeStore(nil), nil); err == nil {
-		t.Fatal("non-positive interval must fail fast")
+	for _, c := range []struct {
+		key, val string
+	}{
+		{config.EnvChangeRetention, "bogus"},
+		{config.EnvChangePruneInterval, "not-a-duration"},
+		{config.EnvChangePruneInterval, "-1s"},
+	} {
+		m := base()
+		m[c.key] = c.val
+		if _, err := config.LoadFrom(env(m)); err == nil {
+			t.Fatalf("%s=%q must fail fast, got nil error", c.key, c.val)
+		}
+	}
+	// 合法值正常装载，off 透传为 ChangeEnabled=false。
+	m := base()
+	m[config.EnvChangeRetention] = "off"
+	cfg, err := config.LoadFrom(env(m))
+	if err != nil || cfg.Topology.ChangeEnabled {
+		t.Fatalf("retention=off must load enabled=false: %v %+v", err, cfg.Topology)
 	}
 }

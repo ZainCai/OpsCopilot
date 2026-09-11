@@ -38,7 +38,7 @@ const promAlertsBody = `{"status":"success","data":{"alerts":[
 func TestPrometheusAlertsSourceMapping(t *testing.T) {
 	srv := mockProm(t, promAlertsBody, http.StatusOK)
 	defer srv.Close()
-	src := NewPrometheusAlertsSource(srv.URL, "")
+	src := NewPrometheusAlertsSource(srv.URL, "", 0)
 	alerts, err := src.FetchAlerts(context.Background())
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
@@ -82,7 +82,7 @@ func TestPromFingerprintStable(t *testing.T) {
 func TestPrometheusAlertsSourceHTTPError(t *testing.T) {
 	srv := mockProm(t, "boom", http.StatusInternalServerError)
 	defer srv.Close()
-	if _, err := NewPrometheusAlertsSource(srv.URL, "").FetchAlerts(context.Background()); err == nil {
+	if _, err := NewPrometheusAlertsSource(srv.URL, "", 0).FetchAlerts(context.Background()); err == nil {
 		t.Fatal("want error on non-200")
 	}
 }
@@ -130,7 +130,7 @@ func TestAlertPollerReportsChangesOnly(t *testing.T) {
 	q := &recordingQueue{}
 	owner := &QueueOwner{}
 	owner.SetWriter(q)
-	p := NewAlertPoller(NewPrometheusAlertsSource(srv.URL, ""), owner, incident.OriginPrometheus, time.Minute, nil)
+	p := NewAlertPoller(NewPrometheusAlertsSource(srv.URL, "", 0), owner, incident.OriginPrometheus, time.Minute, nil)
 
 	p.pollOnce(context.Background())
 	if len(q.refs) != 2 {
@@ -176,7 +176,7 @@ func TestAlertPollerRunStopsOnCancel(t *testing.T) {
 	defer srv.Close()
 	owner := &QueueOwner{}
 	owner.SetWriter(&recordingQueue{})
-	p := NewAlertPoller(NewPrometheusAlertsSource(srv.URL, ""), owner, incident.OriginPrometheus, time.Hour, nil)
+	p := NewAlertPoller(NewPrometheusAlertsSource(srv.URL, "", 0), owner, incident.OriginPrometheus, time.Hour, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { p.Run(ctx); close(done) }()

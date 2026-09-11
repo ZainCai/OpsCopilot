@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"opscopilot/internal/config"
 	"opscopilot/internal/connector"
 	"opscopilot/internal/notify"
 )
@@ -171,9 +172,10 @@ func TestAssemblyChannelE2E(t *testing.T) {
 	if dsn == "" {
 		t.Skip("OPS_TEST_PG_DSN not set")
 	}
-	t.Setenv("OPS_DB_DSN", dsn)
-	t.Setenv("OPS_NOISE_MODE", "enforce")
-	t.Setenv("OPS_NOISE_WINDOW", "10m")
+	cfg := testAssemblyConfig("tok")
+	cfg.DB.DSN = dsn
+	cfg.Noise.Mode = ModeEnforce
+	cfg.Noise.Window = config.DefaultNoiseWindow
 
 	// 假渠道：本地 httptest sink
 	var got []string
@@ -186,10 +188,10 @@ func TestAssemblyChannelE2E(t *testing.T) {
 	defer srv.Close()
 
 	sinkStore := pgSinkForTest(t)
-	store := NewChannelStore(sinkStore.pool, DefaultTenant)
+	store := NewChannelStore(sinkStore.pool, testTenant)
 	cleanup := func() {
-		pgExec(t, sinkStore, `DELETE FROM notify_channel WHERE tenant_id = $1`, DefaultTenant)
-		pgExec(t, sinkStore, `UPDATE notify_gate_stats SET suppressed=0, dispatched=0 WHERE tenant_id = $1`, DefaultTenant)
+		pgExec(t, sinkStore, `DELETE FROM notify_channel WHERE tenant_id = $1`, testTenant)
+		pgExec(t, sinkStore, `UPDATE notify_gate_stats SET suppressed=0, dispatched=0 WHERE tenant_id = $1`, testTenant)
 	}
 	cleanup()
 	t.Cleanup(cleanup)
@@ -197,7 +199,7 @@ func TestAssemblyChannelE2E(t *testing.T) {
 		t.Fatalf("seed channel: %v", err)
 	}
 
-	asm, err := NewAssembly(newQuietLogger(), "tok")
+	asm, err := NewAssembly(newQuietLogger(), cfg)
 	if err != nil {
 		t.Fatalf("assembly: %v", err)
 	}
@@ -248,14 +250,15 @@ func TestNotifyChannelRESTEndpoints(t *testing.T) {
 	if dsn == "" {
 		t.Skip("OPS_TEST_PG_DSN not set")
 	}
-	t.Setenv("OPS_DB_DSN", dsn)
-	t.Setenv("OPS_NOISE_MODE", "enforce")
+	cfg := testAssemblyConfig("tok")
+	cfg.DB.DSN = dsn
+	cfg.Noise.Mode = ModeEnforce
 	sink := pgSinkForTest(t)
-	cleanup := func() { pgExec(t, sink, `DELETE FROM notify_channel WHERE tenant_id = $1`, DefaultTenant) }
+	cleanup := func() { pgExec(t, sink, `DELETE FROM notify_channel WHERE tenant_id = $1`, testTenant) }
 	cleanup()
 	t.Cleanup(cleanup)
 
-	asm, err := NewAssembly(newQuietLogger(), "tok")
+	asm, err := NewAssembly(newQuietLogger(), cfg)
 	if err != nil {
 		t.Fatalf("assembly: %v", err)
 	}

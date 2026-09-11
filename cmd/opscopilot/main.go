@@ -1,5 +1,6 @@
 // OpsCopilot all-in-one 入口（M1）。
-// 职责：加载配置 -> 校验双 Redis 实例约束 -> 装配 W3 组件 -> 装配连接器宿主 -> 启动 HTTP 服务。
+// 职责：装载并校验配置（一次 config.Load，#2 收敛）-> 装配 W3 组件 ->
+// 装配连接器宿主 -> 启动 HTTP 服务。
 package main
 
 import (
@@ -10,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -20,53 +20,31 @@ import (
 	"opscopilot/internal/credential"
 )
 
-// defaultListenAddr HTTP 监听地址默认值；可用环境变量 OPS_LISTEN_ADDR 覆盖。
-// 默认只绑回环（全局审查 S1）：进程暴露了可写的变更 webhook，
-// 无鉴权服务不得默认监听全部网络接口。
-const defaultListenAddr = "127.0.0.1:8080"
-
-// HTTP 超时口径（W9-5，第八轮审核 D7）。
-//
-// 此前只有 ReadHeaderTimeout——足够挡 slow-loris，但慢响应/慢读连接仍可长期
-// 占住 goroutine 与连接（写不出去也不超时）。
-const (
-	// httpReadHeaderTimeout 只约束"请求头读完"这一段（slow-loris 防御）。
-	httpReadHeaderTimeout = 5 * time.Second
-	// httpWriteTimeout 单次请求的整段写上限。**SSE 例外**：长连接由
-	// handleEventStream 经 http.ResponseController 显式清除写截止时间
-	// （见 rest_stream.go），否则 30s 后写静默失败、连接变"假活"。
-	httpWriteTimeout = 30 * time.Second
-	// httpIdleTimeout keep-alive 空闲上限。SSE 是活跃连接（不算空闲），
-	// 不受它影响。
-	httpIdleTimeout = 120 * time.Second
-)
-
-// newHTTPServer 构造 HTTP 服务（超时口径见上面的常量；抽成函数便于测试
-// 断言这三个超时不被误删——SSE 的稳定性依赖 WriteTimeout 与响应级清除的
-// 配合，任一侧被删都会让长连接在 30s 后静默断掉）。
+// newHTTPServer 构造 HTTP 服务（超时口径唯一来源：cfg.Metrics，
+// 默认值见 config.DefaultHTTP*Timeout——SSE 的稳定性依赖 WriteTimeout
+// 与响应级清除（rest_stream.go）的配合，任一侧被删都会让长连接在 30s 后
+// 静默断掉，测试断言这三个超时不被误删）。
 //
 // **刻意不设 ReadTimeout**：Go 的 http.Server 会把读截止时间覆盖到整个请求
 // （不只是读头），而长连接期间后台读超时会被当作读错误 → 取消 request
 // context → SSE 在 ReadTimeout 到点时被服务端主动断开。挡 slow-loris 用
 // ReadHeaderTimeout 就够，ReadTimeout 在这里只有副作用。
-func newHTTPServer(addr string, h http.Handler) *http.Server {
+func newHTTPServer(m config.MetricsSection, addr string, h http.Handler) *http.Server {
 	return &http.Server{
 		Addr:              addr,
 		Handler:           h,
-		ReadHeaderTimeout: httpReadHeaderTimeout,
-		WriteTimeout:      httpWriteTimeout,
-		IdleTimeout:       httpIdleTimeout,
+		ReadHeaderTimeout: m.HTTPReadHeaderTimeout,
+		WriteTimeout:      m.HTTPWriteTimeout,
+		IdleTimeout:       m.HTTPIdleTimeout,
 	}
 }
 
 func main() {
-	// 双 Redis 实例约束（v1.2 C2/P1-1）在启动期强制。
-	cfg := &config.Config{
-		RedisAlert: config.RedisConfig{Addr: os.Getenv("REDIS_ALERT_ADDR"), Role: config.RedisAlert},
-		RedisCache: config.RedisConfig{Addr: os.Getenv("REDIS_CACHE_ADDR"), Role: config.RedisCache},
-	}
-	if err := cfg.Validate(); err != nil {
-		fmt.Fprintln(os.Stderr, "config invalid:", err)
+	// 双 Redis 实例约束（v1.2 C2/P1-1）在启动期强制。配置一次装载：
+	// 全仓 OPS_*/REDIS_* 只在这里读取；非法值聚合报错、拒绝启动（#2）。
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 
@@ -76,12 +54,12 @@ func main() {
 	// W3 装配：拓扑引擎 + 发现入口（TopologySink）+ 变更事件库 + webhook。
 	// TopologySink 同时实现 connector.Sink——W4 起它既是 webhook 的变更库，
 	// 也是 Host 采集结果的投递终点。
-	webhookToken := os.Getenv("OPS_WEBHOOK_TOKEN")
-	asm, err := NewAssembly(logger, webhookToken)
+	asm, err := NewAssembly(logger, cfg)
 	if err != nil {
 		logger.Printf("assembly failed: %v", err)
 		os.Exit(1)
 	}
+	webhookToken := cfg.Security.WebhookToken
 	if webhookToken == "" {
 		logger.Printf("WARNING: OPS_WEBHOOK_TOKEN not set — %s is UNAUTHENTICATED. "+
 			"Default bind is loopback-only; set the token or put an authenticating reverse proxy in front before any non-loopback exposure",
@@ -90,17 +68,17 @@ func main() {
 
 	// W6-0 评估环境：静态拓扑边挂起队列（故障域聚合的因果链声明）。
 	// 端点节点经发现进图后自动落边（见 AttachStaticEdges）。
-	edgeInputs, err := parseStaticEdges(os.Getenv("OPS_TOPOLOGY_EDGES"))
+	edgeInputs, err := parseStaticEdges(cfg.Topology.Edges)
 	if err != nil {
 		logger.Printf("assembly failed: %v", err)
 		os.Exit(1)
 	}
 	asm.Sink.AttachStaticEdges(edgeInputs)
 
-	// W4-1.1 接线：凭证库 + 连接器宿主。连接器按 env 按需注册（见 connectors.go），
+	// W4-1.1 接线：凭证库 + 连接器宿主。连接器按配置按需注册（见 connectors.go），
 	// 未配置任何数据源时 Host 空转，topology + webhook 仍照常服务。
 	creds := credential.NewStore()
-	host, registered, err := newConnectorHost(logger, creds)
+	host, registered, err := newConnectorHost(logger, creds, cfg.Connector, cfg.Tenant)
 	if err != nil {
 		logger.Printf("connector assembly failed: %v", err)
 		os.Exit(1)
@@ -118,16 +96,16 @@ func main() {
 		// 命令收到的 ctx 换成 context.Background()（见 baseClient.context），
 		// 我们设的 ctx 上界会被静默丢弃——那次"补超时"就成了假修复。
 		noiseRDB = redis.NewClient(&redis.Options{
-			Addr:                  os.Getenv("REDIS_ALERT_ADDR"),
+			Addr:                  cfg.Redis.Alert.Addr,
 			DialTimeout:           redisDialTimeout,
 			ReadTimeout:           redisIOTimeout,
 			WriteTimeout:          redisIOTimeout,
 			ContextTimeoutEnabled: true,
 		})
-		redisSink := NewRedisClusterSink(noiseRDB, DefaultTenant)
+		redisSink := NewRedisClusterSink(noiseRDB, cfg.Tenant)
 		var pgSink *PGClusterSink
-		if dsn := os.Getenv("OPS_DB_DSN"); dsn != "" {
-			sink, err := NewPGClusterSink(context.Background(), dsn, DefaultTenant)
+		if cfg.DB.DSN != "" {
+			sink, err := NewPGClusterSink(context.Background(), cfg.DB.DSN, cfg.Tenant)
 			if err != nil {
 				logger.Printf("WARNING: pg sink unavailable (redis mirror only): %v", err)
 			} else {
@@ -154,21 +132,17 @@ func main() {
 		}
 	}
 
-	addr := os.Getenv("OPS_LISTEN_ADDR")
-	if addr == "" {
-		addr = defaultListenAddr
-	}
 	// D1 决策 C（安全门禁）：非回环监听 + 无写密钥 = 任何能到达端口的人都能
 	// 建单/关单/合并。此前只打一行 WARNING，运维很容易漏看——改为启动失败，
 	// 除非显式声明 OPS_ALLOW_UNAUTHENTICATED=on（本地联调逃生门，禁止用于生产）。
-	if err := checkListenSecurity(addr, webhookToken,
-		strings.EqualFold(strings.TrimSpace(os.Getenv("OPS_ALLOW_UNAUTHENTICATED")), "on")); err != nil {
+	addr := cfg.Security.ListenAddr
+	if err := checkListenSecurity(addr, webhookToken, cfg.Security.AllowUnauthenticated); err != nil {
 		logger.Printf("FATAL: %v", err)
 		logger.Printf("  修复方式：设置 OPS_WEBHOOK_TOKEN；或绑定 127.0.0.1；" +
 			"或显式设置 OPS_ALLOW_UNAUTHENTICATED=on（仅限本机联调，严禁用于生产）。")
 		os.Exit(1)
 	}
-	srv := newHTTPServer(addr, asm.Handler())
+	srv := newHTTPServer(cfg.Metrics, addr, asm.Handler())
 
 	// runCtx 同时管两件事的生命周期：Host 调度循环与 credential 周期清扫。
 	// 优雅停机信号先 cancel 再 drain HTTP，采集循环在在途请求落地前先退出。
@@ -199,18 +173,13 @@ func main() {
 
 	// D8 决策 C：事件保留策略 —— resolved 满 N 天归档到 incident_archive
 	// （事件本体 + 簇 + 审计 打包成 JSONB，不丢任何上下文）。默认 90d，
-	// OPS_INCIDENT_RETENTION=off 可关闭；配置非法直接启动失败（fail-fast）。
-	retention, on, err := ParseRetention(os.Getenv("OPS_INCIDENT_RETENTION"))
-	if err != nil {
-		logger.Printf("FATAL: %v", err)
-		os.Exit(1)
-	}
-	if on {
+	// OPS_INCIDENT_RETENTION=off 可关闭；配置非法在 config.Load 即启动失败。
+	if cfg.Retention.IncidentEnabled {
 		if asm.pool == nil {
 			logger.Printf("  retention: configured but no DB (set OPS_DB_DSN) — disabled")
 		} else {
-			logger.Printf("  retention: ON (archive resolved incidents older than %s)", retention)
-			go NewRetentionSweeper(asm.pool, DefaultTenant, retention, logger.Printf).Run(runCtx)
+			logger.Printf("  retention: ON (archive resolved incidents older than %s)", cfg.Retention.IncidentWindow)
+			go NewRetentionSweeper(asm.pool, cfg.Tenant, cfg.Retention.IncidentWindow, logger.Printf).Run(runCtx)
 		}
 	} else {
 		logger.Printf("  retention: OFF (set OPS_INCIDENT_RETENTION, e.g. 90d, to enable)")
@@ -218,12 +187,8 @@ func main() {
 
 	// W9-5（第八轮审核 C7）：变更事件库的保留窗清理。ChangeStore 是进程内
 	// map、POST /api/v1/changes 公开可写——不清理就是一条无人察觉的内存
-	// 增长路径。默认 7d / 每 1h；配置非法直接启动失败（fail-fast）。
-	changePruner, err := NewChangePrunerFromEnv(asm.Changes, logger.Printf)
-	if err != nil {
-		logger.Printf("FATAL: %v", err)
-		os.Exit(1)
-	}
+	// 增长路径。默认 7d / 每 1h；配置非法在 config.Load 即启动失败（fail-fast）。
+	changePruner := NewChangePrunerFromConfig(asm.Changes, cfg.Topology, logger.Printf)
 	go changePruner.Run(runCtx)
 
 	// credential 周期清扫（C9 收尾）：过期条目不再是"删除前一直占内存"。
@@ -276,7 +241,7 @@ func main() {
 	logger.Printf("=== M1 stage: W4-1.5 (topology + change webhook + connector host + shadow noise + cluster persistence) ===")
 	logger.Printf("  wired:    topology builder + topology sink + change store + change webhook + credential store(sweep) + connector host + shadow noise + cluster mirror(redis)")
 	if len(registered) > 0 {
-		logger.Printf("  connectors: %v (interval 30s, conn timeout 30s)", registered)
+		logger.Printf("  connectors: %v (interval %s, conn timeout %s)", registered, cfg.Connector.Interval, cfg.Connector.OpTimeout)
 	} else {
 		logger.Printf("  connectors: none (set OPS_PROM_URL / OPS_AZURE_SUBSCRIPTION_ID+OPS_AZURE_TOKEN to enable)")
 	}
@@ -284,13 +249,13 @@ func main() {
 		logger.Printf("  noise: OFF (OPS_NOISE_SHADOW=off)")
 	} else if asm.Noise.Mode() == ModeEnforce {
 		logger.Printf("  noise: enforce (WouldSuppress 真拦截 + 放行通知; window %s; 回退=OPS_NOISE_MODE=shadow)",
-			noiseWindowForLog())
+			cfg.Noise.Window)
 	} else {
-		logger.Printf("  noise: shadow (alerts annotated, NOT suppressed; window %s)", noiseWindowForLog())
+		logger.Printf("  noise: shadow (alerts annotated, NOT suppressed; window %s)", cfg.Noise.Window)
 	}
 	if asm.Ingest != nil {
 		logger.Printf("  ingest: ON (POST /api/v1/ingest/{alertmanager,webhook}; auto-create %s)",
-			autoCreateLabel())
+			onOffLabel(cfg.Ingest.AutoCreate))
 	} else {
 		logger.Printf("  ingest: OFF (set OPS_DB_DSN to enable external import queue)")
 	}
@@ -318,18 +283,9 @@ func main() {
 	logger.Printf("bye")
 }
 
-// noiseWindowForLog 启动日志用：当前生效的降噪窗口。
-// 默认值取 defaultNoiseWindow 常量——别处改默认值这里不会说谎（F4）。
-func noiseWindowForLog() string {
-	if raw := os.Getenv("OPS_NOISE_WINDOW"); raw != "" {
-		return raw
-	}
-	return defaultNoiseWindow.String()
-}
-
-// autoCreateLabel 启动日志用：外部导入自动建单开关状态（决策 2 / R8）。
-func autoCreateLabel() string {
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("OPS_INCIDENT_AUTOCREATE")), "on") {
+// onOffLabel 启动日志用的开关文案（决策 2 / R8：auto-create）。
+func onOffLabel(on bool) string {
+	if on {
 		return "ON"
 	}
 	return "off (shadow: queue only)"

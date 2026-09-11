@@ -7,15 +7,16 @@
 //   - 凭证一律走 credential.Store 的只读闸门（ADR-002）：env 里的裸 Token
 //     先包装成只读 Credential 入库，再以 Credential 指针交给连接器，
 //     构造期由 pkg/readonly.Validate 强制——不用 AllowInsecureToken 后门。
-//   - 本文件只做"env → Config"的翻译与注册，不做业务逻辑（保持 cmd/ 薄）。
+//   - 本文件只做"已装载配置 → 连接器"的装配与注册，不做业务逻辑
+//     （保持 cmd/ 薄；#2 收敛后 env 读取唯一发生在 internal/config）。
 package main
 
 import (
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
+	"opscopilot/internal/config"
 	"opscopilot/internal/connector"
 	"opscopilot/internal/connector/azure"
 	"opscopilot/internal/connector/prometheus"
@@ -23,51 +24,40 @@ import (
 	"opscopilot/internal/topology"
 )
 
-// 连接器装配相关环境变量。
-const (
-	// envPromURL Prometheus 基址（如 http://localhost:9090）。设置即注册 prometheus 连接器。
-	envPromURL = "OPS_PROM_URL"
-	// envPromToken 可选 Bearer Token（无鉴权数据源留空）。
-	envPromToken = "OPS_PROM_TOKEN"
-	// envAzureSub Azure 订阅 ID；与 envAzureToken 同时设置才注册 azure 连接器。
-	envAzureSub = "OPS_AZURE_SUBSCRIPTION_ID"
-	// envAzureToken ARM 访问令牌（Secret，绝不打日志）。
-	envAzureToken = "OPS_AZURE_TOKEN"
-	// envTopologyEdges 静态拓扑边（W6-0 评估环境）：如
-	// "n1->n2,n2->n3"。不含 "://" 的短名自动补 "prometheus://nodes/" 前缀
-	// （与注入器 targets 的 scrapePool 归一化一致）；完整 Key 原样使用。
-	// 置信度 medium（外部声明非直接观测，ADR-007）。真实环境的边来自
-	// 云 API 发现，属后续连接器增强；评估环境用静态声明是合理最小实现。
-	envTopologyEdges = "OPS_TOPOLOGY_EDGES"
-	// nodeKeyPrefix 短名补全前缀。
-	nodeKeyPrefix = "prometheus://nodes/"
-)
+// nodeKeyPrefix 短名补全前缀（OPS_TOPOLOGY_EDGES 的 "src->dst" 短名归一化）。
+const nodeKeyPrefix = "prometheus://nodes/"
 
-// newConnectorHost 构造 Host 并注册环境变量声明的连接器。
+// newConnectorHost 构造 Host 并注册 cfg 声明的连接器（#2：env 读取收敛进
+// internal/config，这里只消费 ConnectorSection 的解析结果）。
 //
 // creds：凭证库。env Token 包装成只读凭证后 Put 入库再取用，使所有
 // 连接器凭证在库内有据可查（W4-1.1 的 credential 接线点）。
+// tenant：数据源归属租户（prometheus 发现结果的 TenantID，#10 去 DefaultTenant）。
 //
 // 返回已注册连接器 ID 列表（供启动日志与测试断言）。
 // 单个连接器构造失败直接返回错误：配置了数据源却装不上属于启动期
 // 致命问题，带病上线只会把故障推迟到第一轮采集。
-func newConnectorHost(logger connector.Logger, creds *credential.Store) (*connector.Host, []string, error) {
+func newConnectorHost(logger connector.Logger, creds *credential.Store,
+	conn config.ConnectorSection, tenant string) (*connector.Host, []string, error) {
 	host := connector.NewHost(
 		connector.WithLogger(logger),
-		// 单连接器单轮 30s 上限（C3 第二道防线）：无内部超时的坏连接器
-		// 只损失自己的时间片，不拖垮整轮巡检。
-		connector.WithConnTimeout(30*time.Second),
+		// 采集轮询周期（默认 30s，OPS_CONNECTOR_INTERVAL 可调——原为写死的
+		// 魔法数字，#10 进 schema）。
+		connector.WithInterval(conn.Interval),
+		// 单连接器单轮上限（C3 第二道防线，默认 30s，OPS_CONNECTOR_TIMEOUT）：
+		// 无内部超时的坏连接器只损失自己的时间片，不拖垮整轮巡检。
+		connector.WithConnTimeout(conn.OpTimeout),
 	)
 	registered := make([]string, 0, 2)
 
 	// Prometheus（W4 降噪的主数据源：告警从 /api/v1/alerts 进管道）。
-	if promURL := os.Getenv(envPromURL); promURL != "" {
+	if promURL := conn.PromURL; promURL != "" {
 		cfg := prometheus.Config{
 			ID:       "prometheus",
 			BaseURL:  promURL,
-			TenantID: "default",
+			TenantID: tenant,
 		}
-		if tok := os.Getenv(envPromToken); tok != "" {
+		if tok := conn.PromToken; tok != "" {
 			c := credential.NewReadOnlyBearer("prometheus", tok)
 			if err := creds.Put(c); err != nil {
 				return nil, nil, fmt.Errorf("prometheus credential rejected: %w", err)
@@ -79,19 +69,19 @@ func newConnectorHost(logger connector.Logger, creds *credential.Store) (*connec
 			}
 			cfg.Credential = &stored
 		}
-		conn, err := prometheus.New(cfg)
+		pconn, err := prometheus.New(cfg)
 		if err != nil {
 			return nil, nil, fmt.Errorf("prometheus connector: %w", err)
 		}
-		if err := host.Register(conn); err != nil {
+		if err := host.Register(pconn); err != nil {
 			return nil, nil, fmt.Errorf("register prometheus: %w", err)
 		}
-		registered = append(registered, conn.ID())
+		registered = append(registered, pconn.ID())
 	}
 
 	// Azure（可选：只做发现，Collect 明确 ErrUnsupported，属设计内）。
 	// 仅在订阅 ID 与令牌齐备时注册，缺一视为"未配置该数据源"。
-	if sub, tok := os.Getenv(envAzureSub), os.Getenv(envAzureToken); sub != "" && tok != "" {
+	if sub, tok := conn.AzureSubscriptionID, conn.AzureToken; sub != "" && tok != "" {
 		c := credential.NewReadOnlyBearer("azure", tok)
 		if err := creds.Put(c); err != nil {
 			return nil, nil, fmt.Errorf("azure credential rejected: %w", err)
@@ -100,7 +90,7 @@ func newConnectorHost(logger connector.Logger, creds *credential.Store) (*connec
 		if err != nil {
 			return nil, nil, fmt.Errorf("azure credential unreadable after put: %w", err)
 		}
-		conn, err := azure.New(azure.Config{
+		cn, err := azure.New(azure.Config{
 			ID:             "azure",
 			SubscriptionID: sub,
 			Credential:     &stored,
@@ -108,10 +98,10 @@ func newConnectorHost(logger connector.Logger, creds *credential.Store) (*connec
 		if err != nil {
 			return nil, nil, fmt.Errorf("azure connector: %w", err)
 		}
-		if err := host.Register(conn); err != nil {
+		if err := host.Register(cn); err != nil {
 			return nil, nil, fmt.Errorf("register azure: %w", err)
 		}
-		registered = append(registered, conn.ID())
+		registered = append(registered, cn.ID())
 	}
 
 	return host, registered, nil

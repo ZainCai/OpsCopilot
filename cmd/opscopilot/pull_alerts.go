@@ -30,11 +30,9 @@ import (
 	"sync"
 	"time"
 
+	"opscopilot/internal/config"
 	"opscopilot/internal/incident"
 )
-
-// pullBodyLimit 单次拉取响应体上限（Prometheus 活跃告警列表，给 4MiB）。
-const pullBodyLimit = 4 << 20
 
 // pullHTTPTimeout 单次拉取 HTTP 超时。
 const pullHTTPTimeout = 15 * time.Second
@@ -57,15 +55,24 @@ type AlertSource interface {
 type PrometheusAlertsSource struct {
 	BaseURL string
 	Token   string // 可选 Bearer Token（无鉴权源留空）
-	client  *http.Client
+	// BodyLimit 单次拉取响应体上限（Prometheus 活跃告警列表，默认 4MiB）。
+	// #10：与入站 AM webhook **共用 config 的单一定义**
+	// （config.DefaultAlertBodyLimit / OPS_INGEST_ALERT_BODY_LIMIT），
+	// 不再两处各写一个 4<<20。
+	BodyLimit int64
+	client    *http.Client
 }
 
-// NewPrometheusAlertsSource 构造。
-func NewPrometheusAlertsSource(baseURL, token string) *PrometheusAlertsSource {
+// NewPrometheusAlertsSource 构造。bodyLimit<=0 回退 config 默认（同源单一定义）。
+func NewPrometheusAlertsSource(baseURL, token string, bodyLimit int64) *PrometheusAlertsSource {
+	if bodyLimit <= 0 {
+		bodyLimit = config.DefaultAlertBodyLimit
+	}
 	return &PrometheusAlertsSource{
-		BaseURL: baseURL,
-		Token:   token,
-		client:  &http.Client{Timeout: pullHTTPTimeout},
+		BaseURL:   baseURL,
+		Token:     token,
+		BodyLimit: bodyLimit,
+		client:    &http.Client{Timeout: pullHTTPTimeout},
 	}
 }
 
@@ -101,7 +108,7 @@ func (s *PrometheusAlertsSource) FetchAlerts(ctx context.Context) ([]amAlert, er
 		return nil, fmt.Errorf("prometheus alerts: %w", err)
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, pullBodyLimit))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, s.BodyLimit))
 	if err != nil {
 		return nil, fmt.Errorf("prometheus alerts: read body: %w", err)
 	}

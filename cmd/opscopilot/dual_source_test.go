@@ -393,8 +393,9 @@ func TestTransitionEndpoint(t *testing.T) {
 //  1. REST 人工建单把 created_by 落库（审计字段不再被丢弃）；
 //  2. 无 DB 队列时外部导入端点显式 503（可诊断，不是 404）。
 func TestManualCreatePersistsActorAndIngestFallback(t *testing.T) {
-	t.Setenv("OPS_DB_DSN", "") // 确定性：无 DB → 内存 store + 入队端点 503
-	asm, err := NewAssembly(newQuietLogger(), "")
+	// 确定性：testAssemblyConfig 无 DSN（#2 注入后环境不再参与装配）
+	// → 内存 store + 入队端点 503。
+	asm, err := NewAssembly(newQuietLogger(), testAssemblyConfig(""))
 	if err != nil {
 		t.Fatalf("assembly: %v", err)
 	}

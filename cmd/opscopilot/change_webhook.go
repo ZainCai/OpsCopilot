@@ -15,12 +15,9 @@ import (
 	"io"
 	"net/http"
 
+	"opscopilot/internal/config"
 	"opscopilot/internal/topology"
 )
-
-// changeWebhookDefaultBodyLimit 请求体上限：变更事件是几行 JSON，
-// 1MiB 足够，防止误用/恶意大包。
-const changeWebhookDefaultBodyLimit = 1 << 20
 
 // AuthHeader 变更 webhook 的共享密钥头。配置了 Token 的端点必须携带
 // 匹配的头，否则 401（全局审查 S1：变更事件是 RCA 证据链的输入，
@@ -39,7 +36,8 @@ type ChangeWebhook struct {
 	// Token 共享密钥；非空时请求必须携带匹配的 AuthHeader 头（401 拒绝）。
 	// 为空表示不鉴权——仅限回环/内网部署（main.go 会在未配置时打警告）。
 	Token string
-	// MaxBodyBytes 请求体上限；零值取默认 1MiB。
+	// MaxBodyBytes 请求体上限（变更事件是几行 JSON，1MiB 足够，防止
+	// 误用/恶意大包）；零值取 config.DefaultChangeBodyLimit（#10 单一定义）。
 	MaxBodyBytes int64
 }
 
@@ -76,7 +74,7 @@ func (h *ChangeWebhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	limit := h.MaxBodyBytes
 	if limit <= 0 {
-		limit = changeWebhookDefaultBodyLimit
+		limit = config.DefaultChangeBodyLimit
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
 

@@ -23,9 +23,6 @@ import (
 	"strings"
 )
 
-// notifyBodyLimit 单请求体上限（渠道配置就几行 JSON）。
-const notifyBodyLimit = 64 << 10
-
 // handleNotifyChannels GET（列表）/ POST（upsert）。
 func (g *RESTGateway) handleNotifyChannels(w http.ResponseWriter, r *http.Request) {
 	store := g.channels
@@ -60,7 +57,7 @@ func (g *RESTGateway) handleNotifyChannels(w http.ResponseWriter, r *http.Reques
 			MinSeverity string `json:"min_severity"` // 省略 = info（全收）
 			Enabled     *bool  `json:"enabled"`      // 省略 = 启用
 		}
-		if !decodeStrict(w, r, notifyBodyLimit, &in) {
+		if !decodeStrict(w, r, g.limits.NotifyBodyLimit, &in) {
 			return
 		}
 		name := strings.TrimSpace(in.Name)
@@ -124,7 +121,7 @@ func (g *RESTGateway) handleNotifyChannelItem(w http.ResponseWriter, r *http.Req
 		var in struct {
 			Enabled *bool `json:"enabled"`
 		}
-		if !decodeStrict(w, r, notifyBodyLimit, &in) {
+		if !decodeStrict(w, r, g.limits.NotifyBodyLimit, &in) {
 			return
 		}
 		if in.Enabled == nil {

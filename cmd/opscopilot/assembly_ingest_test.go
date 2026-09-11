@@ -21,10 +21,11 @@ func TestAssemblyWiresIngestEndToEnd(t *testing.T) {
 	if dsn == "" {
 		t.Skip("OPS_TEST_PG_DSN not set — assembly ingest integration skipped")
 	}
-	t.Setenv("OPS_DB_DSN", dsn)
-	t.Setenv("OPS_INCIDENT_AUTOCREATE", "on") // 影子期关闭；集成验证需消费
+	cfg := testAssemblyConfig("tk")
+	cfg.DB.DSN = dsn             // #2：配置直注，不再 t.Setenv
+	cfg.Ingest.AutoCreate = true // 影子期关闭；集成验证需消费
 
-	asm, err := NewAssembly(newQuietLogger(), "tk")
+	asm, err := NewAssembly(newQuietLogger(), cfg)
 	if err != nil {
 		t.Fatalf("assembly: %v", err)
 	}
@@ -101,8 +102,9 @@ func TestNewAssemblyNilLoggerWithDB(t *testing.T) {
 	if dsn == "" {
 		t.Skip("OPS_TEST_PG_DSN not set — assembly nil-logger integration skipped")
 	}
-	t.Setenv("OPS_DB_DSN", dsn)
-	asm, err := NewAssembly(nil, "tk")
+	cfg := testAssemblyConfig("tk")
+	cfg.DB.DSN = dsn // #2：配置直注，不再 t.Setenv
+	asm, err := NewAssembly(nil, cfg)
 	if err != nil {
 		t.Fatalf("assembly with nil logger: %v", err)
 	}
@@ -120,9 +122,10 @@ func TestIngestDeadLetter(t *testing.T) {
 	if dsn == "" {
 		t.Skip("OPS_TEST_PG_DSN not set — dead-letter integration skipped")
 	}
-	t.Setenv("OPS_DB_DSN", dsn)
-	t.Setenv("OPS_INCIDENT_AUTOCREATE", "on")
-	asm, err := NewAssembly(newQuietLogger(), "tk")
+	cfg := testAssemblyConfig("tk")
+	cfg.DB.DSN = dsn // #2：配置直注，不再 t.Setenv
+	cfg.Ingest.AutoCreate = true
+	asm, err := NewAssembly(newQuietLogger(), cfg)
 	if err != nil {
 		t.Fatalf("assembly: %v", err)
 	}
@@ -133,12 +136,12 @@ func TestIngestDeadLetter(t *testing.T) {
 	// 直接插一行 origin 非法的消息（Enqueue 会做 jsonb 转换，故走 SQL）。
 	if _, err := asm.pool.Exec(ctx, `
 INSERT INTO ingest_queue (tenant_id, origin, source_ref, payload)
-VALUES ($1,'bogus',$2,'{}'::jsonb)`, DefaultTenant, ref); err != nil {
+VALUES ($1,'bogus',$2,'{}'::jsonb)`, testTenant, ref); err != nil {
 		t.Fatalf("seed poison row: %v", err)
 	}
 	t.Cleanup(func() {
 		asm.pool.Exec(context.Background(),
-			`DELETE FROM ingest_queue WHERE tenant_id=$1 AND source_ref=$2`, DefaultTenant, ref)
+			`DELETE FROM ingest_queue WHERE tenant_id=$1 AND source_ref=$2`, testTenant, ref)
 	})
 
 	for i := 0; i < maxIngestAttempts; i++ {
@@ -167,9 +170,10 @@ func TestAssemblyExternalRecurrence(t *testing.T) {
 	if dsn == "" {
 		t.Skip("OPS_TEST_PG_DSN not set — recurrence e2e skipped")
 	}
-	t.Setenv("OPS_DB_DSN", dsn)
-	t.Setenv("OPS_INCIDENT_AUTOCREATE", "on")
-	asm, err := NewAssembly(newQuietLogger(), "tk")
+	cfg := testAssemblyConfig("tk")
+	cfg.DB.DSN = dsn // #2：配置直注，不再 t.Setenv
+	cfg.Ingest.AutoCreate = true
+	asm, err := NewAssembly(newQuietLogger(), cfg)
 	if err != nil {
 		t.Fatalf("assembly: %v", err)
 	}
@@ -179,7 +183,7 @@ func TestAssemblyExternalRecurrence(t *testing.T) {
 	payload := `{"labels":{"alertname":"M9Demo","severity":"critical"},"fingerprint":"` + ref + `"}`
 	t.Cleanup(func() {
 		asm.pool.Exec(context.Background(),
-			`DELETE FROM incident WHERE tenant_id=$1 AND source_ref=$2`, DefaultTenant, ref)
+			`DELETE FROM incident WHERE tenant_id=$1 AND source_ref=$2`, testTenant, ref)
 	})
 	enqueue := func() {
 		if _, err := asm.Queue.Enqueue(incident.OriginAlertmanager, ref, payload); err != nil {

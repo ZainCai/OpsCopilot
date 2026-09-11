@@ -12,7 +12,7 @@ import (
 // faultTestEnv 组装 + 静态边 + 发现入图（预热完成后的状态）。
 func faultTestEnv(t *testing.T, edges string) *Assembly {
 	t.Helper()
-	asm, err := NewAssembly(newQuietLogger(), "")
+	asm, err := NewAssembly(newQuietLogger(), testAssemblyConfig(""))
 	if err != nil {
 		t.Fatalf("assembly: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestScenarioD_UnrelatedAlertsIndependentClusters(t *testing.T) {
 // TestPendingEdgesLandAfterDiscovery 静态边挂起机制：边声明先于发现
 // 也能在节点进图后落图（覆盖真实时序——首轮采集告警先于发现）。
 func TestPendingEdgesLandAfterDiscovery(t *testing.T) {
-	asm, err := NewAssembly(newQuietLogger(), "")
+	asm, err := NewAssembly(newQuietLogger(), testAssemblyConfig(""))
 	if err != nil {
 		t.Fatalf("assembly: %v", err)
 	}
