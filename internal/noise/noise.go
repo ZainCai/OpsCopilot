@@ -30,6 +30,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"opscopilot/pkg/memguard"
 )
 
 // unitSep 规范化序列化的字段分隔符（ASCII unit separator）。
@@ -85,6 +87,11 @@ func formatHex(u uint64, digits string) string {
 // 内存契约：每个活跃指纹一条记录。窗口过后的记录是死重量，靠
 // Sweep 或 Allow 内的周期清扫回收；长时间运行且指纹基数持续增长的
 // 场景依赖清扫生效（见 sweepEveryN 的取舍说明）。
+//
+// 内存有界化（优化方案 #6）：清扫是"按时间回收"，挡不住**窗口内**的
+// 唯一指纹基数洪峰（每条都新、永远清不掉）。装配护栏后，超上限即淘汰
+// **最久未活跃**（锚点最早）的指纹——被逐条恰是"最不可能再来"的，代价
+// 是该指纹再出现会被放行一次，与"降噪宁漏勿杀"同向（fail-open）。
 type Dedup struct {
 	mu     sync.Mutex
 	window time.Duration
@@ -92,6 +99,7 @@ type Dedup struct {
 	seen map[string]time.Time
 	// calls 自 Allow 调用计数，用于触发周期清扫。
 	calls uint64
+	guard *memguard.Guard
 }
 
 // sweepEveryN 每 N 次 Allow 调用做一次惰性清扫（过期记录 O(n) 回收）。
@@ -99,10 +107,25 @@ type Dedup struct {
 // 每 1024 次清一次，均摊接近 O(1)，且单轮内窗口远未到期，清扫无收益。
 const sweepEveryN = 1024
 
-// NewDedup 构造去重器。window <= 0 视为"不去重"（全部放行）——
+// NewDedup 构造去重器（无容量上限）。window <= 0 视为"不去重"（全部放行）——
 // 与空指纹放行同一取向：降噪宁漏勿杀。
 func NewDedup(window time.Duration) *Dedup {
-	return &Dedup{window: window, seen: make(map[string]time.Time)}
+	return NewDedupWithLimits(window, nil)
+}
+
+// NewDedupWithLimits 构造并装配容量护栏（guard nil = 不设限）。
+func NewDedupWithLimits(window time.Duration, guard *memguard.Guard) *Dedup {
+	d := &Dedup{window: window, seen: make(map[string]time.Time), guard: guard}
+	guard.SetSize(d.Len)
+	return d
+}
+
+// MemGuards 返回装配的护栏（供装配层注册进指标注册表）。
+func (d *Dedup) MemGuards() []*memguard.Guard {
+	if d.guard == nil {
+		return nil
+	}
+	return []*memguard.Guard{d.guard}
 }
 
 // Allow 判定指纹 fp 在时刻 now 是否放行。
@@ -128,7 +151,42 @@ func (d *Dedup) Allow(fp string, now time.Time) bool {
 	}
 	// 首次出现或窗口已过：放行并重置锚点。
 	d.seen[fp] = now
+	d.enforceLocked()
 	return true
+}
+
+// enforceLocked 超限淘汰（必须持 d.mu）：按锚点最早（=最久未活跃）逐条
+// 回收至上限内，条数计入护栏。空 guard（无界）零成本直返。
+func (d *Dedup) enforceLocked() {
+	if d.guard == nil {
+		return
+	}
+	excess := d.guard.Over(len(d.seen))
+	if excess <= 0 {
+		return
+	}
+	type fa struct {
+		fp string
+		at time.Time
+	}
+	all := make([]fa, 0, len(d.seen))
+	for fp, at := range d.seen {
+		all = append(all, fa{fp, at})
+	}
+	// 决定性：锚点最早优先，同刻按指纹字典序。
+	sort.Slice(all, func(i, j int) bool {
+		if !all[i].at.Equal(all[j].at) {
+			return all[i].at.Before(all[j].at)
+		}
+		return all[i].fp < all[j].fp
+	})
+	if excess > len(all) {
+		excess = len(all)
+	}
+	for _, e := range all[:excess] {
+		delete(d.seen, e.fp)
+	}
+	d.guard.Evicted(excess)
 }
 
 // Sweep 清扫全部过期记录，返回回收条数。供运维排查与测试直接驱动；

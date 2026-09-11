@@ -25,6 +25,7 @@ import (
 
 	"opscopilot/internal/incident"
 	"opscopilot/internal/notify"
+	"opscopilot/pkg/memguard"
 )
 
 // EscalationLedger 升级台账：Claim 幂等认领 + Release 失败回滚。
@@ -40,13 +41,41 @@ type EscalationLedger interface {
 }
 
 // memEscalationLedger 内存台账（无 DB 的 dev/测试；重启即丢、单实例）。
+//
+// 内存有界化（优化方案 #6）：Claim 的幂等键只进不出（Release 仅在发送
+// 失败时回滚），无上限时是 DB 缺席降级路径上的无界 map。装护栏后按
+// **最久未活跃**（认领时刻最早）淘汰——被逐条大概率早已 resolved
+// （不再被扫描），复活代价是"理论上可能重复升级一次"，两害相权。
 type memEscalationLedger struct {
-	mu   sync.Mutex
-	seen map[string]struct{}
+	mu    sync.Mutex
+	seen  map[string]time.Time // incidentID → 认领时刻（lastSeen）
+	guard *memguard.Guard
 }
 
 func newMemEscalationLedger() *memEscalationLedger {
-	return &memEscalationLedger{seen: map[string]struct{}{}}
+	return newMemEscalationLedgerWithLimits(nil)
+}
+
+// newMemEscalationLedgerWithLimits 构造并装配容量护栏（nil = 不设限）。
+func newMemEscalationLedgerWithLimits(guard *memguard.Guard) *memEscalationLedger {
+	l := &memEscalationLedger{seen: map[string]time.Time{}, guard: guard}
+	guard.SetSize(l.Size)
+	return l
+}
+
+// MemGuards 返回装配的护栏（供装配层注册指标）。
+func (l *memEscalationLedger) MemGuards() []*memguard.Guard {
+	if l.guard == nil {
+		return nil
+	}
+	return []*memguard.Guard{l.guard}
+}
+
+// Size 当前台账条数（锁内读；gauge 回调）。
+func (l *memEscalationLedger) Size() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.seen)
 }
 
 func (l *memEscalationLedger) Claim(_ context.Context, incidentID string) (bool, error) {
@@ -55,8 +84,36 @@ func (l *memEscalationLedger) Claim(_ context.Context, incidentID string) (bool,
 	if _, ok := l.seen[incidentID]; ok {
 		return false, nil
 	}
-	l.seen[incidentID] = struct{}{}
+	l.seen[incidentID] = time.Now()
+	l.enforceLocked()
 	return true, nil
+}
+
+// enforceLocked 超限淘汰（持锁）：认领时刻最早者优先，同刻按 ID 字典序。
+func (l *memEscalationLedger) enforceLocked() {
+	if l.guard == nil {
+		return
+	}
+	excess := l.guard.Over(len(l.seen))
+	removed := 0
+	for removed < excess {
+		var victim string
+		var victimAt time.Time
+		found := false
+		for id, at := range l.seen {
+			if !found || at.Before(victimAt) || (at.Equal(victimAt) && id < victim) {
+				victim, victimAt, found = id, at, true
+			}
+		}
+		if !found {
+			break
+		}
+		delete(l.seen, victim)
+		removed++
+	}
+	if removed > 0 {
+		l.guard.Evicted(removed)
+	}
 }
 
 func (l *memEscalationLedger) Release(_ context.Context, incidentID string) error {

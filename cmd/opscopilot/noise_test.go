@@ -49,7 +49,7 @@ func noiseSpec(mut func(*config.NoiseSection)) config.NoiseSection {
 // newTestNoiseEngine 构造默认启用的引擎（窗口 10m，与 config 默认同源）。
 func newTestNoiseEngine(t *testing.T, sink *TopologySink) *NoiseEngine {
 	t.Helper()
-	ne := NewNoiseEngine(sink, newQuietLogger(), testTenant, noiseSpec(nil))
+	ne := NewNoiseEngine(sink, newQuietLogger(), testTenant, noiseSpec(nil), config.MemLimitSection{})
 	if ne == nil {
 		t.Fatal("expected enabled engine")
 	}
@@ -58,7 +58,7 @@ func newTestNoiseEngine(t *testing.T, sink *TopologySink) *NoiseEngine {
 
 func TestNewNoiseEngineOff(t *testing.T) {
 	ne := NewNoiseEngine(noiseTestSink(t), newQuietLogger(), testTenant,
-		noiseSpec(func(s *config.NoiseSection) { s.Enabled = false }))
+		noiseSpec(func(s *config.NoiseSection) { s.Enabled = false }), config.MemLimitSection{})
 	if ne != nil {
 		t.Fatal("Enabled=false must yield nil engine")
 	}

@@ -142,6 +142,10 @@ func (c *Clusterer) Restore(records []ClusterRecord) error {
 	c.resolved = resolvedClusters
 	c.byFingerprint = byFingerprint
 	c.byNode = byNode
+	// 重建同样受容量护栏约束（优化方案 #6）：真相源行数超上限时，
+	// 最久未活跃的历史簇留在存储侧、不进内存——Restore 语义是"拉平到
+	// 可工作的近期状态"，不是"无限吃进全部历史"。
+	c.enforceLocked()
 	return nil
 }
 

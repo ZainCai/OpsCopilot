@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"opscopilot/pkg/memguard"
 )
 
 // Origin 事件来源（双链路：外部自动导入 ∥ 人工建单）。
@@ -169,6 +171,12 @@ type Store interface {
 }
 
 // MemStore 内存事件存储（默认；重启即丢，见 Persistence）。
+//
+// 内存有界化（优化方案 #6，仅 DB 缺席降级路径需要）：byID 条数超过护栏
+// 上限时淘汰**最久未活跃**（UpdatedAt 最早）的一条——同为最旧时刻按 ID
+// 字典序；**已 resolved 者优先**（活跃单承载未闭环的处置现场，最后才动）。
+// 默认上限（5 万）下正常/演示规模永不触发；触发即计数 + WARN。
+// guard = nil（NewMemStore）不设限，行为与历史一致。
 type MemStore struct {
 	mu         sync.Mutex
 	byID       map[string]*Incident
@@ -176,16 +184,38 @@ type MemStore struct {
 	byExternal map[string]string // (origin, source_ref) → 当前代 incident_id
 	order      []string          // 创建序（List 稳定输出）
 	now        func() time.Time  // 可注入时钟（测试用）
+	guard      *memguard.Guard
 }
 
-// NewMemStore 构造。
-func NewMemStore() *MemStore {
-	return &MemStore{
+// NewMemStore 构造（无容量上限）。
+func NewMemStore() *MemStore { return NewMemStoreWithLimits(nil) }
+
+// NewMemStoreWithLimits 构造并装配容量护栏（guard nil = 不设限）。
+func NewMemStoreWithLimits(guard *memguard.Guard) *MemStore {
+	s := &MemStore{
 		byID:       map[string]*Incident{},
 		byCluster:  map[string]string{},
 		byExternal: map[string]string{},
 		now:        time.Now,
+		guard:      guard,
 	}
+	guard.SetSize(s.Size)
+	return s
+}
+
+// MemGuards 返回装配的护栏（供装配层注册进指标注册表）。
+func (s *MemStore) MemGuards() []*memguard.Guard {
+	if s.guard == nil {
+		return nil
+	}
+	return []*memguard.Guard{s.guard}
+}
+
+// Size 当前事件条数（锁内安全读；gauge 回调即此）。
+func (s *MemStore) Size() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.byID)
 }
 
 // Persistence 内存态标识（R6-4）。
@@ -220,6 +250,7 @@ func (s *MemStore) Create(id, title, severity, createdBy string) (*Incident, err
 		Origin: OriginManual, CreatedBy: createdBy, AutoClosePolicy: "manual_only"}
 	s.byID[id] = inc
 	s.order = append(s.order, id)
+	s.enforceLimitLocked()
 	return clone(inc), nil
 }
 
@@ -505,6 +536,7 @@ func (s *MemStore) UpsertExternal(origin Origin, sourceRef, title, severity, cre
 	s.byID[id] = inc
 	s.order = append(s.order, id)
 	s.byExternal[key] = id
+	s.enforceLimitLocked()
 	return clone(inc), true, nil
 }
 
@@ -522,6 +554,82 @@ func (s *MemStore) ExternalActive(origin Origin, sourceRef string) (bool, error)
 		return false, nil
 	}
 	return inc.State != StateResolved, nil
+}
+
+// enforceLimitLocked 插入收尾的超限淘汰（必须持 s.mu 调用）。
+// guard nil（无界）时零成本直返。每轮淘汰一条最久未活跃记录并计数，
+// 直到回到上限内；无可淘汰对象（理论上不可能——byID 非空必有受害者）
+// 时终止并保命优先。
+func (s *MemStore) enforceLimitLocked() {
+	if s.guard == nil {
+		return
+	}
+	total := 0
+	for excess := s.guard.Over(len(s.byID)); excess > 0; excess = s.guard.Over(len(s.byID)) {
+		removed := 0
+		for i := 0; i < excess; i++ {
+			id, ok := s.pickEvictVictimLocked()
+			if !ok {
+				break
+			}
+			s.removeLocked(id)
+			removed++
+		}
+		if removed == 0 {
+			break
+		}
+		total += removed
+	}
+	if total > 0 {
+		s.guard.Evicted(total)
+	}
+}
+
+// pickEvictVictimLocked 挑最久未活跃的一条：**已 resolved 者优先**
+// （工单闭环后才可丢；活跃单承载处置现场，最后才动），组内按 UpdatedAt
+// 最早、同刻按 ID 字典序（决定性）。
+func (s *MemStore) pickEvictVictimLocked() (string, bool) {
+	var bestID string
+	var best *Incident
+	for id, inc := range s.byID {
+		better := func(a, b *Incident) bool {
+			// 先比"是否 resolved"，再比 UpdatedAt，最后比 ID。
+			ar, br := a.State == StateResolved, b.State == StateResolved
+			if ar != br {
+				return ar
+			}
+			if !a.UpdatedAt.Equal(b.UpdatedAt) {
+				return a.UpdatedAt.Before(b.UpdatedAt)
+			}
+			return a.ID < b.ID
+		}
+		if best == nil || better(inc, best) {
+			bestID, best = id, inc
+		}
+	}
+	return bestID, best != nil
+}
+
+// removeLocked 全索引一致性移除（byID/order/byCluster/byExternal）。
+func (s *MemStore) removeLocked(id string) {
+	delete(s.byID, id)
+	kept := s.order[:0]
+	for _, o := range s.order {
+		if o != id {
+			kept = append(kept, o)
+		}
+	}
+	s.order = kept
+	for k, v := range s.byCluster {
+		if v == id {
+			delete(s.byCluster, k)
+		}
+	}
+	for k, v := range s.byExternal {
+		if v == id {
+			delete(s.byExternal, k)
+		}
+	}
 }
 
 // externalKey (origin, source_ref) 的进程内索引键。用 \x00 分隔——两者都可能

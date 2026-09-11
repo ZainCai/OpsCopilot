@@ -29,6 +29,8 @@ import (
 	"opscopilot/internal/incident"
 	"opscopilot/internal/notify"
 	"opscopilot/internal/topology"
+	"opscopilot/pkg/memguard"
+	"opscopilot/pkg/metrics"
 )
 
 // changeWebhookPath 变更事件提交路由（手动 curl / Git/Jenkins webhook 共用）。
@@ -133,7 +135,12 @@ func NewAssembly(logger connector.Logger, cfg *config.Config) (*Assembly, error)
 		}
 	}
 	tenant := cfg.Tenant
-	builder := topology.NewBuilder()
+	// 拓扑图容量护栏（#6）：默认 1e5 节点/4e5 边——演示与评估环境距触限
+	// 差 2~3 个数量级，正常行为与不设限完全一致；触限按最久未活跃淘汰
+	// （过度淘汰会伤降噪故障域计算与 RCA as_of 取证，所以上限保守）。
+	builder := topology.NewBuilderWithLimits(
+		memguard.New("builder", cfg.MemLimit.TopologyNodes, cfg.MemLimit.WarnRatio),
+		memguard.New("builder_edges", cfg.MemLimit.TopologyEdges, cfg.MemLimit.WarnRatio))
 	sink, err := NewTopologySink(builder, logger)
 	if err != nil {
 		return nil, err
@@ -143,7 +150,7 @@ func NewAssembly(logger connector.Logger, cfg *config.Config) (*Assembly, error)
 
 	// 影子降噪：挂在 sink 上（告警经 IngestCollect 转交），引擎持有
 	// sink 引用做拓扑快照——互相引用只能后挂（见 AttachNoise 注释）。
-	noiseEngine := NewNoiseEngine(sink, logger, tenant, cfg.Noise)
+	noiseEngine := NewNoiseEngine(sink, logger, tenant, cfg.Noise, cfg.MemLimit)
 	sink.AttachNoise(noiseEngine)
 
 	// W9-4 延迟打点集：挂在噪声引擎上——告警→判决→通知全链路都在它手里，
@@ -157,8 +164,16 @@ func NewAssembly(logger connector.Logger, cfg *config.Config) (*Assembly, error)
 	// W9：事件 Store 双实现；DB 可用时事件 Store / 导入队列 / 审计 / 变更库
 	// **共用一条池**（R9：多池各占连接无收益）。pg 不可用不阻塞启动
 	// （降级内存，Persistence 字段提醒消费者；见 R6-4）。
-	var incStore incident.Store = incident.NewMemStore()
-	var audit AuditLog = NewMemAuditLog()
+	//
+	// #6 内存有界化：DB 缺席时的内存降级路径（事件 MemStore / 内存审计 /
+	// 升级台账）全部装容量护栏；PG 生效时这些兜底结构不存在或不增长，
+	// 护栏只在**真正启用降级路径时**注册进 /metrics（不制造恒零的误导指标）。
+	memIncidents := incident.NewMemStoreWithLimits(
+		memguard.New("incidents", cfg.MemLimit.Incidents, cfg.MemLimit.WarnRatio))
+	memAudit := NewMemAuditLogWithLimits(
+		memguard.New("audit", cfg.MemLimit.Audit, cfg.MemLimit.WarnRatio))
+	var incStore incident.Store = memIncidents
+	var audit AuditLog = memAudit
 	var pgPool *pgxpool.Pool
 	// W9-2：通知注册表与渠道存储（channel store 需 DB，注册表恒有）。
 	var notifyReg *notify.Registry
@@ -181,6 +196,26 @@ func NewAssembly(logger connector.Logger, cfg *config.Config) (*Assembly, error)
 				audit = NewPGAuditLog(pool, tenant, logf) // 审计随真相源持久化
 				logf("incident persistence: timescaledb (shared pool: store+queue+audit+changes, max_conns=%d)", poolCfg.MaxConns)
 			}
+		}
+	}
+	// 注册 #6 护栏指标：拓扑恒有；内存降级兜底仅在未被 PG 替换时注册。
+	reg := appMetrics.Registry()
+	for _, g := range builder.MemGuards() {
+		g.RegisterTo(reg)
+	}
+	if noiseEngine != nil {
+		for _, g := range noiseEngine.MemGuards() {
+			g.RegisterTo(reg)
+		}
+	}
+	if incStore == memIncidents {
+		for _, g := range memIncidents.MemGuards() {
+			g.RegisterTo(reg)
+		}
+	}
+	if audit == memAudit {
+		for _, g := range memAudit.MemGuards() {
+			g.RegisterTo(reg)
 		}
 	}
 	// 变更库后端选型（优化方案 #4）：恒先建内存实现——严格节点校验钩子经
@@ -305,7 +340,7 @@ func NewAssembly(logger connector.Logger, cfg *config.Config) (*Assembly, error)
 
 	// W9-3 值班升级：未 ack 超时重发一次。需事件 Store（读 open）+ 通知
 	// 注册表（出口）。台账优先 PG（多实例安全），无库降级内存并告警。
-	asm.Escalation = buildEscalationPoller(cfg, asm.Incidents, asm.NotifyReg, pgPool, logf)
+	asm.Escalation = buildEscalationPoller(cfg, asm.Incidents, asm.NotifyReg, pgPool, reg, logf)
 
 	// W9 双链路链路 A（外部导入）：入队通道需要 DB 队列（持久化/可积压/可重放）。
 	// 无 DB 时不注册队列——入队端点显式 503（见 Handler），比 404 可诊断。
@@ -354,8 +389,10 @@ func buildAlertPoller(cfg *config.Config, owner *QueueOwner, logf func(string, .
 //
 // 台账优先 PG（incident_escalation 主键幂等，多实例安全）；无库退化为内存
 // 台账（重启即丢、仅单实例正确）——显式告警，不让运维误以为已持久化。
+// 内存台账带容量护栏（#6，OPS_MEMLIMIT_ESCALATION_LEDGER），护栏指标注册进
+// memReg（nil = 不暴露，测试/嵌入式装配容忍）。
 func buildEscalationPoller(cfg *config.Config, store incident.Store, dispatcher EscalationDispatcher,
-	pool *pgxpool.Pool, logf func(string, ...any)) *EscalationPoller {
+	pool *pgxpool.Pool, memReg *metrics.Registry, logf func(string, ...any)) *EscalationPoller {
 	if !cfg.Notify.EscalationEnabled {
 		return nil
 	}
@@ -364,7 +401,12 @@ func buildEscalationPoller(cfg *config.Config, store incident.Store, dispatcher 
 		ledger = newPGEscalationLedger(pool, cfg.Tenant)
 	} else {
 		logf("WARNING: escalation ledger is in-memory (no DB) — restart loses state, single-instance only")
-		ledger = newMemEscalationLedger()
+		mem := newMemEscalationLedgerWithLimits(
+			memguard.New("escalation_ledger", cfg.MemLimit.EscalationLedger, cfg.MemLimit.WarnRatio))
+		for _, g := range mem.MemGuards() {
+			g.RegisterTo(memReg)
+		}
+		ledger = mem
 	}
 	return NewEscalationPoller(store, dispatcher, ledger, cfg.Tenant,
 		cfg.Notify.EscalationAfter, cfg.Notify.EscalationInterval, logf)

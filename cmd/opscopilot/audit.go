@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"opscopilot/pkg/memguard"
 )
 
 // ErrAuditUnavailable 审计查询失败的类型化根因（第八轮审核 D1）。
@@ -63,13 +65,40 @@ type AuditLog interface {
 }
 
 // MemAuditLog 内存审计（无 DB 场景；进程重启即丢，与 MemStore 同口径）。
+//
+// 内存有界化（优化方案 #6）：entries 只 append 不回收，DB 缺席时是无界
+// slice。装护栏后**超限丢最旧**（追加序即活跃度序，队首 = 最久未活跃），
+// 默认 5 万条上限下正常规模永不触发。
 type MemAuditLog struct {
 	mu      sync.Mutex
 	entries []AuditEntry
+	guard   *memguard.Guard
 }
 
-// NewMemAuditLog 构造。
-func NewMemAuditLog() *MemAuditLog { return &MemAuditLog{} }
+// NewMemAuditLog 构造（无容量上限，行为与历史一致）。
+func NewMemAuditLog() *MemAuditLog { return NewMemAuditLogWithLimits(nil) }
+
+// NewMemAuditLogWithLimits 构造并装配容量护栏（nil = 不设限）。
+func NewMemAuditLogWithLimits(guard *memguard.Guard) *MemAuditLog {
+	l := &MemAuditLog{guard: guard}
+	guard.SetSize(l.Size)
+	return l
+}
+
+// MemGuards 返回装配的护栏（供装配层注册指标）。
+func (l *MemAuditLog) MemGuards() []*memguard.Guard {
+	if l.guard == nil {
+		return nil
+	}
+	return []*memguard.Guard{l.guard}
+}
+
+// Size 当前条数（锁内读；gauge 回调）。
+func (l *MemAuditLog) Size() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.entries)
+}
 
 // Append 追加。
 func (l *MemAuditLog) Append(e AuditEntry) {
@@ -77,6 +106,13 @@ func (l *MemAuditLog) Append(e AuditEntry) {
 	defer l.mu.Unlock()
 	e.OccurredAt = time.Now()
 	l.entries = append(l.entries, e)
+	if excess := l.guard.Over(len(l.entries)); excess > 0 {
+		if excess > len(l.entries) {
+			excess = len(l.entries)
+		}
+		l.entries = append([]AuditEntry(nil), l.entries[excess:]...)
+		l.guard.Evicted(excess)
+	}
 }
 
 // List 按事件过滤（倒序）。

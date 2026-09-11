@@ -13,7 +13,11 @@
 // 不要在这里加"以后可能有用"的字段。
 package noise
 
-import "time"
+import (
+	"time"
+
+	"opscopilot/pkg/memguard"
+)
 
 // Verdict 一条告警的影子判决。
 type Verdict struct {
@@ -57,10 +61,22 @@ type Shadow struct {
 // NewShadow 构造。window <= 0 时去重与聚类均关闭——Verdict 退化为
 // 每条 new-incident（降噪"配置性关闭"与影子开关是两回事）。
 func NewShadow(window time.Duration, domain FaultDomainFunc) *Shadow {
+	return NewShadowWithLimits(window, domain, nil, nil)
+}
+
+// NewShadowWithLimits 构造并给去重器/聚类器分别装配容量护栏
+// （优化方案 #6；guard 传 nil = 对应结构不设限）。
+func NewShadowWithLimits(window time.Duration, domain FaultDomainFunc, dedupGuard, clusterGuard *memguard.Guard) *Shadow {
 	return &Shadow{
-		dedup:     NewDedup(window),
-		clusterer: NewClusterer(window, domain),
+		dedup:     NewDedupWithLimits(window, dedupGuard),
+		clusterer: NewClustererWithLimits(window, domain, clusterGuard),
 	}
+}
+
+// MemGuards 聚合底层两个有界结构的护栏（供装配层注册指标）。
+func (s *Shadow) MemGuards() []*memguard.Guard {
+	out := append(s.dedup.MemGuards(), s.clusterer.MemGuards()...)
+	return out
 }
 
 // Process 处理一条告警并产出影子判决。告警本身照常放行——本方法

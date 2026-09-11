@@ -18,6 +18,7 @@ import (
 	"opscopilot/internal/connector"
 	"opscopilot/internal/noise"
 	"opscopilot/internal/notify"
+	"opscopilot/pkg/memguard"
 )
 
 // 降噪模式常量（env 解析与白名单校验在 config；这里保留运行期比对取值）。
@@ -60,6 +61,9 @@ type NoiseEngine struct {
 	// 随历史线性增长——按签名去重，只有变化过的簇才写。Restore 后清空
 	// （重建自存储侧，签名必须重新建立）。
 	persistedSig map[string]string
+	// sigGuard persistedSig 的容量护栏（优化方案 #6）：簇从 Clusterer
+	// 消失后其签名条目不会再被查到——超限即 GC 孤儿键（淘汰计数 + WARN）。
+	sigGuard *memguard.Guard
 	// enforce 转正模式（W9-1，ADR-011）：true = WouldSuppress 判决交
 	// Gate 真拦截、放行项发通知；false = 影子（默认，不碰 Gate）。
 	enforce bool
@@ -84,19 +88,44 @@ type NoiseEngine struct {
 // （挂载点与 ProcessAlerts 均做 nil 检查）。
 // spec.Window 默认 10m：30s 采集轮询下，10 分钟足以覆盖同一故障的重复告警，
 // 又不至于把相隔较远的两次独立故障并成一簇。
-func NewNoiseEngine(sink *TopologySink, logger connector.Logger, tenant string, spec config.NoiseSection) *NoiseEngine {
+// mem（#6 内存有界化）给去重指纹表/内存簇/落库签名缓存三个结构装容量
+// 护栏；零值（上限 0）= 全部不设限，行为与设限前一致。
+func NewNoiseEngine(sink *TopologySink, logger connector.Logger, tenant string, spec config.NoiseSection, mem config.MemLimitSection) *NoiseEngine {
 	if !spec.Enabled {
 		return nil
 	}
-	return &NoiseEngine{
-		shadow:       noise.NewShadow(spec.Window, nil), // 域函数按批经 SetDomain 注入
-		sink:         sink,
-		enabled:      true,
-		logger:       logger,
-		tenant:       tenant,
-		persistedSig: make(map[string]string),
-		enforce:      spec.Mode == ModeEnforce,
+	n := &NoiseEngine{
+		sink:     sink,
+		logger:   logger,
+		tenant:   tenant,
+		enforce:  spec.Mode == ModeEnforce,
+		sigGuard: memguard.New("noise_sigcache", mem.NoiseSigCache, mem.WarnRatio),
 	}
+	n.shadow = noise.NewShadowWithLimits(spec.Window, nil, // 域函数按批经 SetDomain 注入
+		memguard.New("noise_dedup", mem.NoiseDedup, mem.WarnRatio),
+		memguard.New("noise_clusters", mem.NoiseClusters, mem.WarnRatio))
+	n.enabled = true
+	n.persistedSig = make(map[string]string)
+	n.sigGuard.SetSize(n.sigCacheSize)
+	return n
+}
+
+// MemGuards 本引擎持有的全部容量护栏（签名缓存 + 去重器 + 聚类器）。
+func (n *NoiseEngine) MemGuards() []*memguard.Guard {
+	if n == nil {
+		return nil
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	out := append([]*memguard.Guard{n.sigGuard}, n.shadow.MemGuards()...)
+	return out
+}
+
+// sigCacheSize 签名缓存当前条数（锁内读；gauge 回调）。
+func (n *NoiseEngine) sigCacheSize() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return len(n.persistedSig)
 }
 
 // SetRecordSink 挂载簇落库出口（W4-1.5 双写管道）。传 nil 卸载。
@@ -338,6 +367,9 @@ func clusterSig(cl noise.Cluster) string {
 // collectDirtyClusters 锁内挑选签名变化的簇。
 // 活跃簇 + 本批新 resolve 的簇（状态从 open/acked → resolved）都会入选；
 // 早已 resolved 且未变的簇不再重复写（F3 写放大修复）。
+// 收尾做签名缓存的容量 GC（#6）：簇已从 Clusterer 消失（内存淘汰或窗口
+// 老化）后其签名永久无用——超上限先清这类孤儿键；活簇的签名不动
+// （动了指纹缓存只是多写一次，但留孤儿才是只进不出的真泄漏）。
 func (n *NoiseEngine) collectDirtyClusters() []noise.ClusterRecord {
 	clusters := n.shadow.Clusterer().Clusters()
 	dirty := make([]noise.ClusterRecord, 0, len(clusters))
@@ -348,6 +380,23 @@ func (n *NoiseEngine) collectDirtyClusters() []noise.ClusterRecord {
 		}
 		n.persistedSig[cl.Key] = sig
 		dirty = append(dirty, cl.ToRecord(n.tenant))
+	}
+	if excess := n.sigGuard.Over(len(n.persistedSig)); excess > 0 {
+		live := make(map[string]struct{}, len(clusters))
+		for _, cl := range clusters {
+			live[cl.Key] = struct{}{}
+		}
+		dropped := 0
+		for k := range n.persistedSig {
+			if dropped >= excess {
+				break
+			}
+			if _, ok := live[k]; !ok {
+				delete(n.persistedSig, k)
+				dropped++
+			}
+		}
+		n.sigGuard.Evicted(dropped) // dropped=0（签名全对应活簇）时不计数——容量此时由簇上限护栏兜底
 	}
 	return dirty
 }

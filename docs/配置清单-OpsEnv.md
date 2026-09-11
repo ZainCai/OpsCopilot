@@ -10,12 +10,14 @@
 >   （`config invalid (N error(s)): - KEY: ...`），不再"修一个报一个"；
 > - on/off 开关只认 `on|off`（大小写不敏感、允许首尾空白）；`1/true/yes` 等一律拒绝；
 > - duration 类必须能按 Go duration 解析且为正数；整数类必须为正整数；
+>   比例类（OPS_MEMLIMIT_WARN_RATIO）必须是 (0,1] 内的浮点数；
 > - 保留窗类接受 duration / `<N>d` / `off|0|never`（off 语义=关闭，非非法值）；
 > - **例外**：`REDIS_ALERT_ADDR` / `REDIS_CACHE_ADDR` 必填——双实例物理隔离
 >   （v1.2 C2 / G1"缺一拒绝启动"）不因收敛放松；两地址归一化后相同
 >   （`localhost` ≡ `127.0.0.1`、大小写/空白不敏感）同样拒绝启动。
 
-统计：**35 个运行时 env 键**（`OPS_*` 33 + `REDIS_*` 2），12 组。
+统计：**44 个运行时 env 键**（`OPS_*` 42 + `REDIS_*` 2），13 组。
+（优化方案 #6 新增 `OPS_MEMLIMIT_*` 组 9 键：无界内存结构的容量上限 + 告警水位。）
 另有 1 个测试门控键与 2 个独立 CLI 工具的键，见文末附录 B/C。
 
 ## 清单表
@@ -57,6 +59,20 @@
 | 33 | `OPS_TOPOLOGY_EDGES` | 拓扑与变更 | 边声明 `src->dst,...` | 空 = 无静态边 | 段格式非法 → 启动失败（`parseStaticEdges` 留在 cmd，仍 fail-fast） | `main.go` → `Sink.AttachStaticEdges` |
 | 34 | `OPS_CHANGE_RETENTION` | 拓扑与变更 | 保留窗（duration/`<N>d`/off） | `7d` | 非法 → 启动失败（原 `NewChangePrunerFromEnv` 报错，统一进 Load 聚合） | `ChangePruner` 保留窗 **与** `assembly.go` PG 回放窗口（两侧同窗，优化方案 #4） |
 | 35 | `OPS_CHANGE_PRUNE_INTERVAL` | 拓扑与变更 | 正 duration | `1h` | 非法 → 启动失败（原行为，移入 Load） | `ChangePruner` 周期 |
+| 36 | `OPS_MEMLIMIT_WARN_RATIO` | 内存有界化 | 比例浮点 (0,1] | `0.8` | 非数字/越界 → **启动失败** | `pkg/memguard.Guard` 告警水位（规模达 上限×比例 先打 WARN，不等淘汰） |
+| 37 | `OPS_MEMLIMIT_TOPOLOGY_NODES` | 内存有界化 | 正整数 | `100000` | **启动失败** | `topology.NewBuilderWithLimits`（节点按最久未活跃淘汰；上限保守——过度淘汰伤降噪故障域与 RCA as_of 取证） |
+| 38 | `OPS_MEMLIMIT_TOPOLOGY_EDGES` | 内存有界化 | 正整数 | `400000`（节点×4） | **启动失败** | 同上（边独立上限兜底；节点淘汰连带删边一并计数） |
+| 39 | `OPS_MEMLIMIT_INCIDENTS` | 内存有界化 | 正整数 | `50000` | **启动失败** | `incident.NewMemStoreWithLimits`（**仅 DB 缺席降级路径**；resolved 最先出局，其次最久未活跃） |
+| 40 | `OPS_MEMLIMIT_ESCALATION_LEDGER` | 内存有界化 | 正整数 | `100000` | **启动失败** | `newMemEscalationLedgerWithLimits`（无 DB 时升级台账按认领最早淘汰） |
+| 41 | `OPS_MEMLIMIT_NOISE_DEDUP` | 内存有界化 | 正整数 | `200000` | **启动失败** | `noise.NewDedupWithLimits`（窗口清扫挡不住窗口内唯一指纹洪峰；逐条 fail-open=再放行一次） |
+| 42 | `OPS_MEMLIMIT_NOISE_CLUSTERS` | 内存有界化 | 正整数 | `50000` | **启动失败** | `noise.NewClustererWithLimits`（活跃+历史总量；resolved 最先出局——真相源在 alert_cluster/Redis 镜像，可 Restore 重建） |
+| 43 | `OPS_MEMLIMIT_NOISE_SIGCACHE` | 内存有界化 | 正整数 | `50000` | **启动失败** | `NoiseEngine.persistedSig` 孤儿键超限 GC（簇消失后的签名条目永久无用） |
+| 44 | `OPS_MEMLIMIT_AUDIT` | 内存有界化 | 正整数 | `50000` | **启动失败** | `NewMemAuditLogWithLimits`（无 DB 时审计尾部截断丢最旧） |
+
+> #6 指标（非 env，登记于此便于对照）：每个有界结构两项——
+> `opscopilot_mem_entries{store="builder|builder_edges|incidents|escalation_ledger|noise_dedup|noise_clusters|noise_sigcache|audit"}`（gauge）
+> 与 `opscopilot_mem_evictions_total{store=…}`（counter），经 `pkg/memguard.Guard.RegisterTo`
+> 挂进 `/metrics`；淘汰同时记 slog WARN（首次必打 + 每分钟限流）。
 
 ## 附录 A：进 schema 但**没有 env 通道**的口径（`MetricsSection` 等）
 

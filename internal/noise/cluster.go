@@ -32,6 +32,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"opscopilot/pkg/memguard"
 )
 
 // ClusterState 簇状态（封闭集合，与 alert_cluster.state 一致）。
@@ -112,20 +114,92 @@ type Clusterer struct {
 	byFingerprint map[string]string
 	// byNode 节点 → 活跃簇 Key（同上；指纹命中优先于节点命中）。
 	byNode map[string]string
+	// guard 容量护栏（优化方案 #6；nil = 不设限，行为与历史一致）。
+	// 上限管的是 active+resolved 总量：**resolved 最先出局**（历史区，
+	// 真相源在 alert_cluster 表/Redis 镜像，丢了可 Restore 重建）；
+	// resolved 清空后仍超限才动 active 里最久未活跃者——代价是同指纹
+	// 再来会另起新簇（fail-open，与"宁漏勿杀"同向）。
+	guard *memguard.Guard
 }
 
-// NewClusterer 构造聚类器。window <= 0 视为不聚类（每条告警自成簇——
-// 与 Dedup 的零窗口语义一致：降噪开关坏了宁可全放行）。
+// NewClusterer 构造聚类器（无容量上限）。window <= 0 视为不聚类（每条告警
+// 自成簇——与 Dedup 的零窗口语义一致：降噪开关坏了宁可全放行）。
 // domain 可为 nil（拓扑不可用）。
 func NewClusterer(window time.Duration, domain FaultDomainFunc) *Clusterer {
-	return &Clusterer{
+	return NewClustererWithLimits(window, domain, nil)
+}
+
+// NewClustererWithLimits 构造并装配容量护栏（guard nil = 不设限）。
+func NewClustererWithLimits(window time.Duration, domain FaultDomainFunc, guard *memguard.Guard) *Clusterer {
+	c := &Clusterer{
 		window:        window,
 		domain:        domain,
 		active:        make(map[string]*Cluster),
 		resolved:      make(map[string]*Cluster),
 		byFingerprint: make(map[string]string),
 		byNode:        make(map[string]string),
+		guard:         guard,
 	}
+	guard.SetSize(c.totalLockedSize)
+	return c
+}
+
+// MemGuards 返回装配的护栏（供装配层注册进指标注册表）。
+func (c *Clusterer) MemGuards() []*memguard.Guard {
+	if c.guard == nil {
+		return nil
+	}
+	return []*memguard.Guard{c.guard}
+}
+
+// totalLockedSize 活跃+历史簇总量。命名带 Locked 是提醒：调用方要么持
+// c.mu（enforce 路径），要么在锁外由 gauge 回调进入——两者都在 c.mu 内读
+// map（gauge 路径经 SetSize 绑定的正是本方法，自身加锁）。
+func (c *Clusterer) totalLockedSize() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.active) + len(c.resolved)
+}
+
+// enforceLocked 超限淘汰（必须持 c.mu）：先清 resolved 里 LastSeen 最旧
+// 的（同刻按 Key 字典序），不够再动 active 里最久未活跃者。
+func (c *Clusterer) enforceLocked() {
+	if c.guard == nil {
+		return
+	}
+	excess := c.guard.Over(len(c.active) + len(c.resolved))
+	removed := 0
+	for removed < excess {
+		if key, ok := pickOldestByLastSeen(c.resolved); ok {
+			delete(c.resolved, key)
+			removed++
+			continue
+		}
+		key, ok := pickOldestByLastSeen(c.active)
+		if !ok {
+			break
+		}
+		c.unindexLocked(key)
+		delete(c.active, key)
+		removed++
+	}
+	if removed > 0 {
+		c.guard.Evicted(removed)
+	}
+}
+
+// pickOldestByLastSeen 区内最久未活跃一条（LastSeen 最早，同刻按 Key 字典序）。
+func pickOldestByLastSeen(m map[string]*Cluster) (string, bool) {
+	var bestKey string
+	var bestAt time.Time
+	var found bool
+	for k, cl := range m {
+		if !found || cl.LastSeen.Before(bestAt) ||
+			(cl.LastSeen.Equal(bestAt) && k < bestKey) {
+			bestKey, bestAt, found = k, cl.LastSeen, true
+		}
+	}
+	return bestKey, found
 }
 
 // ErrUnknownCluster Ack 目标簇不存在。
@@ -142,7 +216,9 @@ func (c *Clusterer) Ingest(e Event) (*Cluster, bool) {
 	c.sweepLocked(e.OccurredAt) // 先清场：过期簇 resolve 并解除索引
 
 	if ck, ok := c.byFingerprint[e.Fingerprint]; ok {
-		return c.absorbLocked(c.active[ck], e), false
+		cl := c.absorbLocked(c.active[ck], e)
+		c.enforceLocked()
+		return cl, false
 	}
 	// 故障域命中：同节点或域函数判定连通。候选取 LastSeen 最新（见包注释决定性契约）。
 	// 只在活跃（未 resolve）簇中找——resolved 是历史，不能再吸收新告警
@@ -160,9 +236,13 @@ func (c *Clusterer) Ingest(e Event) (*Cluster, bool) {
 		}
 	}
 	if best != nil {
-		return c.absorbLocked(best, e), false
+		cl := c.absorbLocked(best, e)
+		c.enforceLocked()
+		return cl, false
 	}
-	return c.newClusterLocked(e), true
+	cl := c.newClusterLocked(e)
+	c.enforceLocked()
+	return cl, true
 }
 
 // sameDomainLocked 簇内任一节点与新告警节点同域即为命中。

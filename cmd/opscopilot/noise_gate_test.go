@@ -24,7 +24,7 @@ func (c *recorderChannel) Send(m notify.Message) error {
 }
 
 func TestNoiseModeDefaultShadow(t *testing.T) {
-	ne := NewNoiseEngine(noiseTestSink(t), newQuietLogger(), testTenant, noiseSpec(nil))
+	ne := NewNoiseEngine(noiseTestSink(t), newQuietLogger(), testTenant, noiseSpec(nil), config.MemLimitSection{})
 	if ne == nil {
 		t.Fatal("default spec must yield an engine")
 	}
@@ -35,7 +35,7 @@ func TestNoiseModeDefaultShadow(t *testing.T) {
 
 func TestNoiseModeEnforce(t *testing.T) {
 	ne := NewNoiseEngine(noiseTestSink(t), newQuietLogger(), testTenant,
-		noiseSpec(func(s *config.NoiseSection) { s.Mode = ModeEnforce }))
+		noiseSpec(func(s *config.NoiseSection) { s.Mode = ModeEnforce }), config.MemLimitSection{})
 	if ne == nil {
 		t.Fatal("enforce spec must yield an engine")
 	}
@@ -51,7 +51,7 @@ func TestEnforceGateAdmitsNewSuppressesDedup(t *testing.T) {
 		noiseSpec(func(s *config.NoiseSection) {
 			s.Mode = ModeEnforce
 			s.Window = 10 * time.Minute
-		}))
+		}), config.MemLimitSection{})
 	if ne == nil {
 		t.Fatal("engine")
 	}
@@ -84,7 +84,7 @@ func TestEnforceGateAdmitsNewSuppressesDedup(t *testing.T) {
 // TestShadowNeverTouchesGate 影子纪律：影子模式下挂了闸门也绝不调用
 // （告警全量放行是 W4-1.4 以来的硬约定）。
 func TestShadowNeverTouchesGate(t *testing.T) {
-	ne := NewNoiseEngine(noiseTestSink(t), newQuietLogger(), testTenant, noiseSpec(nil))
+	ne := NewNoiseEngine(noiseTestSink(t), newQuietLogger(), testTenant, noiseSpec(nil), config.MemLimitSection{})
 	if ne == nil {
 		t.Fatal("engine")
 	}
