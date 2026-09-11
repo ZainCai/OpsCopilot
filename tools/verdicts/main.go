@@ -37,6 +37,9 @@ func main() {
 		tenant = flag.String("tenant", os.Getenv("OPS_TENANT"), "租户（缺省读 OPS_TENANT，再缺省 default）")
 	)
 	flag.Parse()
+	if *tenant == "" {
+		*tenant = "default" // 第七轮 H3：帮助文本承诺的兜底此前没实现，空租户会静默查 0 行
+	}
 	if *dsn == "" {
 		fmt.Fprintln(os.Stderr, "no DSN (set OPS_DB_DSN or -dsn)")
 		os.Exit(2)
@@ -74,6 +77,11 @@ ORDER BY occurred_at`, *since, *tenant)
 	if err := rows.Err(); err != nil {
 		fmt.Fprintln(os.Stderr, "rows:", err)
 		os.Exit(1)
+	}
+	if len(list) == 0 {
+		// 空结果往往意味着租户/窗口配错——静默输出会让 evaluate.py 产生
+		// "静默段全 PASS"的假 100%（第七轮 H3），必须让操作者看见。
+		fmt.Fprintf(os.Stderr, "WARNING: 0 verdicts for tenant %q since %v — check OPS_TENANT/window\n", *tenant, *since)
 	}
 
 	data, err := json.MarshalIndent(list, "", "  ")

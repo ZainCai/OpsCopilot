@@ -4,6 +4,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"opscopilot/internal/incident"
@@ -97,9 +98,10 @@ func (g *RESTGateway) handleDuplicates(w http.ResponseWriter, r *http.Request) {
 	// 候选集：全部未解决事件（M2 规模下够用；量大时改按时间窗裁剪）。
 	all, err := g.incidents.List("")
 	if err != nil {
-		// D5 决策 A：List 现在带 error，DB 故障必须如实暴露（500），
-		// 不能再伪装成"没有候选"。
-		writeErr(w, http.StatusInternalServerError, "list incidents: "+err.Error())
+		// D5 决策 A：DB 故障必须如实暴露（500），但细节只进日志——
+		// err.Error() 含主机/schema/约束名，回给客户端等于信息泄露（第七轮 M1）。
+		g.logf("WARNING: duplicates list: %v", err)
+		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	cands := incident.SimilarCandidates(target, all, dedupWindow)
@@ -268,14 +270,14 @@ func (g *RESTGateway) handleIncidents(w http.ResponseWriter, r *http.Request) {
 		Cursor: q.Get("cursor"),
 	})
 	if err != nil {
-		// 游标损坏 / state 非法 / DB 故障：前两者是客户端错，DB 故障是服务端错。
-		// 简化：游标/参数类错误由 Store 以 "bad cursor"/"invalid state" 前缀给出。
-		msg := err.Error()
-		code := http.StatusInternalServerError
-		if strings.Contains(msg, "bad cursor") || strings.Contains(msg, "invalid state") {
-			code = http.StatusBadRequest
+		// 游标损坏是客户端错（400，但只回固定文案——不透出解码细节）；
+		// 其余（含 DB 故障）一律 500 脱敏，细节进日志（第七轮 M1/M8）。
+		if errors.Is(err, incident.ErrBadCursor) {
+			writeErr(w, http.StatusBadRequest, "bad cursor")
+			return
 		}
-		writeErr(w, code, msg)
+		g.logf("WARNING: incidents list: %v", err)
+		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	// R6-4：内存态重启即丢——把落库形态透出给消费者。

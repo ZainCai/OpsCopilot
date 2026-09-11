@@ -579,14 +579,26 @@ func TestCORSOriginConfigurable(t *testing.T) {
 	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
 		t.Fatalf("default must not emit ACAO header, got %q", got)
 	}
-	asm.REST.SetCORSOrigin("https://ops.example.com")
+	if err := asm.REST.SetCORSOrigin("https://ops.example.com"); err != nil {
+		t.Fatalf("valid origin: %v", err)
+	}
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/incidents", nil))
 	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://ops.example.com" {
 		t.Fatalf("ACAO = %q, want configured origin", got)
 	}
+	// "*" 必须被拒绝（第七轮 M2：会静默恢复任意源可读）。
+	if err := asm.REST.SetCORSOrigin("*"); err == nil {
+		t.Fatal(`CORS origin "*" must be rejected`)
+	}
+	// 非法形态（无 scheme）必须被拒绝。
+	if err := asm.REST.SetCORSOrigin("ops.example.com"); err == nil {
+		t.Fatal("origin without scheme must be rejected")
+	}
 	// 清空（同源）再次确认可回退。
-	asm.REST.SetCORSOrigin("")
+	if err := asm.REST.SetCORSOrigin(""); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/incidents", nil))
 	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {

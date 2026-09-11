@@ -419,6 +419,10 @@ func afterCursor(inc Incident, curT time.Time, curID string) bool {
 	return inc.CreatedAt.Before(curT)
 }
 
+// ErrBadCursor 游标不合法（base64 解不开 / 无分隔符 / 时间错）。
+// 调用方（REST 层）用 errors.Is 映射为 400——不要按文案子串匹配。
+var ErrBadCursor = errors.New("incident: bad cursor")
+
 // encodeCursor/decodeCursor 游标编解码：base64url("RFC3339Nano\x1fincidentID")。
 // 不透明字符串，客户端只透传。
 func encodeCursor(at time.Time, id string) string {
@@ -428,15 +432,15 @@ func encodeCursor(at time.Time, id string) string {
 func decodeCursor(s string) (time.Time, string, error) {
 	raw, err := base64.RawURLEncoding.DecodeString(s)
 	if err != nil {
-		return time.Time{}, "", fmt.Errorf("incident: bad cursor: %w", err)
+		return time.Time{}, "", fmt.Errorf("%w: %v", ErrBadCursor, err)
 	}
 	i := strings.IndexByte(string(raw), 0x1f)
 	if i < 0 {
-		return time.Time{}, "", errors.New("incident: bad cursor")
+		return time.Time{}, "", ErrBadCursor
 	}
 	at, err := time.Parse(time.RFC3339Nano, string(raw[:i]))
 	if err != nil {
-		return time.Time{}, "", fmt.Errorf("incident: bad cursor time: %w", err)
+		return time.Time{}, "", fmt.Errorf("%w: %v", ErrBadCursor, err)
 	}
 	return at, string(raw[i+1:]), nil
 }

@@ -13,6 +13,8 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"net/http"
@@ -47,10 +49,38 @@ type RESTGateway struct {
 	// 取代早期的 "*"：读端点含事件与审计数据，默认全放开等于把
 	// "任意网页可在受害者浏览器内跨源读取"当作默认行为。
 	corsOrigin string
+	// logf 服务端错误日志（500 脱敏后细节只进日志，不回客户端）。
+	logf func(string, ...any)
 }
 
 // SetCORSOrigin 设置跨源放行白名单（装配期调用；空串 = 仅同源）。
-func (g *RESTGateway) SetCORSOrigin(origin string) { g.corsOrigin = strings.TrimSpace(origin) }
+//
+// 第七轮 M2：拒绝 "*"——那会静默恢复"任意网页可跨源读事件/审计"，
+// 正是 D2 决策要消除的默认行为；其余值要求形如 scheme://host（或
+// "null"——file:// 调试用法），非法值 fail-fast。
+func (g *RESTGateway) SetCORSOrigin(origin string) error {
+	o := strings.TrimSpace(origin)
+	if o == "" {
+		g.corsOrigin = ""
+		return nil
+	}
+	if o == "*" {
+		return errors.New(`OPS_CORS_ORIGIN=* is not allowed: it re-enables any-webpage cross-origin reads of incidents/audit (see decision D2)`)
+	}
+	if o != "null" && !strings.Contains(o, "://") {
+		return fmt.Errorf("OPS_CORS_ORIGIN must be an origin like https://ops.example.com (or \"null\"), got %q", o)
+	}
+	g.corsOrigin = o
+	return nil
+}
+
+// SetLogf 注入服务端错误日志（装配期调用；nil = 静默）。
+func (g *RESTGateway) SetLogf(f func(string, ...any)) {
+	if f == nil {
+		f = func(string, ...any) {}
+	}
+	g.logf = f
+}
 
 // NewRESTGateway 构造。hub 为事件广播器（W11 实时推送），可为 nil。
 func NewRESTGateway(noise *NoiseEngine, sem *SemanticModelServer, incidents incident.Store, token string, audit AuditLog, hub *EventHub) *RESTGateway {

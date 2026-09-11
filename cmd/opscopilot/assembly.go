@@ -170,8 +170,12 @@ func NewAssembly(logger connector.Logger, webhookToken string) (*Assembly, error
 	hub := NewEventHub()
 	incStore = NewPublishStore(incStore, hub)
 	rest := NewRESTGateway(noiseEngine, semantic, incStore, webhookToken, audit, hub)
-	// D2 决策 B+C：跨源放行改为显式白名单（默认不设置 = 仅同源）。
-	rest.SetCORSOrigin(os.Getenv("OPS_CORS_ORIGIN"))
+	// D2 决策 B+C：跨源放行改为显式白名单（默认不设置 = 仅同源）；
+	// "*" 与非法形态直接让装配失败（第七轮 M2：不能让错误配置静默生效）。
+	if err := rest.SetCORSOrigin(os.Getenv("OPS_CORS_ORIGIN")); err != nil {
+		return nil, err
+	}
+	rest.SetLogf(logf)
 
 	asm := &Assembly{
 		Sink:      sink,

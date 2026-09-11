@@ -14,13 +14,22 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// isUndefinedTable 判定表/列/函数不存在（SQLSTATE 42P01）。
+// 不用错误文案子串——"xxx does not exist" 会连列缺失/角色缺失一起命中。
+func isUndefinedTable(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "42P01"
+}
 
 // retentionBatchSize 单轮归档上限（防一次拖走过多行、事务过大）。
 const retentionBatchSize = 500
@@ -98,7 +107,7 @@ func (r *RetentionSweeper) Run(ctx context.Context) {
 			if err != nil {
 				// 归档表不存在（没跑迁移 000009）是配置错误：大声报错并停机
 				// 自身，避免每 6h 刷一条同样的失败。
-				if strings.Contains(err.Error(), "does not exist") {
+				if isUndefinedTable(err) {
 					r.logf("ERROR: retention disabled — table incident_archive missing, " +
 						"run migrations (000009): " + err.Error())
 					return
