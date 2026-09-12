@@ -1,0 +1,45 @@
+{
+  "run_id": "20260912-202011",
+  "tenant": "rca-eval-20260912-202011",
+  "mode": "evidence(--no-llm)",
+  "generated_at": "2026-09-12T12:25:22.0163199Z",
+  "threshold": 0.85,
+  "units_total": 4,
+  "units_completed": 4,
+  "top1_hits": 4,
+  "top3_hits": 4,
+  "evidence_complete": 4,
+  "silence_guards_total": 3,
+  "silence_guards_pass": 3,
+  "top1_rate": 1,
+  "top3_rate": 1,
+  "evidence_complete_rate": 1,
+  "detect_lag_ms": {
+    "n": 4,
+    "min": 5065,
+    "p50": 5066,
+    "p95": 5074,
+    "max": 5074
+  },
+  "rca_http_ms": {
+    "n": 4,
+    "min": 3,
+    "p50": 4,
+    "p95": 8,
+    "max": 8
+  },
+  "audit_duration_ms": {
+    "n": 4,
+    "min": 2,
+    "p50": 2,
+    "p95": 4,
+    "max": 4
+  },
+  "findings": [
+    "跨 run 变更证据泄漏（A/A-n1）：根因链含他 run 变更 [chg-20260912-201043-A-root chg-20260912-201043-A-d1 chg-20260912-200144-A-root chg-20260912-200144-A-d1]——change_record 读取无租户过滤（internal/topology/change_pg.go:157 注释自证 M1 单租户假设），多租户转正前必须收口",
+    "跨 run 变更证据泄漏（B/B-n123）：根因链含他 run 变更 [chg-20260912-201043-B-root chg-20260912-201043-A-root chg-20260912-201043-B-d1 chg-20260912-201043-A-d1 chg-20260912-200144-B-root chg-20260912-200144-A-root chg-20260912-200144-B-d1 chg-20260912-200144-A-d1]——change_record 读取无租户过滤（internal/topology/change_pg.go:157 注释自证 M1 单租户假设），多租户转正前必须收口",
+    "跨 run 变更证据泄漏（D/D-n4）：根因链含他 run 变更 [chg-20260912-201043-D4-root chg-20260912-201043-B-d3 chg-20260912-201043-D4-d1 chg-20260912-200144-D4-root chg-20260912-200144-B-d3 chg-20260912-200144-D4-d1]——change_record 读取无租户过滤（internal/topology/change_pg.go:157 注释自证 M1 单租户假设），多租户转正前必须收口",
+    "跨 run 变更证据泄漏（D/D-n5）：根因链含他 run 变更 [chg-20260912-201043-D5-root chg-20260912-201043-D5-d1 chg-20260912-201043-A-d3 chg-20260912-200144-D5-root chg-20260912-200144-D5-d1 chg-20260912-200144-A-d3]——change_record 读取无租户过滤（internal/topology/change_pg.go:157 注释自证 M1 单租户假设），多租户转正前必须收口"
+  ],
+  "gate_passed": true
+}

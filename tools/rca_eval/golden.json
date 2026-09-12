@@ -1,0 +1,168 @@
+{
+  "_about": "RCA 评测集（golden set）二期池 #8。ground truth 逐场景抄自 tools/faultinjector/main.go（行号见各字段 src_lines），答案只在本文件与注入器源码两处定义——注入器 playbook 变更时必须同步本文件（维护协议见 docs/reviews/rca-eval-* 报告第 7 章与 tools/rca_eval/main.go 文件头）。",
+  "_maintenance": [
+    "1) 场景告警/期望簇/expected_new_incidents 的唯一权威是 tools/faultinjector/main.go playbook()(L54-87) 与 alerts()(L169-203)；本文件逐条抄录并标行号。",
+    "2) 修改注入器剧本后，先跑 tools/rca_eval 的启动期 drift 校验（对照 injector /answerbook 的段序/场景码/expected_new_incidents），不一致评测直接退出（退出码 2），防答案漂移。",
+    "3) changes[] 是评测侧注入的变更证据（faultinjector 不产变更）：root=场景标注根因，distractor_*=干扰项；role 语义见 tools/rca_eval/main.go 注释。",
+    "4) 变更逻辑 ID 会在运行时拼上租户后缀（chg-<run>-<logical_id>）：独立租户隔离事件/判决/审计，但【不隔离变更证据】（PGChangeStore 读取无 tenant 过滤，change_pg.go:157 M1 单租户假设）——同节点历史 run 的变更会残留进 root_causes，评测器将其记为 foreign_refs 暴露（§5），不判 FAIL。"
+  ],
+  "source": {
+    "playbook": "tools/faultinjector/main.go playbook() L54-87",
+    "alerts": "tools/faultinjector/main.go alerts() L169-203",
+    "alert_labels": "tools/faultinjector/main.go add() L184-188（labels={alertname,instance,job=nodes,severity}）",
+    "prom_source_ref": "cmd/opscopilot/pull_alerts.go promFingerprint() L140-158（incident.source_ref = prom:sha256(sorted k=v\\n) 前16B hex）",
+    "topology_edges": "scripts/run_demo.sh L69 OPS_TOPOLOGY_EDGES=n1->n2,n2->n3",
+    "node_key_format": "prometheus://nodes/<instance>（tools/faultinjector/main.go L143-144 注释 + cmd/opscopilot/faultinjection_test.go faultTestEnv）"
+  },
+  "injector": {
+    "url": "http://127.0.0.1:19090",
+    "warmup_sec_min": 60,
+    "scale_note": "评测用 -scale 0.1（段=30s）；duration_sec 记原始剧本值，drift 校验按比例容忍缩放"
+  },
+  "app_expectations": {
+    "OPS_PULL_ALERTS": "on（拉取链路 → ingest_queue → UpsertExternal 建单）",
+    "OPS_INCIDENT_AUTOCREATE": "on（ingest worker 消费建单）",
+    "OPS_CONNECTOR_INTERVAL": "10s（ProcessAlerts 成簇节拍）",
+    "OPS_PULL_INTERVAL": "10s（告警入队节拍）",
+    "OPS_NOISE_WINDOW": "25s（< 静默段 30s@scale0.1——evaluate.py L16-21 同款纪律：否则上一段簇未过期、下一段并入旧簇会污染单元判定）",
+    "OPS_RCA": "on（默认即 on）"
+  },
+  "segments": [
+    {
+      "idx": 0,
+      "code": "A",
+      "name": "单节点磁盘故障",
+      "src_lines": "56-60",
+      "duration_sec": 300,
+      "expected_new_incidents": 1,
+      "alerts": [
+        { "fingerprint": "fp-a-disk", "alertname": "HighDiskUsage", "instance": "n1", "job": "nodes", "severity": "warning", "src_line": 192 },
+        { "fingerprint": "fp-a-inode", "alertname": "InodeExhaustion", "instance": "n1", "job": "nodes", "severity": "critical", "src_line": 193 }
+      ],
+      "clusters": [
+        {
+          "id": "A-n1",
+          "nodes": ["n1"],
+          "member_fingerprints": ["fp-a-disk", "fp-a-inode"],
+          "representative": "fp-a-disk",
+          "root_cause_change": "A-root",
+          "expected": "n1 的 HighDisk+InodeExhaust 聚成 1 簇（L58）",
+          "src_lines": "58-59"
+        }
+      ],
+      "changes": [
+        { "logical_id": "A-root", "role": "root", "node": "n1", "type": "deploy", "confidence": "high", "occurred_lead_sec": 10, "summary": "golden A 根因：n1 发版致磁盘打满" },
+        { "logical_id": "A-d1", "role": "distractor_same_node", "node": "n1", "type": "config_change", "confidence": "high", "occurred_lead_sec": 90, "summary": "同节点更早的高置信变更——考 top1 排名（贴 T0 优先）" },
+        { "logical_id": "A-d2", "role": "distractor_neighbor", "node": "n2", "type": "deploy", "confidence": "medium", "occurred_lead_sec": 40, "summary": "一跳邻域中置信——预期止步候选不进根因" },
+        { "logical_id": "A-d3", "role": "distractor_outside", "node": "n5", "type": "config_change", "confidence": "high", "occurred_lead_sec": 20, "summary": "域外高置信——特异性哨兵，进根因即误归因" }
+      ]
+    },
+    {
+      "idx": 1,
+      "code": "C",
+      "name": "静默窗口（防误报守护）",
+      "src_lines": "61-65",
+      "duration_sec": 300,
+      "expected_new_incidents": 0,
+      "silence_guard": true,
+      "clusters": [],
+      "changes": [],
+      "expected": "无告警，既有簇陆续 resolved（L63）——段窗内影子判决与本租户新建事件数必须为 0"
+    },
+    {
+      "idx": 2,
+      "code": "B",
+      "name": "交换机故障（多节点同发）",
+      "src_lines": "66-70",
+      "duration_sec": 300,
+      "expected_new_incidents": 1,
+      "alerts": [
+        { "fingerprint": "fp-b-lat-n1", "alertname": "HighLatency", "instance": "n1", "job": "nodes", "severity": "critical", "src_line": 195 },
+        { "fingerprint": "fp-b-lat-n2", "alertname": "HighLatency", "instance": "n2", "job": "nodes", "severity": "critical", "src_line": 196 },
+        { "fingerprint": "fp-b-lat-n3", "alertname": "HighLatency", "instance": "n3", "job": "nodes", "severity": "critical", "src_line": 197 }
+      ],
+      "clusters": [
+        {
+          "id": "B-n123",
+          "nodes": ["n1", "n2", "n3"],
+          "member_fingerprints": ["fp-b-lat-n1", "fp-b-lat-n2", "fp-b-lat-n3"],
+          "representative": "fp-b-lat-n1",
+          "root_cause_change": "B-root",
+          "expected": "n1/n2/n3 的 HighLatency 并成 1 簇（L68）；根因标在中间节点 n2（模拟交换机变更，考全故障域归因）",
+          "src_lines": "68-69"
+        }
+      ],
+      "changes": [
+        { "logical_id": "B-root", "role": "root", "node": "n2", "type": "deploy", "confidence": "high", "occurred_lead_sec": 10, "summary": "golden B 根因：n2（交换层）发版" },
+        { "logical_id": "B-d1", "role": "distractor_same_node", "node": "n2", "type": "rollback", "confidence": "high", "occurred_lead_sec": 90, "summary": "同节点更早高置信回滚——考排名与 recommend 语义" },
+        { "logical_id": "B-d2", "role": "distractor_neighbor", "node": "n3", "type": "config_change", "confidence": "medium", "occurred_lead_sec": 40, "summary": "域内他节点中置信——应排在 root 之后" },
+        { "logical_id": "B-d3", "role": "distractor_outside", "node": "n4", "type": "deploy", "confidence": "high", "occurred_lead_sec": 20, "summary": "域外高置信——特异性哨兵" },
+        { "logical_id": "B-legacy-a-root", "role": "note", "node": "", "type": "", "confidence": "", "occurred_lead_sec": 0, "summary": "说明：A 段残留变更（n1/n2/n5）在 B 的 30min 窗口内且 n1/n2 属 B 故障域，是真实的跨段干扰——B-root 必须凭贴 T0 胜出" }
+      ]
+    },
+    {
+      "idx": 3,
+      "code": "C",
+      "name": "静默窗口（防误报守护）",
+      "src_lines": "71-75",
+      "duration_sec": 300,
+      "expected_new_incidents": 0,
+      "silence_guard": true,
+      "clusters": [],
+      "changes": [],
+      "expected": "无告警（L73）"
+    },
+    {
+      "idx": 4,
+      "code": "D",
+      "name": "无关噪声（两独立事件）",
+      "src_lines": "76-80",
+      "duration_sec": 300,
+      "expected_new_incidents": 2,
+      "alerts": [
+        { "fingerprint": "fp-d-cert", "alertname": "CertExpiringSoon", "instance": "n4", "job": "nodes", "severity": "warning", "src_line": 199 },
+        { "fingerprint": "fp-d-backup", "alertname": "BackupFailed", "instance": "n5", "job": "nodes", "severity": "warning", "src_line": 200 }
+      ],
+      "clusters": [
+        {
+          "id": "D-n4",
+          "nodes": ["n4"],
+          "member_fingerprints": ["fp-d-cert"],
+          "representative": "fp-d-cert",
+          "root_cause_change": "D4-root",
+          "expected": "n4 独立成簇（L79 {n4}）",
+          "src_lines": "79"
+        },
+        {
+          "id": "D-n5",
+          "nodes": ["n5"],
+          "member_fingerprints": ["fp-d-backup"],
+          "representative": "fp-d-backup",
+          "root_cause_change": "D5-root",
+          "expected": "n5 独立成簇（L79 {n5}）；n5 域还吃进 A-d3（跨段域外干扰）——D5-root 须凭贴 T0 保住 top1",
+          "src_lines": "79"
+        }
+      ],
+      "changes": [
+        { "logical_id": "D4-root", "role": "root", "node": "n4", "type": "deploy", "confidence": "high", "occurred_lead_sec": 10, "summary": "golden D-n4 根因：证书轮换脚本发版" },
+        { "logical_id": "D4-d1", "role": "distractor_same_node", "node": "n4", "type": "config_change", "confidence": "high", "occurred_lead_sec": 90, "summary": "同节点更早高置信" },
+        { "logical_id": "D4-d2", "role": "distractor_neighbor", "node": "n4", "type": "config_change", "confidence": "medium", "occurred_lead_sec": 30, "summary": "同域中置信——top3 内允许，top1 不允许" },
+        { "logical_id": "D5-root", "role": "root", "node": "n5", "type": "deploy", "confidence": "high", "occurred_lead_sec": 10, "summary": "golden D-n5 根因：备份作业配置发版" },
+        { "logical_id": "D5-d1", "role": "distractor_same_node", "node": "n5", "type": "rollback", "confidence": "high", "occurred_lead_sec": 90, "summary": "同节点更早高置信" },
+        { "logical_id": "D5-d2", "role": "distractor_neighbor", "node": "n5", "type": "config_change", "confidence": "medium", "occurred_lead_sec": 30, "summary": "同域中置信" }
+      ]
+    },
+    {
+      "idx": 5,
+      "code": "C",
+      "name": "静默窗口（防误报守护）",
+      "src_lines": "81-85",
+      "duration_sec": 300,
+      "expected_new_incidents": 0,
+      "silence_guard": true,
+      "clusters": [],
+      "changes": [],
+      "expected": "无告警（L83）"
+    }
+  ]
+}

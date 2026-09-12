@@ -19,6 +19,8 @@ credentials.yaml
 Thumbs.db
 # 审核补充（R6）：构建产物与运行时输出
 .demo/
+# RCA 评测集（二期池 #8）运行时产物：exe/日志/JSONL（report.md 在 docs/reviews 跟踪）
+.rca-eval/
 *.log
 evaluation-report.md
 verdicts.json
