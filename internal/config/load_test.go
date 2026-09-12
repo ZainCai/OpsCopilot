@@ -25,6 +25,17 @@ func redisEnv(alertAddr, cacheAddr string) map[string]string {
 
 // TestLoadFromDefaults 只给必填项时，其余字段必须等于 Defaults() 基线
 // （即"缺失取默认、默认值与现状一致"）。
+func TestLoadFromDefaultsRCA(t *testing.T) {
+	c, err := LoadFrom(envMap(redisEnv("127.0.0.1:6380", "127.0.0.1:6381")))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !c.RCA.Enabled || c.RCA.Timeout != DefaultRCATimeout ||
+		c.RCA.Window != DefaultRCAWindow || c.RCA.Depth != DefaultRCADepth {
+		t.Fatalf("rca defaults = %+v, want on/%s/%s/%d", c.RCA, DefaultRCATimeout, DefaultRCAWindow, DefaultRCADepth)
+	}
+}
+
 func TestLoadFromDefaults(t *testing.T) {
 	got, err := LoadFrom(envMap(redisEnv("127.0.0.1:6380", "127.0.0.1:6381")))
 	if err != nil {
@@ -76,20 +87,25 @@ func TestLoadFromAggregatesAllErrors(t *testing.T) {
 	env[EnvIngestBatch] = "-3"
 	env[EnvLeaderElection] = "yes"     // #11：on/off 开关只认 on|off
 	env[EnvLeaderRetryInterval] = "0s" // 非正 duration 同样拒绝
+	env[EnvRCAEnabled] = "true"        // #12：开关只认 on|off
+	env[EnvRCASTimeout] = "-1s"        // #12：非正 duration 拒绝
+	env[EnvRCAWindow] = "soon"         // #12：非法 duration 拒绝
+	env[EnvRCADepth] = "0"             // #12：跳数须为正整数
 
 	_, err := LoadFrom(envMap(env))
 	var agg *Error
 	if !errors.As(err, &agg) {
 		t.Fatalf("want *Error, got %T: %v", err, err)
 	}
-	if len(agg.Errs) != 12 {
-		t.Fatalf("want 12 aggregated errors, got %d: %v", len(agg.Errs), err)
+	if len(agg.Errs) != 16 {
+		t.Fatalf("want 16 aggregated errors, got %d: %v", len(agg.Errs), err)
 	}
 	for _, key := range []string{
 		EnvDBMaxConns, EnvPullInterval, EnvEscalationAfter, EnvNoiseWindow,
 		EnvNoiseMode, EnvAllowUnauthenticated, EnvIncidentRetention,
 		EnvChangePruneInterval, EnvCORSOrigin, EnvIngestBatch,
 		EnvLeaderElection, EnvLeaderRetryInterval,
+		EnvRCAEnabled, EnvRCASTimeout, EnvRCAWindow, EnvRCADepth,
 	} {
 		if !strings.Contains(err.Error(), key) {
 			t.Errorf("aggregated error must mention %s, got:\n%v", key, err)
@@ -159,6 +175,10 @@ func TestLoadFromValidOverrides(t *testing.T) {
 	env[EnvTopologyEdges] = "n1->n2,n2->n3"
 	env[EnvChangeRetention] = "off"
 	env[EnvChangePruneInterval] = "30m"
+	env[EnvRCAEnabled] = "off"
+	env[EnvRCASTimeout] = "30s"
+	env[EnvRCAWindow] = "1h"
+	env[EnvRCADepth] = "3"
 
 	c, err := LoadFrom(envMap(env))
 	if err != nil {
@@ -185,6 +205,7 @@ func TestLoadFromValidOverrides(t *testing.T) {
 		{"edges raw", c.Topology.Edges == "n1->n2,n2->n3"},
 		{"change off", !c.Topology.ChangeEnabled && c.Topology.ChangePruneInterval == 30*time.Minute},
 		{"redis", c.Redis.Alert.Addr == "redis-alert:6379" && c.Redis.Cache.Addr == "redis-cache:6379"},
+		{"rca", !c.RCA.Enabled && c.RCA.Timeout == 30*time.Second && c.RCA.Window == time.Hour && c.RCA.Depth == 3},
 	}
 	for _, ck := range checks {
 		if !ck.ok {
