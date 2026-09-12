@@ -92,7 +92,8 @@ ORDER BY generation DESC LIMIT 1
 FOR UPDATE`, s.tenantID, string(origin), sourceRef).Scan(
 		&cur.ID, &cur.Title, &cur.Severity, &cur.State, &cur.CreatedAt, &cur.UpdatedAt,
 		&nullTime{t: &cur.ResolvedAt}, &cur.Origin, &cur.SourceRef, &cur.SourceMeta,
-		&cur.CreatedBy, &cur.MergedInto, &cur.AutoClosePolicy, &cur.AckBy, &curGen)
+		&cur.CreatedBy, &cur.MergedInto, &cur.AutoClosePolicy, &cur.AckBy,
+		&nullTime{t: &cur.AckedAt}, &cur.SLAMinutes, &curGen)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		inc, ierr := insertExternalGen(ctx, tx, s.tenantID, base, origin, sourceRef, 1, title, severity, createdBy, meta)

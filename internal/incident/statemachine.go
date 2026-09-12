@@ -21,6 +21,11 @@ type transitionPlan struct {
 	// StampResolved → 转入 resolved：resolved_at == updated_at
 	//（Mem 同 clock 值；PG 同语句双 now()，同一事务时间戳）。
 	StampResolved bool
+	// StampAckedAt → 转入 acked：acked_at 首戳（W10-2，MTTA 数据源）。
+	// 语义"只落一次"：Mem 侧 AckedAt 零值守卫（下方 applyTransitionPlan），
+	// PG 侧 `acked_at IS NULL` 守卫——转移表本就拒绝重复 acked，双保险兜住
+	// 并发/后门写入，杜绝戳被后移。新增确定性行为，契约测试硬断言双 Store 一致。
+	StampAckedAt bool
 	// AckBy → resolved 且 actor 去空白后非空：记录处置人；空串 = 不改写。
 	AckBy string
 }
@@ -33,6 +38,7 @@ func planTransition(from, to State, actor string) (transitionPlan, error) {
 	p := transitionPlan{To: to}
 	if to == StateAcked {
 		p.FlipManualOnly = true
+		p.StampAckedAt = true
 	}
 	if to == StateResolved {
 		p.StampResolved = true
@@ -52,6 +58,9 @@ func applyTransitionPlan(inc *Incident, p transitionPlan, now time.Time) {
 	}
 	if p.StampResolved {
 		inc.ResolvedAt = now
+	}
+	if p.StampAckedAt && inc.AckedAt.IsZero() {
+		inc.AckedAt = now // 首戳只落一次（见 transitionPlan.StampAckedAt）
 	}
 	if p.AckBy != "" {
 		inc.AckBy = p.AckBy

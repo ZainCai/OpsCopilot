@@ -370,6 +370,10 @@ func NewAssembly(logger connector.Logger, cfg *config.Config) (*Assembly, error)
 			DedupWindow:       cfg.Noise.DedupWindow,
 			IncidentBodyLimit: cfg.Metrics.IncidentBodyLimit,
 			NotifyBodyLimit:   cfg.Metrics.NotifyBodyLimit,
+			SLACritical:       time.Duration(cfg.SLA.CriticalMinutes) * time.Minute,
+			SLAWarning:        time.Duration(cfg.SLA.WarningMinutes) * time.Minute,
+			SLAInfo:           time.Duration(cfg.SLA.InfoMinutes) * time.Minute,
+			KPIWindow:         cfg.KPI.Window,
 		})
 	// D2 决策 B+C：跨源放行改为显式白名单（默认不设置 = 仅同源）。
 	// 合法性校验已在 config.Load 前置（"*"/畸形值启动失败）；SetCORSOrigin

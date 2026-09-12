@@ -37,7 +37,8 @@ func isUniqueViolation(err error) bool {
 // 各的列清单、漏了它；统一后新增字段只改一处）。行内 SELECT 需要附加列的
 // 地方在其后拼接（如 generation）。
 const pgIncidentCols = `incident_id, title, severity, state, created_at, updated_at, resolved_at,
-       origin, source_ref, source_meta, created_by, merged_into, auto_close_policy, ack_by`
+       origin, source_ref, source_meta, created_by, merged_into, auto_close_policy, ack_by,
+       acked_at, sla_minutes`
 
 // rowScanner pgx Rows/Row 的公共扫描面。
 type rowScanner interface {
@@ -49,7 +50,7 @@ func scanIncident(r rowScanner, inc *Incident) error {
 	return r.Scan(&inc.ID, &inc.Title, &inc.Severity, &inc.State, &inc.CreatedAt,
 		&inc.UpdatedAt, &nullTime{t: &inc.ResolvedAt}, &inc.Origin, &inc.SourceRef,
 		&inc.SourceMeta, &inc.CreatedBy, &inc.MergedInto, &inc.AutoClosePolicy,
-		&inc.AckBy)
+		&inc.AckBy, &nullTime{t: &inc.AckedAt}, &inc.SLAMinutes)
 }
 
 // PGStore TimescaleDB 实现。

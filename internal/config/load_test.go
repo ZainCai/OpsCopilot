@@ -318,6 +318,10 @@ func TestLoadFromValidOverrides(t *testing.T) {
 	env[EnvEscalation] = "on"
 	env[EnvEscalationAfter] = "1h"
 	env[EnvEscalationInterval] = "5m"
+	env[EnvSLACriticalMinutes] = "30"
+	env[EnvSLAWarningMinutes] = "120"
+	env[EnvSLAInfoMinutes] = "480"
+	env[EnvKPIWindow] = "24h"
 	env[EnvIncidentRetention] = "30d"
 	env[EnvTopologyEdges] = "n1->n2,n2->n3"
 	env[EnvChangeRetention] = "off"
@@ -349,6 +353,8 @@ func TestLoadFromValidOverrides(t *testing.T) {
 			c.Ingest.BatchTimeoutPerItem == 20*time.Second && c.Ingest.AlertBodyLimit == 8388608 &&
 			c.Ingest.LeaseDuration == 45*time.Second},
 		{"notify", c.Notify.EscalationEnabled && c.Notify.EscalationAfter == time.Hour && c.Notify.EscalationInterval == 5*time.Minute},
+		{"sla minutes", c.SLA.CriticalMinutes == 30 && c.SLA.WarningMinutes == 120 && c.SLA.InfoMinutes == 480},
+		{"kpi window", c.KPI.Window == 24*time.Hour},
 		{"retention 30d", c.Retention.IncidentWindow == 30*24*time.Hour && c.Retention.IncidentEnabled},
 		{"edges raw", c.Topology.Edges == "n1->n2,n2->n3"},
 		{"change off", !c.Topology.ChangeEnabled && c.Topology.ChangePruneInterval == 30*time.Minute},
@@ -638,4 +644,42 @@ func TestValidateCORSOrigin(t *testing.T) {
 			t.Errorf("ValidateCORSOrigin(%q) must fail", bad)
 		}
 	}
+}
+
+// TestSLAAndKPIKeys W10-2/W10-3 新键（OPS_SLA_* 3 + OPS_KPI_WINDOW）：
+// 缺失取默认（critical 60min / warning 240min / info 1440min / 窗 168h）、
+// 非法值汇入统一聚合报错（非正整数分钟、非正 duration 一律启动失败）。
+func TestSLAAndKPIKeys(t *testing.T) {
+	t.Run("defaults", func(t *testing.T) {
+		c, err := LoadFrom(envMap(redisEnv("127.0.0.1:6380", "127.0.0.1:6381")))
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if c.SLA.CriticalMinutes != DefaultSLACriticalMinutes ||
+			c.SLA.WarningMinutes != DefaultSLAWarningMinutes ||
+			c.SLA.InfoMinutes != DefaultSLAInfoMinutes {
+			t.Fatalf("sla defaults = %+v, want %d/%d/%d", c.SLA,
+				DefaultSLACriticalMinutes, DefaultSLAWarningMinutes, DefaultSLAInfoMinutes)
+		}
+		if c.KPI.Window != DefaultKPIWindow {
+			t.Fatalf("kpi window = %v, want %v", c.KPI.Window, DefaultKPIWindow)
+		}
+	})
+	t.Run("invalid-aggregate", func(t *testing.T) {
+		env := redisEnv("127.0.0.1:6380", "127.0.0.1:6381")
+		env[EnvSLACriticalMinutes] = "0" // 非正 → 拒（0 不承诺"无 SLA"语义，防手滑）
+		env[EnvSLAWarningMinutes] = "-4" // 非正 → 拒
+		env[EnvSLAInfoMinutes] = "many"  // 非整数 → 拒
+		env[EnvKPIWindow] = "last-week"  // 非法 duration → 拒
+		_, err := LoadFrom(envMap(env))
+		var agg *Error
+		if !errors.As(err, &agg) || len(agg.Errs) != 4 {
+			t.Fatalf("want 4 aggregated errors, got %v", err)
+		}
+		for _, key := range []string{EnvSLACriticalMinutes, EnvSLAWarningMinutes, EnvSLAInfoMinutes, EnvKPIWindow} {
+			if !strings.Contains(err.Error(), key) {
+				t.Errorf("aggregate must mention %s: %v", key, err)
+			}
+		}
+	})
 }

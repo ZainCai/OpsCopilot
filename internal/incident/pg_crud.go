@@ -87,10 +87,11 @@ SELECT state FROM incident WHERE tenant_id=$1 AND incident_id=$2 FOR UPDATE`,
 UPDATE incident SET state=$3, updated_at=now(),
   resolved_at = CASE WHEN $4::bool THEN now() ELSE resolved_at END,
   ack_by      = CASE WHEN $5::text <> '' THEN $5 ELSE ack_by END,
-  auto_close_policy = CASE WHEN $6::bool THEN 'manual_only' ELSE auto_close_policy END
+  auto_close_policy = CASE WHEN $6::bool THEN 'manual_only' ELSE auto_close_policy END,
+  acked_at    = CASE WHEN $7::bool AND acked_at IS NULL THEN now() ELSE acked_at END
 WHERE tenant_id=$1 AND incident_id=$2
 RETURNING `+pgIncidentCols,
-		s.tenantID, id, to, plan.StampResolved, plan.AckBy, plan.FlipManualOnly), &inc)
+		s.tenantID, id, to, plan.StampResolved, plan.AckBy, plan.FlipManualOnly, plan.StampAckedAt), &inc)
 	if err != nil {
 		return Incident{}, fmt.Errorf("incident pg: update state: %w", err)
 	}

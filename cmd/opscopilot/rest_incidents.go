@@ -38,13 +38,19 @@ func (g *RESTGateway) handleCreateIncident(w http.ResponseWriter, r *http.Reques
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	var in struct {
-		ID        string `json:"id"`
-		Title     string `json:"title"`
-		Severity  string `json:"severity"`
-		CreatedBy string `json:"created_by"`
+		ID         string `json:"id"`
+		Title      string `json:"title"`
+		Severity   string `json:"severity"`
+		CreatedBy  string `json:"created_by"`
+		SLAMinutes int    `json:"sla_minutes"` // W10-2 可选覆盖；0/缺省 = 按级默认
 	}
 	if err := dec.Decode(&in); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid body: "+err.Error())
+		return
+	}
+	if in.SLAMinutes < 0 || in.SLAMinutes > slaMinutesMax {
+		writeErr(w, http.StatusBadRequest,
+			"sla_minutes must be 0.."+strconv.Itoa(slaMinutesMax)+" (0 = use per-severity default)")
 		return
 	}
 	if strings.TrimSpace(in.Title) == "" {
@@ -82,7 +88,20 @@ func (g *RESTGateway) handleCreateIncident(w http.ResponseWriter, r *http.Reques
 		g.audit.Append(AuditEntry{IncidentID: inc.ID, Action: AuditCreate, Actor: in.CreatedBy,
 			Detail: map[string]any{"origin": string(inc.Origin), "title": inc.Title}})
 	}
-	writeJSON(w, http.StatusCreated, inc)
+	// W10-2：可选 SLA 覆盖随后单点落库（SetSLA 不触碰状态机字段）。失败时
+	// 单已建但无覆盖——如实 500（细节进日志），绝不静默吞掉"配了却没生效"。
+	if in.SLAMinutes > 0 {
+		if err := g.incidents.SetSLA(inc.ID, in.SLAMinutes); err != nil {
+			g.logf("WARNING: set sla after create (%s): %v", inc.ID, err)
+			writeErr(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		if fresh, gerr := g.incidents.Get(inc.ID); gerr == nil {
+			inc = &fresh
+		}
+	}
+	writeJSON(w, http.StatusCreated,
+		incidentView{Incident: *inc, slaView: g.slaViewOf(*inc, time.Now())})
 }
 
 // handleDuplicates GET /api/v1/incidents/{id}/duplicates
@@ -182,11 +201,17 @@ func (g *RESTGateway) handleTransitionIncident(w http.ResponseWriter, r *http.Re
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	var in struct {
-		To    string `json:"to"`
-		Actor string `json:"actor"`
+		To         string `json:"to"`
+		Actor      string `json:"actor"`
+		SLAMinutes int    `json:"sla_minutes"` // W10-2 可选覆盖（流转同时改目标时长）
 	}
 	if err := dec.Decode(&in); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid body: "+err.Error())
+		return
+	}
+	if in.SLAMinutes < 0 || in.SLAMinutes > slaMinutesMax {
+		writeErr(w, http.StatusBadRequest,
+			"sla_minutes must be 0.."+strconv.Itoa(slaMinutesMax)+" (0 = keep current)")
 		return
 	}
 	if strings.TrimSpace(in.Actor) == "" {
@@ -209,6 +234,17 @@ func (g *RESTGateway) handleTransitionIncident(w http.ResponseWriter, r *http.Re
 	if g.audit != nil {
 		g.audit.Append(AuditEntry{IncidentID: id, Action: AuditTransition, Actor: in.Actor,
 			Detail: map[string]any{"to": string(to)}})
+	}
+	// W10-2：流转可同时带 SLA 覆盖（同一鉴权门禁内完成，不再多一次往返）。
+	if in.SLAMinutes > 0 {
+		if err := g.incidents.SetSLA(id, in.SLAMinutes); err != nil {
+			g.logf("WARNING: set sla after transition (%s): %v", id, err)
+			writeErr(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		if fresh, gerr := g.incidents.Get(id); gerr == nil {
+			inc = fresh
+		}
 	}
 	writeJSON(w, http.StatusOK, inc)
 }
@@ -283,14 +319,17 @@ func (g *RESTGateway) handleIncidents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// R6-4：内存态重启即丢——把落库形态透出给消费者。
+	// W10-2：items 是读视图（实体原样 + SLA 派生三字段），只读派生不落库。
 	writeJSON(w, http.StatusOK, map[string]any{
-		"incidents": page.Items, "count": len(page.Items),
+		"incidents": g.incidentViews(page.Items, time.Now()), "count": len(page.Items),
 		"next_cursor": page.NextCursor, "stats": page.Stats,
 		"persistence": g.incidents.Persistence(),
 	})
 }
 
 // handleIncidentDetail GET /api/v1/incidents/{id}。
+// W10-2：响应是读视图（rest_sla.go）——实体字段原样 + sla_deadline/
+// sla_remaining_seconds/sla_breached 派生三字段（只算不存）。
 func (g *RESTGateway) handleIncidentDetail(w http.ResponseWriter, r *http.Request) {
 	if g.incidents == nil {
 		writeErr(w, http.StatusServiceUnavailable, "incident store not wired")
@@ -301,7 +340,7 @@ func (g *RESTGateway) handleIncidentDetail(w http.ResponseWriter, r *http.Reques
 		writeErr(w, http.StatusNotFound, "incident not found: "+r.PathValue("id"))
 		return
 	}
-	writeJSON(w, http.StatusOK, inc)
+	writeJSON(w, http.StatusOK, incidentView{Incident: inc, slaView: g.slaViewOf(inc, time.Now())})
 }
 
 // handleChanges GET /api/v1/changes?node_key=&window_start=&window_end=

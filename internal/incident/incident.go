@@ -122,6 +122,15 @@ type Incident struct {
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 	ResolvedAt  time.Time `json:"resolved_at"`
+	// AckedAt 首次进入 acked 的时间戳（W10-2 补齐，MTTA 分子来源）。零值 =
+	// 从未被 acked（含 open→mitigated/resolved 直达链）。落戳单点在状态机
+	// （statemachine.go），**只落一次**——后续转移绝不改写（新增确定性行为，
+	// 契约测试硬断言双 Store 一致）。
+	AckedAt time.Time `json:"acked_at"`
+	// SLAMinutes 事件级 SLA 目标时长**覆盖**（分钟，迁移 000019）。0 = 无
+	// 覆盖，有效目标按 severity 取装配层注入的 config 默认（OPS_SLA_*）。
+	// deadline/剩余/超时是 GET 时的只读派生视图，不落库（理由见迁移头注释）。
+	SLAMinutes int `json:"sla_minutes"`
 
 	// ---- 双链路来源字段（迁移 000005）----
 	Origin     Origin `json:"origin"`
@@ -193,6 +202,12 @@ type Store interface {
 	// MergeInto 人工合并（L2 只提示不自动，合并动作由人触发）：被合并单
 	// 置 resolved 并记录 merged_into，簇关联转移给主单。
 	MergeInto(id, targetID string) error
+	// SetSLA 设置事件级 SLA 目标时长覆盖（分钟，>0；0 合法 = 清除覆盖回到
+	// 按级默认）。只写 sla_minutes，不动状态机字段。事件不存在返回 ErrNotFound。
+	SetSLA(id string, minutes int) error
+	// KPI 聚合窗口队列（口径唯一定义在 kpi.go，PG 是 SQL 翻译；双 store
+	// 一致性由契约测试 TestContractKPI 锁死）。
+	KPI(since time.Time, severity string) (KPIStats, error)
 	// Persistence 声明落库形态（"memory" | "timescaledb"）——REST 响应
 	// 据此提示调用方（R6-4：内存态重启即丢，必须让消费者知道）。
 	Persistence() string

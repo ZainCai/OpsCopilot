@@ -208,6 +208,25 @@ type NotifySection struct {
 	EscalationInterval time.Duration // OPS_ESCALATION_INTERVAL，默认 60s
 }
 
+// SLASection 事件 SLA 默认目标时长（W10-2 F-04）：按严重级取值
+// （severity 白名单 critical|warning|info，与 REST/前端/DB 同口径）。
+// 单事件覆盖走 incident.sla_minutes（REST 创建/流转入参），本组只管"无覆盖
+// 时的默认"。消费方唯一在 cmd 装配层（注入 RESTGateway.limits）——
+// internal/incident 不 import 本包（边界纪律），派生视图计算也在 cmd。
+// M2 只记录与展示：本组**不**驱动自动升级（OPS_ESCALATION_* 是独立链路）。
+type SLASection struct {
+	CriticalMinutes int // OPS_SLA_CRITICAL_MINUTES，默认 60
+	WarningMinutes  int // OPS_SLA_WARNING_MINUTES，默认 240（4h）
+	InfoMinutes     int // OPS_SLA_INFO_MINUTES，默认 1440（24h）
+}
+
+// KPISection 运维 KPI（W10-3 F-07）：GET /api/v1/kpis 的默认观察窗
+// （?window= 可覆盖，非法值 400——fail-fast 在 REST 参数层，装载期同样
+// fail-fast）。MTTA/MTTR/吞吐的聚合口径见 internal/incident/kpi.go。
+type KPISection struct {
+	Window time.Duration // OPS_KPI_WINDOW，默认 168h（7 天）
+}
+
 // RetentionSection 事件保留与归档（D8 决策 C）。
 type RetentionSection struct {
 	IncidentWindow  time.Duration // OPS_INCIDENT_RETENTION，默认 90d
@@ -319,6 +338,8 @@ type Config struct {
 	Ingest    IngestSection
 	Leader    LeaderSection
 	Notify    NotifySection
+	SLA       SLASection
+	KPI       KPISection
 	Retention RetentionSection
 	Topology  TopologySection
 	RCA       RCASection
@@ -478,6 +499,18 @@ const (
 	DefaultEscalationAfter    = 15 * time.Minute
 	DefaultEscalationInterval = 60 * time.Second
 
+	// SLA 默认目标时长（W10-2 F-04，按严重级）：critical 60min 是排期给定的
+	// 锚点值（OPS_SLA_CRITICAL_MINUTES=60）；warning/info 按响应优先级递减
+	// 收紧保守档。单位分钟、正整数（posInt fail-fast），单事件可经
+	// incident.sla_minutes 覆盖。M2 只记录与展示，不驱动自动升级。
+	DefaultSLACriticalMinutes = 60
+	DefaultSLAWarningMinutes  = 240  // 4h
+	DefaultSLAInfoMinutes     = 1440 // 24h
+
+	// DefaultKPIWindow 运维 KPI 默认观察窗（W10-3 F-07，OPS_KPI_WINDOW）：
+	// 7 天覆盖"一周吞吐 + MTTR"的常规复盘粒度；REST ?window= 可覆盖。
+	DefaultKPIWindow = 168 * time.Hour
+
 	DefaultIncidentRetention = 90 * 24 * time.Hour // D8 决策 C：resolved 后 90d 归档
 	DefaultChangeRetention   = 7 * 24 * time.Hour  // W9-5：变更事件保留窗
 
@@ -578,6 +611,10 @@ func Defaults() *Config {
 	c.Leader.RetryInterval = DefaultLeaderRetryInterval
 	c.Notify.EscalationAfter = DefaultEscalationAfter
 	c.Notify.EscalationInterval = DefaultEscalationInterval
+	c.SLA.CriticalMinutes = DefaultSLACriticalMinutes
+	c.SLA.WarningMinutes = DefaultSLAWarningMinutes
+	c.SLA.InfoMinutes = DefaultSLAInfoMinutes
+	c.KPI.Window = DefaultKPIWindow
 	c.Retention.IncidentWindow = DefaultIncidentRetention
 	c.Retention.IncidentEnabled = true
 	c.Topology.ChangeWindow = DefaultChangeRetention

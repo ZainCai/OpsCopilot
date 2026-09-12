@@ -30,6 +30,13 @@ type RESTLimits struct {
 	DedupWindow       time.Duration // L2 相似度的时间邻近窗口
 	IncidentBodyLimit int64         // 人工建单等请求体上限（建单是几行 JSON，1MiB 足够）
 	NotifyBodyLimit   int64         // 通知渠道配置请求体上限
+	// SLA 按级默认目标时长（W10-2 F-04，OPS_SLA_*；覆盖逻辑见 rest_sla.go）。
+	SLACritical time.Duration
+	SLAWarning  time.Duration
+	SLAInfo     time.Duration
+	// KPIWindow GET /api/v1/kpis 默认观察窗（W10-3 F-07，OPS_KPI_WINDOW；
+	// ?window= 按请求覆盖）。
+	KPIWindow time.Duration
 }
 
 // RESTGateway 只读查询面。
@@ -121,6 +128,19 @@ func NewRESTGateway(noise *NoiseEngine, sem *SemanticModelServer, incidents inci
 	if limits.NotifyBodyLimit <= 0 {
 		limits.NotifyBodyLimit = config.DefaultNotifyBodyLimit
 	}
+	// SLA/KPI 零值回退 config 默认（同源单一定义，#10 纪律；装配层正常会注入）。
+	if limits.SLACritical <= 0 {
+		limits.SLACritical = time.Duration(config.DefaultSLACriticalMinutes) * time.Minute
+	}
+	if limits.SLAWarning <= 0 {
+		limits.SLAWarning = time.Duration(config.DefaultSLAWarningMinutes) * time.Minute
+	}
+	if limits.SLAInfo <= 0 {
+		limits.SLAInfo = time.Duration(config.DefaultSLAInfoMinutes) * time.Minute
+	}
+	if limits.KPIWindow <= 0 {
+		limits.KPIWindow = config.DefaultKPIWindow
+	}
 	return &RESTGateway{noise: noise, sem: sem, incidents: incidents, token: token,
 		audit: audit, hub: hub, limits: limits}
 }
@@ -150,6 +170,8 @@ func (g *RESTGateway) Register(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/changes", h)
 	mux.Handle("GET /api/v1/incidents", h)
 	mux.Handle("GET /api/v1/incidents/{id}", h)
+	// W10-3（F-07）运维 KPI 聚合（MTTA/MTTR/吞吐，口径见 rest_kpi.go）。
+	mux.Handle("GET /api/v1/kpis", h)
 	mux.Handle("GET /api/v1/incidents/{id}/rca", h) // #12 按需根因分析（Token 门禁在 handler 内）
 	// 二期池 #7 S2：RCA 复盘会话（incident 子路径，拍板④；Token 门禁在 handler 内）。
 	mux.Handle("GET /api/v1/incidents/{id}/rca/session", h)
@@ -194,6 +216,8 @@ func (g *RESTGateway) route(w http.ResponseWriter, r *http.Request) {
 	case "/api/v1/incidents":
 		// POST /api/v1/incidents 由 mux 精确模式（method+path）接管，不会进到这里。
 		g.handleIncidents(w, r)
+	case "/api/v1/kpis":
+		g.handleKPIs(w, r)
 	default:
 		// /api/v1/clusters/{key} 与 /api/v1/incidents/{id}：路径参数经 PathValue 取。
 		if key := r.PathValue("key"); key != "" {

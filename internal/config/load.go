@@ -70,6 +70,14 @@ const (
 	EnvEscalationAfter    = "OPS_ESCALATION_AFTER"
 	EnvEscalationInterval = "OPS_ESCALATION_INTERVAL"
 
+	// SLA 默认目标时长按严重级（W10-2 F-04；severity 白名单 critical|warning|info）。
+	EnvSLACriticalMinutes = "OPS_SLA_CRITICAL_MINUTES"
+	EnvSLAWarningMinutes  = "OPS_SLA_WARNING_MINUTES"
+	EnvSLAInfoMinutes     = "OPS_SLA_INFO_MINUTES"
+
+	// EnvKPIWindow 运维 KPI 默认观察窗（W10-3 F-07；REST ?window= 覆盖）。
+	EnvKPIWindow = "OPS_KPI_WINDOW"
+
 	EnvIncidentRetention = "OPS_INCIDENT_RETENTION"
 
 	EnvTopologyEdges       = "OPS_TOPOLOGY_EDGES"
@@ -173,6 +181,11 @@ func LoadFrom(lookup LookupFunc) (*Config, error) {
 	c.Notify.EscalationEnabled = p.onOff(EnvEscalation, false)
 	c.Notify.EscalationAfter = p.posDur(EnvEscalationAfter, DefaultEscalationAfter)
 	c.Notify.EscalationInterval = p.posDur(EnvEscalationInterval, DefaultEscalationInterval)
+
+	c.SLA.CriticalMinutes = p.posInt(EnvSLACriticalMinutes, DefaultSLACriticalMinutes)
+	c.SLA.WarningMinutes = p.posInt(EnvSLAWarningMinutes, DefaultSLAWarningMinutes)
+	c.SLA.InfoMinutes = p.posInt(EnvSLAInfoMinutes, DefaultSLAInfoMinutes)
+	c.KPI.Window = p.posDur(EnvKPIWindow, DefaultKPIWindow)
 
 	if w, on, err := ParseRetention(p.str(EnvIncidentRetention), DefaultIncidentRetention); err != nil {
 		p.bad(EnvIncidentRetention, err.Error())

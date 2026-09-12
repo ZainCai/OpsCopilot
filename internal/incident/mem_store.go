@@ -430,6 +430,40 @@ func externalKey(origin Origin, sourceRef string) string {
 	return string(origin) + "\x00" + sourceRef
 }
 
+// SetSLA 覆盖 SLA 目标时长（分钟；0 = 清除覆盖）。只写 sla_minutes +
+// updated_at，不触碰状态机字段（与 PGStore 同语义）。
+func (s *MemStore) SetSLA(id string, minutes int) error {
+	if minutes < 0 {
+		return errors.New("incident: sla minutes must be >= 0")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	inc, ok := s.byID[id]
+	if !ok {
+		return ErrNotFound
+	}
+	inc.SLAMinutes = minutes
+	inc.UpdatedAt = s.now()
+	return nil
+}
+
+// KPI 线性扫描窗口队列累加（kpiMatch/kpiAccumulate 是口径的 Go 表达，
+// 均值与 PGStore 共用 finalize() 重算——不构成第二套口径）。计数与和均
+// 与遍历序无关，map 乱序不影响结果。
+func (s *MemStore) KPI(since time.Time, severity string) (KPIStats, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var k KPIStats
+	for _, inc := range s.byID {
+		if !kpiMatch(inc, since, severity) {
+			continue
+		}
+		kpiAccumulate(&k, inc)
+	}
+	k.finalize()
+	return k, nil
+}
+
 // MergeInto 人工合并：被合并单置 resolved + 记录 merged_into，簇关联**真实
 // 转移**给主单（D7，以 PG 语义为准——主单不存在报错；重复合并幂等；主单
 // 已占用某簇则该簇跳过，一簇一事件）。
