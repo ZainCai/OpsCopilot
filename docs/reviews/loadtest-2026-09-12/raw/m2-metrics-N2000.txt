@@ -1,0 +1,129 @@
+# HELP opscopilot_alerts_processed_total Alerts passed through the shadow noise engine
+# TYPE opscopilot_alerts_processed_total counter
+opscopilot_alerts_processed_total 10000
+# HELP opscopilot_noise_sink_drops_total Verdict persistence tasks dropped by the async sink queue (queue full / writer stopped / drain timeout / sink detached) — notifications unaffected, PG verdict stream may have gaps under flood peaks
+# TYPE opscopilot_noise_sink_drops_total counter
+opscopilot_noise_sink_drops_total{store="pg"} 0
+# HELP opscopilot_noise_sink_drops_total Verdict persistence tasks dropped by the async sink queue (queue full / writer stopped / drain timeout / sink detached) — notifications unaffected, PG verdict stream may have gaps under flood peaks
+# TYPE opscopilot_noise_sink_drops_total counter
+opscopilot_noise_sink_drops_total{store="redis"} 0
+# HELP opscopilot_noise_sink_drops_total Verdict persistence tasks dropped by the async sink queue (queue full / writer stopped / drain timeout / sink detached) — notifications unaffected, PG verdict stream may have gaps under flood peaks
+# TYPE opscopilot_noise_sink_drops_total counter
+opscopilot_noise_sink_drops_total{store="other"} 0
+# HELP opscopilot_noise_verdicts_total Verdicts by convergence reason
+# TYPE opscopilot_noise_verdicts_total counter
+opscopilot_noise_verdicts_total{reason="new-incident"} 1000
+# HELP opscopilot_noise_verdicts_total Verdicts by convergence reason
+# TYPE opscopilot_noise_verdicts_total counter
+opscopilot_noise_verdicts_total{reason="dedup-window"} 0
+# HELP opscopilot_noise_verdicts_total Verdicts by convergence reason
+# TYPE opscopilot_noise_verdicts_total counter
+opscopilot_noise_verdicts_total{reason="cluster-merge"} 9000
+# HELP opscopilot_noise_verdicts_total Verdicts by convergence reason
+# TYPE opscopilot_noise_verdicts_total counter
+opscopilot_noise_verdicts_total{reason="unjudged"} 0
+# HELP opscopilot_noise_verdicts_total Verdicts by convergence reason
+# TYPE opscopilot_noise_verdicts_total counter
+opscopilot_noise_verdicts_total{reason="other"} 0
+# HELP opscopilot_alert_latency_skipped_total Alerts excluded from latency observation because the source provided no fired time
+# TYPE opscopilot_alert_latency_skipped_total counter
+opscopilot_alert_latency_skipped_total{stage="verdict"} 0
+# HELP opscopilot_alert_latency_skipped_total Alerts excluded from latency observation because the source provided no fired time
+# TYPE opscopilot_alert_latency_skipped_total counter
+opscopilot_alert_latency_skipped_total{stage="notify"} 0
+# HELP opscopilot_mem_evictions_total Entries evicted from bounded in-memory stores (memory bounding, plan #6)
+# TYPE opscopilot_mem_evictions_total counter
+opscopilot_mem_evictions_total{store="builder"} 0
+# HELP opscopilot_mem_evictions_total Entries evicted from bounded in-memory stores (memory bounding, plan #6)
+# TYPE opscopilot_mem_evictions_total counter
+opscopilot_mem_evictions_total{store="builder_edges"} 0
+# HELP opscopilot_mem_evictions_total Entries evicted from bounded in-memory stores (memory bounding, plan #6)
+# TYPE opscopilot_mem_evictions_total counter
+opscopilot_mem_evictions_total{store="noise_sigcache"} 0
+# HELP opscopilot_mem_evictions_total Entries evicted from bounded in-memory stores (memory bounding, plan #6)
+# TYPE opscopilot_mem_evictions_total counter
+opscopilot_mem_evictions_total{store="noise_dedup"} 0
+# HELP opscopilot_mem_evictions_total Entries evicted from bounded in-memory stores (memory bounding, plan #6)
+# TYPE opscopilot_mem_evictions_total counter
+opscopilot_mem_evictions_total{store="noise_clusters"} 0
+# HELP opscopilot_alert_fired_to_verdict_seconds Latency from alert fired (startsAt) to verdict generated (queue submit; persistence is async since opt #8, see docs/W9-4) (exact p50/p95/p99 gauges computed over the last 10000 samples)
+# TYPE opscopilot_alert_fired_to_verdict_seconds histogram
+opscopilot_alert_fired_to_verdict_seconds_bucket{le="0.005"} 0
+opscopilot_alert_fired_to_verdict_seconds_bucket{le="0.01"} 0
+opscopilot_alert_fired_to_verdict_seconds_bucket{le="0.025"} 0
+opscopilot_alert_fired_to_verdict_seconds_bucket{le="0.05"} 0
+opscopilot_alert_fired_to_verdict_seconds_bucket{le="0.1"} 0
+opscopilot_alert_fired_to_verdict_seconds_bucket{le="0.25"} 6000
+opscopilot_alert_fired_to_verdict_seconds_bucket{le="0.5"} 8000
+opscopilot_alert_fired_to_verdict_seconds_bucket{le="1"} 8000
+opscopilot_alert_fired_to_verdict_seconds_bucket{le="2.5"} 8000
+opscopilot_alert_fired_to_verdict_seconds_bucket{le="5"} 10000
+opscopilot_alert_fired_to_verdict_seconds_bucket{le="10"} 10000
+opscopilot_alert_fired_to_verdict_seconds_bucket{le="20"} 10000
+opscopilot_alert_fired_to_verdict_seconds_bucket{le="30"} 10000
+opscopilot_alert_fired_to_verdict_seconds_bucket{le="+Inf"} 10000
+opscopilot_alert_fired_to_verdict_seconds_sum 10985.47459999819
+opscopilot_alert_fired_to_verdict_seconds_count 10000
+# HELP opscopilot_alert_fired_to_verdict_seconds_p50 opscopilot_alert_fired_to_verdict_seconds quantile 0.5 over the last 10000 samples (exact, nearest-rank)
+# TYPE opscopilot_alert_fired_to_verdict_seconds_p50 gauge
+opscopilot_alert_fired_to_verdict_seconds_p50 0.1853196
+# HELP opscopilot_alert_fired_to_verdict_seconds_p95 opscopilot_alert_fired_to_verdict_seconds quantile 0.95 over the last 10000 samples (exact, nearest-rank)
+# TYPE opscopilot_alert_fired_to_verdict_seconds_p95 gauge
+opscopilot_alert_fired_to_verdict_seconds_p95 4.4690921
+# HELP opscopilot_alert_fired_to_verdict_seconds_p99 opscopilot_alert_fired_to_verdict_seconds quantile 0.99 over the last 10000 samples (exact, nearest-rank)
+# TYPE opscopilot_alert_fired_to_verdict_seconds_p99 gauge
+opscopilot_alert_fired_to_verdict_seconds_p99 4.4690921
+# HELP opscopilot_alert_fired_to_notify_seconds Latency from alert fired (startsAt) to notification delivered (enforce mode, admitted only) (exact p50/p95/p99 gauges computed over the last 10000 samples)
+# TYPE opscopilot_alert_fired_to_notify_seconds histogram
+opscopilot_alert_fired_to_notify_seconds_bucket{le="0.005"} 0
+opscopilot_alert_fired_to_notify_seconds_bucket{le="0.01"} 0
+opscopilot_alert_fired_to_notify_seconds_bucket{le="0.025"} 0
+opscopilot_alert_fired_to_notify_seconds_bucket{le="0.05"} 0
+opscopilot_alert_fired_to_notify_seconds_bucket{le="0.1"} 0
+opscopilot_alert_fired_to_notify_seconds_bucket{le="0.25"} 0
+opscopilot_alert_fired_to_notify_seconds_bucket{le="0.5"} 0
+opscopilot_alert_fired_to_notify_seconds_bucket{le="1"} 0
+opscopilot_alert_fired_to_notify_seconds_bucket{le="2.5"} 0
+opscopilot_alert_fired_to_notify_seconds_bucket{le="5"} 0
+opscopilot_alert_fired_to_notify_seconds_bucket{le="10"} 0
+opscopilot_alert_fired_to_notify_seconds_bucket{le="20"} 0
+opscopilot_alert_fired_to_notify_seconds_bucket{le="30"} 0
+opscopilot_alert_fired_to_notify_seconds_bucket{le="+Inf"} 0
+opscopilot_alert_fired_to_notify_seconds_sum 0
+opscopilot_alert_fired_to_notify_seconds_count 0
+# HELP opscopilot_alert_fired_to_notify_seconds_p50 opscopilot_alert_fired_to_notify_seconds quantile 0.5 over the last 10000 samples (exact, nearest-rank)
+# TYPE opscopilot_alert_fired_to_notify_seconds_p50 gauge
+opscopilot_alert_fired_to_notify_seconds_p50 NaN
+# HELP opscopilot_alert_fired_to_notify_seconds_p95 opscopilot_alert_fired_to_notify_seconds quantile 0.95 over the last 10000 samples (exact, nearest-rank)
+# TYPE opscopilot_alert_fired_to_notify_seconds_p95 gauge
+opscopilot_alert_fired_to_notify_seconds_p95 NaN
+# HELP opscopilot_alert_fired_to_notify_seconds_p99 opscopilot_alert_fired_to_notify_seconds quantile 0.99 over the last 10000 samples (exact, nearest-rank)
+# TYPE opscopilot_alert_fired_to_notify_seconds_p99 gauge
+opscopilot_alert_fired_to_notify_seconds_p99 NaN
+# HELP opscopilot_noise_sink_queue Verdicts buffered in the async sink queue (drops counted once the ceiling is hit)
+# TYPE opscopilot_noise_sink_queue gauge
+opscopilot_noise_sink_queue 0
+# HELP opscopilot_noise_write_dropped_total Verdicts lost after failed persistence attempts (mirrors engine verdictFailures; queue-side drops are counted separately in opscopilot_noise_sink_drops_total)
+# TYPE opscopilot_noise_write_dropped_total gauge
+opscopilot_noise_write_dropped_total 0
+# HELP opscopilot_mem_entries Current entries held by bounded in-memory stores (memory bounding, plan #6)
+# TYPE opscopilot_mem_entries gauge
+opscopilot_mem_entries{store="builder"} 20
+# HELP opscopilot_mem_entries Current entries held by bounded in-memory stores (memory bounding, plan #6)
+# TYPE opscopilot_mem_entries gauge
+opscopilot_mem_entries{store="builder_edges"} 0
+# HELP opscopilot_mem_entries Current entries held by bounded in-memory stores (memory bounding, plan #6)
+# TYPE opscopilot_mem_entries gauge
+opscopilot_mem_entries{store="noise_sigcache"} 2248
+# HELP opscopilot_mem_entries Current entries held by bounded in-memory stores (memory bounding, plan #6)
+# TYPE opscopilot_mem_entries gauge
+opscopilot_mem_entries{store="noise_dedup"} 10000
+# HELP opscopilot_mem_entries Current entries held by bounded in-memory stores (memory bounding, plan #6)
+# TYPE opscopilot_mem_entries gauge
+opscopilot_mem_entries{store="noise_clusters"} 2248
+# HELP opscopilot_is_leader 1 = this instance is the cluster leader running topology-gated loops (ADR-012 advisory-lock election; constant 1 when election off or no DB)
+# TYPE opscopilot_is_leader gauge
+opscopilot_is_leader 1
+# HELP opscopilot_leader Alias of opscopilot_is_leader (name used in ADR-012 observability section)
+# TYPE opscopilot_leader gauge
+opscopilot_leader 1

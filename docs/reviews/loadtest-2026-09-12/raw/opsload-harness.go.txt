@@ -1,0 +1,310 @@
+// opsload —— 容量基线演练辅助压测器（优化方案 #7，一次性，不进仓库）。
+// 模式：
+//   -mode=ingest   webhook 灌入阶梯（open-loop 定速，POST /api/v1/ingest/alertmanager）
+//   -mode=fakesrc  假 Prometheus 源（/-/healthy /api/v1/alerts /api/v1/targets /api/v1/query）
+//   -mode=sink     通知接收端（POST /notify 计数，GET /stats 查询）
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"math"
+	"math/rand"
+	"net/http"
+	"os"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+func main() {
+	mode := flag.String("mode", "ingest", "ingest | fakesrc | sink")
+	// ingest
+	base := flag.String("base", "http://127.0.0.1:8081", "目标服务基址")
+	token := flag.String("token", "", "X-OpsCopilot-Token")
+	steps := flag.String("steps", "10,50", "阶梯 events/s，逗号分隔")
+	stepDur := flag.Duration("step-dur", 60*time.Second, "每档时长")
+	cooldown := flag.Duration("cooldown", 20*time.Second, "档间冷却")
+	batch := flag.Int("batch", 50, "每 POST 告警条数")
+	conc := flag.Int("conc", 64, "发送并发")
+	prefix := flag.String("prefix", "lt7", "fingerprint 前缀")
+	path := flag.String("path", "/api/v1/ingest/alertmanager", "灌入路径")
+	// fakesrc
+	addr := flag.String("addr", "127.0.0.1:19191", "fakesrc/sink 监听地址")
+	nAlerts := flag.Int("alerts", 100, "fakesrc 每轮告警条数")
+	nNodes := flag.Int("nodes", 20, "fakesrc target 节点数")
+	nCritical := flag.Int("critical", 10, "fakesrc 每轮 critical 条数（触发通知）")
+	ageSec := flag.Int("age", 0, "fakesrc 告警 activeAt 回退秒数（模拟源侧积压）")
+	// sink
+	_ = rand.Intn(2) // 轻微抖动用
+	flag.Parse()
+
+	switch *mode {
+	case "ingest":
+		runIngest(*base, *path, *token, *steps, *stepDur, *cooldown, *batch, *conc, *prefix)
+	case "fakesrc":
+		runFakesrc(*addr, *nAlerts, *nNodes, *nCritical, *ageSec)
+	case "sink":
+		runSink(*addr)
+	default:
+		fmt.Fprintln(os.Stderr, "unknown mode")
+		os.Exit(2)
+	}
+}
+
+// ---------- ingest：定速阶梯 ----------
+
+type stepRes struct {
+	Rate       float64 `json:"rate_eps"`
+	Dur        string  `json:"dur"`
+	Reqs       int64   `json:"reqs"`
+	Events     int64   `json:"events_sent"`
+	Failed     int64   `json:"req_failed"`
+	ErrByCode  map[string]int64 `json:"err_by_code"`
+	ActualEPS  float64 `json:"actual_eps"`
+	P50ms      float64 `json:"p50_ms"`
+	P95ms      float64 `json:"p95_ms"`
+	P99ms      float64 `json:"p99_ms"`
+	Maxms      float64 `json:"max_ms"`
+	Start      string  `json:"start"`
+	End        string  `json:"end"`
+}
+
+func runIngest(base, path, token, stepsCsv string, stepDur, cooldown time.Duration, batch, conc int, prefix string) {
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			Proxy:                 nil, // 绕开系统代理（本机代理会吞 127.0.0.1）
+			MaxIdleConns:          conc * 2,
+			MaxIdleConnsPerHost:   conc * 2,
+			MaxConnsPerHost:       conc * 2,
+			IdleConnTimeout:       60 * time.Second,
+		},
+	}
+	url := strings.TrimRight(base, "/") + path
+	if _, err := client.Get(strings.TrimRight(base, "/") + "/healthz"); err != nil {
+		fmt.Fprintf(os.Stderr, "探活失败 %s：%v\n", base, err)
+		os.Exit(2)
+	}
+	for _, s := range strings.Split(stepsCsv, ",") {
+		rate, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+		if err != nil || rate <= 0 {
+			fmt.Fprintf(os.Stderr, "坏档位 %q\n", s)
+			os.Exit(2)
+		}
+		res := oneStep(client, url, token, fmt.Sprintf("%s-%d", prefix, int(rate)), rate, stepDur, batch, conc)
+		b, _ := json.Marshal(res)
+		fmt.Println(string(b))
+		time.Sleep(cooldown)
+	}
+}
+
+type lat struct {
+	mu    sync.Mutex
+	d     []time.Duration
+	codes map[string]int64
+}
+
+func oneStep(client *http.Client, url, token, prefix string, rate float64, dur time.Duration, batch, conc int) stepRes {
+	start := time.Now()
+	deadline := start.Add(dur)
+	var seq int64
+	var sentEv, reqs, failed int64
+	L := &lat{codes: map[string]int64{}}
+	var wg sync.WaitGroup
+	jobs := make(chan []byte, conc*2)
+	for w := 0; w < conc; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for body := range jobs {
+				t0 := time.Now()
+				req, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				if token != "" {
+					req.Header.Set("X-OpsCopilot-Token", token)
+				}
+				resp, err := client.Do(req)
+				el := time.Since(t0)
+				L.mu.Lock()
+				if err != nil {
+					failed++
+					L.codes["transport"]++
+				} else {
+					_, _ = io.Copy(io.Discard, resp.Body)
+					resp.Body.Close()
+					reqs++
+					if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+						failed++
+						L.codes[strconv.Itoa(resp.StatusCode)]++
+					} else {
+						L.d = append(L.d, el)
+					}
+				}
+				L.mu.Unlock()
+			}
+		}()
+	}
+	// open-loop 定速：每 100ms 节拍补发应发的请求数（不受响应拖慢影响）
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	acc := 0.0
+	rps := rate / float64(batch)
+	for {
+		select {
+		case <-tick.C:
+			acc += rps * 0.1
+			n := int(acc)
+			acc -= float64(n)
+			for i := 0; i < n; i++ {
+				body := amBody(prefix, atomic.AddInt64(&seq, 1), batch, int(rate))
+				select {
+				case jobs <- body:
+					atomic.AddInt64(&sentEv, int64(batch))
+				default: // 发送侧拥塞 = 压不上去，如实计入失败（open-loop 语义）
+					L.mu.Lock()
+					failed++
+					L.codes["sender-congested"]++
+					L.mu.Unlock()
+				}
+			}
+			if time.Now().After(deadline) {
+				close(jobs)
+				wg.Wait()
+				res := stepRes{
+					Rate: rate, Dur: dur.String(), Reqs: reqs, Events: atomic.LoadInt64(&sentEv),
+					Failed: failed, ErrByCode: L.codes,
+					Start: start.Format(time.RFC3339), End: time.Now().Format(time.RFC3339),
+				}
+				if el := time.Since(start).Seconds(); el > 0 {
+					res.ActualEPS = float64(res.Events) / el
+				}
+				sort.Slice(L.d, func(i, j int) bool { return L.d[i] < L.d[j] })
+				if len(L.d) > 0 {
+					res.P50ms = pct(L.d, 50)
+					res.P95ms = pct(L.d, 95)
+					res.P99ms = pct(L.d, 99)
+					res.Maxms = float64(L.d[len(L.d)-1].Microseconds()) / 1000
+				}
+				return res
+			}
+		}
+	}
+}
+
+func amBody(prefix string, gen int64, batch, rate int) []byte {
+	type al struct {
+		Labels      map[string]string `json:"labels"`
+		Annotations map[string]string `json:"annotations"`
+		StartsAt    string            `json:"startsAt"`
+		EndsAt      string            `json:"endsAt"`
+		Fingerprint string            `json:"fingerprint"`
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	alerts := make([]al, batch)
+	for i := 0; i < batch; i++ {
+		sev := "info"
+		if i%25 == 0 {
+			sev = "warning" // 少量 warning → 建单/限流路径有真实负载
+		}
+		alerts[i] = al{
+			Labels:      map[string]string{"alertname": "LT7LoadProbe", "instance": "lt7-" + strconv.Itoa(int((gen*17+int64(i))%64)), "severity": sev},
+			Annotations: map[string]string{"summary": "lt7 burst probe"},
+			StartsAt:    now,
+			EndsAt:      "",
+			Fingerprint: fmt.Sprintf("%s-%d-%d", prefix, gen, i),
+		}
+	}
+	b, _ := json.Marshal(map[string]any{"status": "firing", "alerts": alerts})
+	return b
+}
+
+func pct(sorted []time.Duration, p float64) float64 {
+	rank := int(math.Ceil(p/100*float64(len(sorted)))) - 1
+	if rank < 0 {
+		rank = 0
+	}
+	if rank >= len(sorted) {
+		rank = len(sorted) - 1
+	}
+	return float64(sorted[rank].Microseconds()) / 1000
+}
+
+// ---------- fakesrc：规模可控的假 Prometheus 源 ----------
+
+func runFakesrc(addr string, nAlerts, nNodes, nCritical, ageSec int) {
+	var poll int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/-/healthy", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("Health check is enabled. Fake source ok."))
+	})
+	mux.HandleFunc("/api/v1/alerts", func(w http.ResponseWriter, _ *http.Request) {
+		g := atomic.AddInt64(&poll, 1)
+		activeAt := time.Now().UTC().Add(-time.Duration(ageSec) * time.Second).Format(time.RFC3339Nano)
+		list := make([]map[string]any, nAlerts)
+		for i := 0; i < nAlerts; i++ {
+			sev := "info"
+			if i < nCritical {
+				sev = "critical"
+			} else if i%nNodes == 0 {
+				sev = "warning"
+			}
+			list[i] = map[string]any{
+				"labels":      map[string]string{"alertname": "LT7VerdictProbe", "instance": fmt.Sprintf("lt7n%d", i%nNodes), "job": "lt7nodes", "severity": sev},
+				"annotations": map[string]string{"summary": "lt7 verdict path alert"},
+				"state":       "firing",
+				"activeAt":    activeAt,
+				"value":       "1",
+				"fingerprint": fmt.Sprintf("lt7v-%d-%d", g, i), // 每轮轮换 → 每轮都产新判决
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": map[string]any{"alerts": list}})
+	})
+	mux.HandleFunc("/api/v1/targets", func(w http.ResponseWriter, _ *http.Request) {
+		tg := make([]map[string]any, nNodes)
+		for i := 0; i < nNodes; i++ {
+			n := fmt.Sprintf("lt7n%d", i)
+			tg[i] = map[string]any{
+				"discoveredLabels": map[string]string{},
+				"labels":           map[string]string{"instance": n, "job": "lt7nodes"},
+				"scrapePool":       "lt7nodes",
+				"scrapeUrl":        "http://" + n + ":9100/metrics",
+				"health":           "up",
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": map[string]any{"activeTargets": tg}})
+	})
+	mux.HandleFunc("/api/v1/query", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[]}}`))
+	})
+	fmt.Printf("fakesrc listening on %s alerts=%d nodes=%d critical=%d age=%ds\n", addr, nAlerts, nNodes, nCritical, ageSec)
+	_ = http.ListenAndServe(addr, mux)
+}
+
+// ---------- sink：通知接收端 ----------
+
+func runSink(addr string) {
+	var got int64
+	var bytesRecv int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/notify", func(w http.ResponseWriter, r *http.Request) {
+		n, _ := io.Copy(io.Discard, r.Body)
+		atomic.AddInt64(&got, 1)
+		atomic.AddInt64(&bytesRecv, n)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"code":0,"msg":"ok"}`))
+	})
+	mux.HandleFunc("/stats", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"received": atomic.LoadInt64(&got), "bytes": atomic.LoadInt64(&bytesRecv)})
+	})
+	fmt.Printf("sink listening on %s\n", addr)
+	_ = http.ListenAndServe(addr, mux)
+}
