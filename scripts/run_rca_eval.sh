@@ -8,9 +8,16 @@
 #   门禁章节）→ 退出前杀干净本次拉起的进程。
 #
 # 用法：
-#   bash scripts/run_rca_eval.sh            # 证据版基线（LLM 未配即此形态）
-#   bash scripts/run_rca_eval.sh --llm      # LLM 转正跑分（OPS_LLM_* 由 env 透传）
-#   bash scripts/run_rca_eval.sh stop       # 只清理残留（pidfile 兜底）
+#   bash scripts/run_rca_eval.sh                # 证据版基线（LLM 未配即此形态）
+#   bash scripts/run_rca_eval.sh --with-llm     # LLM 转正跑分（G1/G2/G3 三门禁）
+#   bash scripts/run_rca_eval.sh stop           # 只清理残留（pidfile 兜底）
+#
+# --with-llm 前置（转正纪律，绝不静默降级成 no-llm）：
+#   OPS_LLM_ENDPOINT 必须已配置（环境优先，其次仓库根 .env 的未注释非空行）。
+#   未配置 → 退出码 2 并提示先配 .env；配置了则整组 OPS_LLM_* 原样注入被测
+#   app 进程。**脚本与报告全程不回显任何 key**：提取 .env 时逐行取变量、
+#   绝不 echo 取值，临时 env 文件 600 权限、EXIT 即删；日志兜底再叠一层
+#   grep -v 过滤（app 侧自身有脱敏纪律，这里是双保险）。
 #
 # 可调 env：RCA_EVAL_SCALE(默认 0.1)  RCA_EVAL_WARMUP(默认 90)
 #           OPS_TENANT(默认 rca-eval-<ts>，自动生成独立租户)
@@ -23,6 +30,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="$ROOT/.rca-eval"
 PIDFILE="$OUT/run.pids"
+LLM_ENV_FILE="$OUT/llm-env.sh"
 mkdir -p "$OUT"
 
 find_docker() {
@@ -35,6 +43,7 @@ find_docker() {
 port_open() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 
 stop_all() {
+  rm -f "$LLM_ENV_FILE" 2>/dev/null || true
   if [ -f "$PIDFILE" ]; then
     while read -r pid; do kill "$pid" 2>/dev/null || true; done < "$PIDFILE"
     rm -f "$PIDFILE"
@@ -45,8 +54,43 @@ stop_all() {
 if [ "${1:-}" = "stop" ]; then stop_all; exit 0; fi
 
 # ---- 模式 ----
-MODE="--no-llm"
-if [ "${1:-}" = "--llm" ]; then MODE="--llm"; fi
+MODE=""            # 空 = 证据版基线（rca_eval 默认 --no-llm=true）
+WITH_LLM=0
+case "${1:-}" in
+  --with-llm|--llm) WITH_LLM=1; MODE="-no-llm=false" ;;  # --llm 为旧名兼容别名
+  "") ;;
+  *) echo "ERROR: 未知参数 '$1'（可用：--with-llm / stop）" >&2; exit 2 ;;
+esac
+
+# ---- --with-llm 前置探测：OPS_LLM_ENDPOINT 未配置 → 拒跑（绝不静默降级）----
+env_probe_endpoint() {
+  # 环境优先；其次 .env 未注释且取值非空的行。只看有无，不回显取值。
+  if [ -n "${OPS_LLM_ENDPOINT:-}" ]; then return 0; fi
+  [ -f "$ROOT/.env" ] || return 1
+  grep -Eq '^[[:space:]]*OPS_LLM_ENDPOINT[[:space:]]*=[[:space:]]*[^[:space:]]' "$ROOT/.env"
+}
+if [ "$WITH_LLM" = 1 ]; then
+  if ! env_probe_endpoint; then
+    echo "ERROR: --with-llm 需要真实 LLM 端点，但 OPS_LLM_ENDPOINT 未配置。" >&2
+    echo "       转正判定拒绝静默降级为证据版基线——请在 $ROOT/.env 配置（未注释）：" >&2
+    echo "       OPS_LLM_ENDPOINT=... / OPS_LLM_API_KEY=... / OPS_LLM_MODEL=...，再重跑。" >&2
+    exit 2
+  fi
+  # 整组 OPS_LLM_* 原样透传给被测 app：从 .env 逐行提取未注释赋值写入临时
+  # env 文件（600 权限，trap 必删）。只统计条数，绝不回显取值/key。
+  : > "$LLM_ENV_FILE"; chmod 600 "$LLM_ENV_FILE"
+  if [ -f "$ROOT/.env" ]; then
+    while IFS= read -r line; do
+      printf '%s\n' "$line" >> "$LLM_ENV_FILE"
+    done < <(grep -E '^[[:space:]]*OPS_LLM_[A-Z_]+[[:space:]]*=' "$ROOT/.env" || true)
+  fi
+  # 环境里已 export 的（如 CI 注入）也带上（env 优先级更高，放最后覆盖）。
+  for k in OPS_LLM_ENDPOINT OPS_LLM_API_KEY OPS_LLM_MODEL OPS_LLM_TIMEOUT OPS_LLM_MAX_TOKENS; do
+    eval "v=\${$k:-}"
+    if [ -n "$v" ]; then printf '%s=%s\n' "$k" "$v" >> "$LLM_ENV_FILE"; fi
+  done
+  echo "LLM 模式：OPS_LLM_* 已注入被测 app（$(grep -c '^OPS_LLM' "$LLM_ENV_FILE" || true) 个键，值不回显；临时 env 文件退出即删）"
+fi
 
 # ---- 端口冲突防线（run_demo 的孤儿进程/双实例教训）----
 if port_open 8080 || port_open 19090; then
@@ -82,7 +126,8 @@ REPORT_DIR="docs/reviews/rca-eval-$(date +%F)"
 [ -e "$ROOT/$REPORT_DIR/report.md" ] && REPORT_DIR="docs/reviews/rca-eval-$(date +%F)-$(date +%H%M)"
 export OPS_TENANT="$TENANT"
 
-echo "tenant=$TENANT scale=$SCALE warmup=${WARMUP}s mode=${MODE#--}"
+if [ "$WITH_LLM" = 1 ]; then MODE_DESC="llm(转正三门禁)"; else MODE_DESC="evidence(--no-llm)"; fi
+echo "tenant=$TENANT scale=$SCALE warmup=${WARMUP}s mode=$MODE_DESC"
 
 # ---- 起进程（run_demo 式；trap 兜底杀干净）----
 trap stop_all EXIT
@@ -93,19 +138,28 @@ nohup "$OUT/faultinjector.exe" -addr 127.0.0.1:19090 -scale "$SCALE" -warmup "$W
 echo $! >> "$PIDFILE"
 
 echo "starting opscopilot (eval wiring: pull+autocreate on, 10s 节拍, 25s 噪声窗)..."
-REDIS_ALERT_ADDR=127.0.0.1:6380 \
-REDIS_CACHE_ADDR=127.0.0.1:6381 \
-OPS_PROM_URL=http://127.0.0.1:19090 \
-OPS_WEBHOOK_TOKEN=dev \
-OPS_TOPOLOGY_EDGES="n1->n2,n2->n3" \
-OPS_DB_DSN="$DSN" \
-OPS_LISTEN_ADDR=127.0.0.1:8080 \
-OPS_PULL_ALERTS=on OPS_INCIDENT_AUTOCREATE=on \
-OPS_CONNECTOR_INTERVAL=10s OPS_PULL_INTERVAL=10s \
-OPS_NOISE_WINDOW=25s \
-OPS_RCA=on \
-nohup "$OUT/opscopilot.exe" > "$OUT/opscopilot.log" 2>&1 &
-echo $! >> "$PIDFILE"
+start_app() {
+  REDIS_ALERT_ADDR=127.0.0.1:6380 \
+  REDIS_CACHE_ADDR=127.0.0.1:6381 \
+  OPS_PROM_URL=http://127.0.0.1:19090 \
+  OPS_WEBHOOK_TOKEN=dev \
+  OPS_TOPOLOGY_EDGES="n1->n2,n2->n3" \
+  OPS_DB_DSN="$DSN" \
+  OPS_LISTEN_ADDR=127.0.0.1:8080 \
+  OPS_PULL_ALERTS=on OPS_INCIDENT_AUTOCREATE=on \
+  OPS_CONNECTOR_INTERVAL=10s OPS_PULL_INTERVAL=10s \
+  OPS_NOISE_WINDOW=25s \
+  OPS_RCA=on \
+  nohup "$OUT/opscopilot.exe" > "$OUT/opscopilot.log" 2>&1 &
+  echo $! >> "$PIDFILE"
+}
+if [ "$WITH_LLM" = 1 ]; then
+  # OPS_LLM_* 原样透传：仅该子 shell 内 source 临时 env 文件后拉起 app，
+  # 脚本主进程与评测器进程不携带这组变量（值只进 app 环境，全程不回显）。
+  ( set -a; . "$LLM_ENV_FILE"; set +a; start_app )
+else
+  start_app
+fi
 disown -a 2>/dev/null || true
 
 ok=""
@@ -126,6 +180,14 @@ rc=0
   -golden tools/rca_eval/golden.json \
   -dsn "$DSN" -token dev -tenant "$TENANT" \
   -out-dir "$OUT" -report-dir "$ROOT/$REPORT_DIR" $MODE) || rc=$?
+
+# ---- key 防回显兜底（双保险第二层）：app/注入器日志与评测产物里抹掉任何
+# OPS_LLM_API_KEY 键值行——按"变量名"打码，绝不读取/打印取值本身。
+if [ "$WITH_LLM" = 1 ]; then
+  for lf in "$OUT/opscopilot.log" "$OUT/injector.log" "$ROOT/$REPORT_DIR/report.md" "$ROOT/$REPORT_DIR/summary.json"; do
+    [ -f "$lf" ] && sed -i -E 's/(OPS_LLM_API_KEY[ =:"]*)[^"[:space:]]*/\1***REDACTED***/g' "$lf" || true
+  done
+fi
 
 # ---- 先杀进程（trap 也会兜底），再报结果 ----
 stop_all; trap - EXIT
