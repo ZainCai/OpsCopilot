@@ -90,6 +90,10 @@ const (
 	EnvLLMTimeout   = "OPS_LLM_TIMEOUT"
 	EnvLLMMaxTokens = "OPS_LLM_MAX_TOKENS"
 
+	// EnvSessionEnabled 二期池 #7（设计文档《sessionstore消费方与接线》拍板定案）：
+	// RCA 复盘会话总开关，默认 off（on 须 OPS_RCA=on，Validate 强制）。
+	EnvSessionEnabled = "OPS_SESSION"
+
 	EnvMemLimitWarnRatio        = "OPS_MEMLIMIT_WARN_RATIO"
 	EnvMemLimitTopologyNodes    = "OPS_MEMLIMIT_TOPOLOGY_NODES"
 	EnvMemLimitTopologyEdges    = "OPS_MEMLIMIT_TOPOLOGY_EDGES"
@@ -197,6 +201,9 @@ func LoadFrom(lookup LookupFunc) (*Config, error) {
 	c.LLM.Model = p.str(EnvLLMModel)
 	c.LLM.Timeout = p.posDur(EnvLLMTimeout, DefaultLLMTimeout)
 	c.LLM.MaxTokens = p.posInt(EnvLLMMaxTokens, DefaultLLMMaxTokens)
+
+	// 复盘会话（二期池 #7）：默认 off；跨字段约束（on 须 RCA=on）在 Validate。
+	c.Session.Enabled = p.onOff(EnvSessionEnabled, DefaultSessionEnabled)
 
 	c.MemLimit.WarnRatio = p.posRatio(EnvMemLimitWarnRatio, DefaultMemWarnRatio)
 	c.MemLimit.TopologyNodes = p.posInt(EnvMemLimitTopologyNodes, DefaultMemTopologyNodes)

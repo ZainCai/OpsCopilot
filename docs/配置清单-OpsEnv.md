@@ -16,7 +16,7 @@
 >   （v1.2 C2 / G1"缺一拒绝启动"）不因收敛放松；两地址归一化后相同
 >   （`localhost` ≡ `127.0.0.1`、大小写/空白不敏感）同样拒绝启动。
 
-统计：**62 个运行时 env 键**（`OPS_*` 60 + `REDIS_*` 2），16 组。
+统计：**63 个运行时 env 键**（`OPS_*` 61 + `REDIS_*` 2），17 组。
 （优化方案 #8 判决异步落库队列 `OPS_NOISE_SINK_*` 4 键，**队满丢弃取向**：
 慢 DB/极端洪峰下丢持久化保采集节拍，宁漏库存不丢通知——**PG 判决流可缺
 条目，Redis/PG 镜像与内存态非强一致**，丢弃面看
@@ -45,6 +45,14 @@ notify 渠道投递同步迁至 transport 路径，业务模块禁持 http.Clien
 门禁内）取全量——以一次性全量开关替代游标分页（同步报告在内存里现成），
 **长任务化（异步 job）仍不做**（ADR-014 留桩兑现说明）。conclude 步送
 llm-gateway 的 prompt 证据行同守此上限（llmgw 输入侧预算防线）。）
+（二期池 #7 sessionstore 接线新增 `OPS_SESSION`（复盘会话组首键，默认 **off**）：
+RCA 复盘会话总开关（设计文档《sessionstore消费方与接线》拍板定案）。on 建告警
+实例热态袋（sessionstore，2h TTL 仅缓冲、真相 PG migration 000018、懒恢复重建），
+注册 GET/POST `/api/v1/incidents/{id}/rca/session`（GET 读会话、POST 追加轮次，
+assistant 轮经 llmgw 产出；LLM 未配/失败 fail-open pending 不假答）；on 须
+`OPS_RCA=on`（prompt 必携带 findings，Validate 强制）。超时/正文上限不新增键
+（复用 `OPS_LLM_TIMEOUT`/`OPS_RCA_TIMEOUT`/建单体上限）。off 全链路零行为变化，
+降级面看 `opscopilot_session_llm_requests_total{outcome}`。）
 另有 1 个测试门控键与 2 个独立 CLI 工具的键，见文末附录 B/C。
 
 ## 清单表
@@ -113,6 +121,7 @@ llm-gateway 的 prompt 证据行同守此上限（llmgw 输入侧预算防线）
 | 60 | `OPS_LLM_MODEL` | LLM 网关 | 字符串 | 无默认（**不给厂商预设模型名**） | Endpoint 非空而本键缺失 → **启动失败**（`config.Validate`） | `llmgw` 请求体 `model` 字段 |
 | 61 | `OPS_LLM_TIMEOUT` | LLM 网关 | 正 duration | `8s` | 非正 duration → 启动失败；**超时预算**：`LLM + 2s ≤ OPS_RCA_TIMEOUT` 不满足 → 启动失败（2s 硬预留给取证 IO + 前四步规则计算，默认 8s+2s=10s 恰好压线） | `transport.NewHTTPClient(timeout)`（llmgw 不持 http.Client，发送器构造期锁定；超时 REST 侧不 5xx——conclude fail-open 回 pending） |
 | 62 | `OPS_LLM_MAX_TOKENS` | LLM 网关 | 正整数 | `1024` | 非正整数 → **启动失败** | `llmgw` 请求体 `max_tokens` 字段（结论千字级顶天；响应侧另有 1MiB 业务上限） |
+| 63 | `OPS_SESSION` | RCA 复盘会话 | on/off | `off`（**二期池 #7 新增**：sessionstore 接线总开关，默认 off 全链路零行为变化；会话端点显式 503） | 非 on/off → **启动失败**；`on` 而 `OPS_RCA=off` → **启动失败**（`config.Validate`：复盘会话 prompt 必携带 RCA findings，编排器 off 时不存在——同款 `OPS_RCA_AUTO` 约束） | `config.Session.Enabled` → `NewAssembly`（S1 骨架：构造告警实例 Redis 客户端 + `sessionstore.New(rdb, RedisAlert)` 热态袋，role 误绑启动期 panic 守卫继承 P1-1；S2：构造 `SessionOrchestrator`（PG 真相 000018 + 懒恢复 + llmgw assistant 轮）并 `RESTGateway.SetSession` 注册 GET/POST `/api/v1/incidents/{id}/rca/session`；无 DB 时真相退化内存并响亮 WARNING——升级台账同款纪律） |
 
 > #6 指标（非 env，登记于此便于对照）：每个有界结构两项——
 > `opscopilot_mem_entries{store="builder|builder_edges|incidents|escalation_ledger|noise_dedup|noise_clusters|noise_sigcache|audit"}`（gauge）

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
 
 	"opscopilot/internal/config"
@@ -28,6 +29,7 @@ import (
 	pb "opscopilot/internal/contracts/pb"
 	"opscopilot/internal/incident"
 	"opscopilot/internal/notify"
+	"opscopilot/internal/sessionstore"
 	"opscopilot/internal/topology"
 	"opscopilot/pkg/memguard"
 	"opscopilot/pkg/metrics"
@@ -68,6 +70,10 @@ type Assembly struct {
 	// RCATrigger 升级联动自动 RCA 触发器（二期池波二 #4；nil = OPS_RCA_AUTO=off
 	// 或无 escalation 挂点）。Run 由 main 以 runCtx 驱动独立 worker goroutine。
 	RCATrigger *RCATrigger
+	// SessionHot sessionstore 热态袋（二期池 #7 S1 装配骨架；nil = OPS_SESSION=off）。
+	// 绑告警实例 Redis（role 误绑启动期 panic 由包构造器锁定）；只做 TTL 热态
+	// 缓冲，真相在 PG（migration 000018）——S2 编排器消费本字段做懒恢复。
+	SessionHot *sessionstore.Store
 	// Events 实时广播器（W11：控制台事件页 SSE 订阅源）。
 	Events *EventHub
 	// NotifyReg 通知渠道注册表（W9-2）：渠道 CRUD 后由 reloadNotifyChannels
@@ -87,6 +93,10 @@ type Assembly struct {
 	logf func(string, ...any)
 	// pool DB 连接池（事件 Store / 导入队列 / 审计共享；生命周期归装配）。
 	pool *pgxpool.Pool
+	// sessionRDB 会话热态 Redis 客户端（OPS_SESSION=on 时装配自持，停机随
+	// Close 关闭；main.go 里 noise 侧的告警实例客户端是另一条链路，不复用
+	// ——降噪 off 时那台 client 根本不存在，会话不能借它）。
+	sessionRDB *redis.Client
 }
 
 // reloadNotifyChannels 从 DB 重载启用渠道到注册表（先清后注册：
@@ -127,6 +137,9 @@ func (a *Assembly) Close() {
 	}
 	if a.Events != nil {
 		a.Events.Close() // 让已连接的 SSE 订阅者立即结束，不悬挂
+	}
+	if a.sessionRDB != nil {
+		_ = a.sessionRDB.Close() // 二期池 #7：装配自持的会话热态客户端（第四轮 F4 同款收尾纪律）
 	}
 	if a.pool != nil {
 		a.pool.Close()
@@ -412,6 +425,33 @@ func NewAssembly(logger connector.Logger, cfg *config.Config) (*Assembly, error)
 		}
 	} else {
 		logf("rca on-demand analysis disabled (OPS_RCA=off)")
+	}
+
+	// 二期池 #7 S1 装配骨架（设计文档《sessionstore消费方与接线》）：复盘会话
+	// 热态袋接告警实例 Redis——sessionstore.New 对 role 的启动期 panic 守卫
+	// （P1-1）在这里第一次被真实调用。OPS_SESSION=off（默认）→ 连 Redis
+	// 客户端都不构造，零行为变化。真相源是 PG（migration 000018），Redis 只
+	// 当 TTL 热态缓冲（拍板①懒恢复）；无 DB 时 S2 编排器退化内存真相并响亮
+	// 告警（升级台账同款降级纪律），骨架本身不拦。
+	if cfg.Session.Enabled {
+		sessRDB := redis.NewClient(&redis.Options{
+			Addr:                  cfg.Redis.Alert.Addr,
+			DialTimeout:           redisDialTimeout,
+			ReadTimeout:           redisIOTimeout,
+			WriteTimeout:          redisIOTimeout,
+			ContextTimeoutEnabled: true, // go-redis v9 默认会丢命令 ctx 截止时间（noise_store_redis.go 实测）
+		})
+		asm.sessionRDB = sessRDB
+		// role 显式取自 config（编译期常量 "alert"）：绑错实例=启动期 panic，
+		// 失败前移纪律原样继承。
+		asm.SessionHot = sessionstore.New(sessRDB, string(config.RedisAlert))
+		logf("rca review session: hot buffer wired (alert redis %s, ttl %s; truth = PG rca_session/000018)",
+			cfg.Redis.Alert.Addr, sessionstore.DefaultTTL)
+		if pgPool == nil {
+			logf("WARNING: OPS_SESSION=on but no DB pool — session truth degrades to memory (single-instance, restart loses turns)")
+		}
+	} else {
+		logf("rca review session disabled (OPS_SESSION=off)")
 	}
 
 	// 二期池波二 #4：升级联动自动 RCA（OPS_RCA_AUTO，默认 off）。复用上面

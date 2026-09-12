@@ -105,6 +105,37 @@ func TestValidateRCAAutoRequiresEnabled(t *testing.T) {
 	}
 }
 
+func TestLoadFromDefaultsSession(t *testing.T) {
+	// 二期池 #7：OPS_SESSION 默认 off（全链路零行为变化）。
+	c, err := LoadFrom(envMap(redisEnv("127.0.0.1:6380", "127.0.0.1:6381")))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if c.Session.Enabled {
+		t.Fatal("OPS_SESSION default must be off")
+	}
+	env := redisEnv("127.0.0.1:6380", "127.0.0.1:6381")
+	env[EnvSessionEnabled] = "on" // RCA 默认 on，合法组合
+	c2, err := LoadFrom(envMap(env))
+	if err != nil || !c2.Session.Enabled {
+		t.Fatalf("session=on with rca=on must load: %v (%+v)", err, c2.Session)
+	}
+}
+
+func TestValidateSessionRequiresRCAEnabled(t *testing.T) {
+	// 二期池 #7（拍板④）：会话 prompt 必携带 RCA findings，OPS_SESSION=on 而
+	// OPS_RCA=off 是配置矛盾——与 RCA_AUTO 同款 fail-fast。
+	_, err := LoadFrom(envMap(func() map[string]string {
+		e := redisEnv("127.0.0.1:6380", "127.0.0.1:6381")
+		e[EnvRCAEnabled] = "off"
+		e[EnvSessionEnabled] = "on"
+		return e
+	}()))
+	if err == nil || !strings.Contains(err.Error(), EnvSessionEnabled) {
+		t.Fatalf("SESSION=on with RCA=off must be rejected mentioning %s, got %v", EnvSessionEnabled, err)
+	}
+}
+
 func TestLoadFromDefaults(t *testing.T) {
 	got, err := LoadFrom(envMap(redisEnv("127.0.0.1:6380", "127.0.0.1:6381")))
 	if err != nil {
@@ -162,14 +193,15 @@ func TestLoadFromAggregatesAllErrors(t *testing.T) {
 	env[EnvRCAWindow] = "soon"         // #12：非法 duration 拒绝
 	env[EnvRCADepth] = "0"             // #12：跳数须为正整数
 	env[EnvRCAMaxFindings] = "-7"      // #6 二期：findings 上限须为正整数
+	env[EnvSessionEnabled] = "true"    // #7 二期：复盘会话开关同样只认 on|off
 
 	_, err := LoadFrom(envMap(env))
 	var agg *Error
 	if !errors.As(err, &agg) {
 		t.Fatalf("want *Error, got %T: %v", err, err)
 	}
-	if len(agg.Errs) != 18 {
-		t.Fatalf("want 18 aggregated errors, got %d: %v", len(agg.Errs), err)
+	if len(agg.Errs) != 19 {
+		t.Fatalf("want 19 aggregated errors, got %d: %v", len(agg.Errs), err)
 	}
 	for _, key := range []string{
 		EnvDBMaxConns, EnvPullInterval, EnvEscalationAfter, EnvNoiseWindow,
@@ -177,7 +209,7 @@ func TestLoadFromAggregatesAllErrors(t *testing.T) {
 		EnvChangePruneInterval, EnvCORSOrigin, EnvIngestBatch,
 		EnvLeaderElection, EnvLeaderRetryInterval,
 		EnvRCAEnabled, EnvRCAAuto, EnvRCASTimeout, EnvRCAWindow, EnvRCADepth,
-		EnvRCAMaxFindings,
+		EnvRCAMaxFindings, EnvSessionEnabled,
 	} {
 		if !strings.Contains(err.Error(), key) {
 			t.Errorf("aggregated error must mention %s, got:\n%v", key, err)

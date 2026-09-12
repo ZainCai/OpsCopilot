@@ -325,7 +325,13 @@ func main() {
 	logger.Printf("  events: 双链路（人工建单 POST /api/v1/incidents ∥ 外部导入 push/pull）+ SSE 实时推送 + 控制台事件页 /console")
 	logger.Printf("  metrics: GET /metrics (告警 fired→verdict / fired→通知 延迟分位 + 判决/闸门计数 + 内存有界结构规模/淘汰 opscopilot_mem_*)")
 	logger.Printf("  rca: 按需最小链路已接线 GET /api/v1/incidents/{id}/rca（取证→假设→验证→归因→建议 规则+证据版；conclude 待 llm-gateway，ADR-003/014）")
-	logger.Printf("  not wired: sessionstore（预留件，见 README「预留未接线的组件」；notify 闸门随 W9-1、渠道随 W9-2、/metrics 随 W9-4、rca 随 #12 已接线）")
+	// 二期池 #7：sessionstore 不再是"预留未接线"——RCA 复盘会话是它的首个
+	// 运行时消费方（OPS_SESSION 总开关，默认 off；off 时下面报 OFF 且端点 503）。
+	if asm.SessionHot != nil {
+		logger.Printf("  session: rca 复盘会话已接线 GET/POST /api/v1/incidents/{id}/rca/session（热态 alert-redis + PG 真相 000018，懒恢复；assistant 走 llmgw 单出口，未配 LLM 时 fail-open pending）")
+	} else {
+		logger.Printf("  session: OFF (OPS_SESSION=off — rca review session not wired; /rca/session 端点 503)")
+	}
 	logger.Printf("POST %s (change events) | GET /healthz | listening on %s",
 		changeWebhookPath, addr)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

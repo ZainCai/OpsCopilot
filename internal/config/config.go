@@ -253,6 +253,16 @@ type LLMSection struct {
 	MaxTokens int           // OPS_LLM_MAX_TOKENS 补全 token 上限，默认 1024
 }
 
+// SessionSection RCA 复盘会话（二期池 #7 / 设计文档《sessionstore消费方与接线》
+// S1+S2）：sessionstore 热态袋 + PG 真相表（migration 000018）+ llmgw 复盘问答。
+// 开关 OPS_SESSION 默认 **off**——off 时不构造会话 Redis 客户端、不注册会话端点
+// 消费方（端点显式 503），全链路零行为变化（与 OPS_RCA_AUTO #4 同款默认取向）。
+// 无新增超时/长度键：轮次请求体复用 OPS 建单体上限（Metrics.IncidentBodyLimit），
+// LLM 出站超时复用 OPS_LLM_TIMEOUT（拍板：不加配置项）。
+type SessionSection struct {
+	Enabled bool // OPS_SESSION on/off，默认 off
+}
+
 // MemLimitSection 内存有界化（优化方案 #6）：各无界/准无界进程内结构的
 // 容量上限与告警水位。上限按"开发/演示规模不可能触发"保守设定——
 // 正常规模行为与不设限完全一致；只有逼近病态增长才淘汰并计 WARN/指标。
@@ -306,6 +316,7 @@ type Config struct {
 	Topology  TopologySection
 	RCA       RCASection
 	LLM       LLMSection
+	Session   SessionSection
 	MemLimit  MemLimitSection
 	Metrics   MetricsSection
 }
@@ -333,6 +344,12 @@ func (c *Config) Validate() error {
 	// 不让"配了自动却永远不触发"静默生效。
 	if c.RCA.Auto && !c.RCA.Enabled {
 		return fmt.Errorf("%s=on requires %s=on (auto trigger reuses the on-demand RCA chain; orchestrator is not wired when it is off)", EnvRCAAuto, EnvRCAEnabled)
+	}
+	// 二期池 #7（设计文档拍板④）：复盘会话的 prompt 必须携带该 incident 的
+	// RCA findings（取证复用 RCAOrchestrator）——RCA off 时编排器不存在，
+	// "会话已开但永远拼不出证据上下文"是配置矛盾，fail-fast 同 RCA.Auto 先例。
+	if c.Session.Enabled && !c.RCA.Enabled {
+		return fmt.Errorf("%s=on requires %s=on (the review session embeds RCA findings in every assistant prompt; the orchestrator is not wired when RCA is off)", EnvSessionEnabled, EnvRCAEnabled)
 	}
 	if err := c.validateLLM(); err != nil {
 		return err
@@ -477,6 +494,11 @@ const (
 	DefaultLLMTimeout   = 8 * time.Second
 	DefaultLLMMaxTokens = 1024
 
+	// DefaultSessionEnabled 复盘会话（二期池 #7，OPS_SESSION）默认 off——
+	// 新增交互面（REST 读写 + LLM 出站 + PG 新表），全链路零行为变化直到显式
+	// 开启；off 时会话端点显式 503（可诊断，对齐 RCA #12 取向）。
+	DefaultSessionEnabled = false
+
 	// LLMBudgetReserve RCA 超时里给"取证 IO + 前四步规则计算"预留的硬
 	// 预算（ADR-015）：约束 OPS_LLM_TIMEOUT ≤ OPS_RCA_TIMEOUT − 2s。
 	// 前四步实测毫秒级（内存邻域 + 进程内取证直调），2s 覆盖慢 DB 下
@@ -549,6 +571,7 @@ func Defaults() *Config {
 	c.RCA.MaxFindings = DefaultRCAMaxFindings
 	c.LLM.Timeout = DefaultLLMTimeout
 	c.LLM.MaxTokens = DefaultLLMMaxTokens
+	c.Session.Enabled = DefaultSessionEnabled
 	c.MemLimit.WarnRatio = DefaultMemWarnRatio
 	c.MemLimit.TopologyNodes = DefaultMemTopologyNodes
 	c.MemLimit.TopologyEdges = DefaultMemTopologyEdges
