@@ -23,7 +23,10 @@ export const ENDPOINTS = {
     `${V1}/incidents/${encodeURIComponent(id)}/timeline`, // GET（W10-1 混合时间线 ?limit=&cursor=）
   incidentMerge: (id: string) => `${V1}/incidents/${encodeURIComponent(id)}/merge`, // POST
   incidentTransition: (id: string) =>
-    `${V1}/incidents/${encodeURIComponent(id)}/transition`, // POST
+    `${V1}/incidents/${encodeURIComponent(id)}/transition`, // POST（可带 sla_minutes 覆盖）
+
+  // 运维 KPI（W10-3 F-07；?window=168h&severity=…，口径见 rest_kpi.go）
+  kpis: `${V1}/kpis`, //                  GET
 
   // 告警中心 · 影子判决流（rest_alerts.go；需 OPS_DB_DSN）
   alerts: `${V1}/alerts`, //            GET  ?limit=（默认 200，上限 1000）

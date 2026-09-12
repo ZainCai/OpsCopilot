@@ -100,6 +100,12 @@ export interface Incident {
   created_by?: string;
   created_at?: string;
   updated_at?: string;
+  acked_at?: string; // 首次 ack 时刻（零值 "0001-01-01T00:00:00Z" = 从未 ack）
+  sla_minutes?: number; // 单事件覆盖（0 = 按 severity 取服务端默认）
+  // SLA 只读派生视图（GET detail/list 才有；SSE 广播是裸实体）
+  sla_deadline?: string;
+  sla_remaining_seconds?: number; // 可为负 = 已超时时长（终态冻结在闭环时刻）
+  sla_breached?: boolean;
   cluster_keys?: string[];
   dedup_key?: string;
   merged_into?: string;
@@ -160,6 +166,26 @@ export interface TimelineResponse {
   next_cursor: string; // 空 = 已到末尾
   partial: boolean; // true ⇒ 有依赖源缺席/不完整（见 missing）
   missing: Record<string, string>; // 源名 → 缺席/不完整原因
+}
+
+// ---------- 运维 KPI（GET /api/v1/kpis，W10-3/F-07） ----------
+/** 口径（internal/incident/kpi.go）：队列 = created_at 入窗；MTTA=avg(acked−created)、
+ * MTTR=avg(resolved−created)；**平均闭环时长与 MTTR 同口径（一个字段）**；
+ * 均值 0 且 samples=0 表示"无样本"，不是"零耗时"。 */
+export interface KPIStats {
+  created_count: number;
+  resolved_count: number;
+  acked_samples: number;
+  resolved_samples: number;
+  mtta_seconds: number;
+  mttr_seconds: number;
+}
+export interface KPIResponse {
+  window: string; // 实际生效窗（Go duration 文本）
+  window_start: string;
+  generated_at: string;
+  severity: string; // 空 = 未过滤
+  stats: KPIStats;
 }
 
 // ---------- 鉴权探测（GET /api/v1/auth/status） ----------

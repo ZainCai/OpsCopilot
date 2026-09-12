@@ -126,6 +126,16 @@ label.toggle { display: inline-flex; gap: 6px; align-items: center; font-size: 1
 .detail .sec { margin-top: 12px; }
 .detail .sec-h { font-size: 11.5px; font-weight: 600; color: var(--text-2); margin-bottom: 6px;
                  border-top: 1px solid var(--line-soft); padding-top: 10px; }
+
+/* SLA 时钟（W10-2 F-04：只记录与展示；剩余/超时/截止全为后端派生字段，前端零计算口径） */
+.sla-bar { margin: 10px 0 2px; }
+.sla-line { display: flex; align-items: center; gap: 8px; font-size: 11.5px; }
+.sla-tag { border: 1px solid var(--line-soft); border-radius: 6px; padding: 0 6px; color: var(--text-3); font-size: 11px; }
+.sla-state { color: var(--text-2); font-family: var(--font-mono); }
+.sla-state.bad { color: var(--crit); font-weight: 600; }
+.sla-track { height: 6px; border-radius: 999px; background: var(--line-soft); overflow: hidden; margin-top: 5px; }
+.sla-fill { height: 100%; background: var(--brand); border-radius: 999px; transition: width .3s; }
+.sla-fill.bad { background: var(--crit); }
 .cand { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 7px; background: var(--panel);
         border: 1px solid var(--line-soft); margin-bottom: 6px; font-size: 12px; flex-wrap: wrap; }
 .cand .score { font-family: var(--font-mono); font-weight: 600; color: var(--warn); flex: none; width: 34px; }

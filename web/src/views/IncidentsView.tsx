@@ -13,7 +13,7 @@ import { OriginBadge, SevBadge, StateChip } from "../components/Badges";
 import { PageHead } from "../components/Layout";
 import { Seg, StatCard } from "../components/Stat";
 import { AuditTimeline, MixedTimeline } from "../components/Timeline";
-import { fmtTime, timeAgoText } from "../lib/format";
+import { fmtTime, fmtDurationSec, isZeroTime, timeAgoText } from "../lib/format";
 
 /** 事件状态机（后端 rest_incidents.go 保证合法性，前端只展示允许转移）。 */
 const NEXT_STATES: Record<string, string[]> = {
@@ -315,7 +315,8 @@ function IncidentDetail({ id, onChanged }: { id: string; onChanged: () => void }
     ["状态", inc.state], ["严重级", inc.severity || "-"], ["建单人", inc.created_by || "—"],
     ["关联簇", (inc.cluster_keys ?? []).join(", ") || "—"], ["去重键", inc.dedup_key || "—"],
     ["合并到", inc.merged_into || "—"], ["外部关单", inc.auto_close_policy || "auto"],
-    ["创建", fmtTime(inc.created_at)], ["更新", fmtTime(inc.updated_at)],
+    ["创建", fmtTime(inc.created_at)], ["确认", isZeroTime(inc.acked_at) ? "未确认" : fmtTime(inc.acked_at)],
+    ["更新", fmtTime(inc.updated_at)],
   ];
   const nexts = NEXT_STATES[inc.state] ?? [];
   return (
@@ -329,6 +330,7 @@ function IncidentDetail({ id, onChanged }: { id: string; onChanged: () => void }
           </span>
         ))}
       </div>
+      <SLABar inc={inc} />
       <div className="acts">
         {nexts.length > 0
           ? nexts.map((to) => (
@@ -359,6 +361,37 @@ function IncidentDetail({ id, onChanged }: { id: string; onChanged: () => void }
       <div className="sec">
         <div className="sec-h">审计轨迹（{audit.length}）</div>
         <AuditTimeline entries={audit} />
+      </div>
+    </div>
+  );
+}
+
+// ---------- SLA 时钟（W10-2/F-04：只记录与展示，不自动升级） ----------
+// 数据全部来自 GET 视图派生字段（rest_sla.go）：前端零计算口径——只把
+// sla_remaining_seconds/sla_breached 画成进度条与徽标。进度 = 已耗时/目标
+// 时长；终态单的剩余/超时冻结在闭环时刻（后端保证），所以已解决单不会随
+// 墙钟越拖越红。
+
+function SLABar({ inc }: { inc: Incident }): React.ReactElement | null {
+  if (!inc.sla_deadline || !inc.created_at || isZeroTime(inc.created_at)) return null;
+  const total = (new Date(inc.sla_deadline).getTime() - new Date(inc.created_at).getTime()) / 1000;
+  if (!isFinite(total) || total <= 0) return null;
+  const remaining = inc.sla_remaining_seconds ?? 0;
+  const breached = inc.sla_breached === true;
+  const terminal = inc.state === "resolved";
+  const pct = Math.min(100, Math.max(0, ((total - remaining) / total) * 100));
+  return (
+    <div className="sla-bar" title={`SLA 目标 ${fmtDurationSec(total)} · 截止 ${fmtTime(inc.sla_deadline)}${terminal ? " · 终态冻结" : ""}`}>
+      <div className="sla-line">
+        <span className="faint">SLA</span>
+        {inc.sla_minutes ? <span className="sla-tag">自定义 {inc.sla_minutes}m</span> : <span className="sla-tag">按级默认</span>}
+        <span className={`sla-state${breached ? " bad" : ""}`}>
+          {breached ? `超时 ${fmtDurationSec(remaining)}` : `剩余 ${fmtDurationSec(remaining)}`}
+          {terminal ? (breached ? "（闭环时已超）" : "（按时闭环）") : ""}
+        </span>
+      </div>
+      <div className="sla-track">
+        <div className={`sla-fill${breached ? " bad" : ""}`} style={{ width: `${pct}%` }} />
       </div>
     </div>
   );
