@@ -73,6 +73,11 @@ const (
 	EnvChangeRetention     = "OPS_CHANGE_RETENTION"
 	EnvChangePruneInterval = "OPS_CHANGE_PRUNE_INTERVAL"
 
+	EnvRCAEnabled  = "OPS_RCA"
+	EnvRCASTimeout = "OPS_RCA_TIMEOUT"
+	EnvRCAWindow   = "OPS_RCA_WINDOW"
+	EnvRCADepth    = "OPS_RCA_DEPTH"
+
 	EnvMemLimitWarnRatio        = "OPS_MEMLIMIT_WARN_RATIO"
 	EnvMemLimitTopologyNodes    = "OPS_MEMLIMIT_TOPOLOGY_NODES"
 	EnvMemLimitTopologyEdges    = "OPS_MEMLIMIT_TOPOLOGY_EDGES"
@@ -162,6 +167,11 @@ func LoadFrom(lookup LookupFunc) (*Config, error) {
 		c.Topology.ChangeWindow, c.Topology.ChangeEnabled = w, on
 	}
 	c.Topology.ChangePruneInterval = p.posDur(EnvChangePruneInterval, DefaultChangePruneInterval)
+
+	c.RCA.Enabled = p.onOff(EnvRCAEnabled, DefaultRCAEnabled)
+	c.RCA.Timeout = p.posDur(EnvRCASTimeout, DefaultRCATimeout)
+	c.RCA.Window = p.posDur(EnvRCAWindow, DefaultRCAWindow)
+	c.RCA.Depth = p.posInt(EnvRCADepth, DefaultRCADepth)
 
 	c.MemLimit.WarnRatio = p.posRatio(EnvMemLimitWarnRatio, DefaultMemWarnRatio)
 	c.MemLimit.TopologyNodes = p.posInt(EnvMemLimitTopologyNodes, DefaultMemTopologyNodes)

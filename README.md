@@ -179,7 +179,7 @@ curl -s http://127.0.0.1:8080/metrics | grep -E 'fired_to_(verdict|notify)_secon
 
 ## 架构决策记录
 
-`docs/adr/` 存 7 份 ADR（ADR-001 事件骨干 / 002 算子前置 / 003 LLM 单出口 / 004 Redis 双实例 / 005 审计分离 / 006 数据库部署 / 007 拓扑置信度 + 关键外部依赖清单）。
+`docs/adr/` 存 ADR 全集（001 事件骨干 / 002 算子前置 / 003 LLM 单出口 / 004 Redis 双实例 / 005 审计分离 / 006 数据库部署 / 007 拓扑置信度 / 008 外部事件代 / 009 监听门禁 / 010 工单归档 / 011 enforce 转正 / 012 单 owner 水平扩展 / 013 前端独立工程 / 014 RCA 最小链路；完整索引见 `docs/adr/README.md`）。
 
 **任何 P0 修订或影响其他决策的变更，先写 ADR 再改文档**——这是 v1.3 §5.2 的硬性流程，源于 C17 部署策略与数据层特性冲突的事故。每份 ADR 末尾的"交叉检查提醒"记录耦合项。
 
@@ -189,7 +189,7 @@ curl -s http://127.0.0.1:8080/metrics | grep -E 'fired_to_(verdict|notify)_secon
 
 | 包 | 行数 | 用途 | 计划接线阶段 |
 |---|---|---|---|
-| `internal/rca` | 124 | 根因分析（证据窗口、因果子图消费方） | M2 |
+| `internal/rca` | ~560 | 根因分析六步流水线（**优化方案 #12 最小链路已接线（ADR-014）**：取证/假设/验证/归因/建议为规则+证据版，REST `GET /api/v1/incidents/{id}/rca`；剩余：conclude 步接 llm-gateway 单出口、Escalation 自动触发二期） | 已接线（最小链路） |
 | `internal/notify` | 164 | 通知闸门/渠道（**Gate 随 W9-1 enforce 接线、渠道随 W9-2、严重级路由随 W9-3**；剩余：值班排班 M3） | 已接线 |
 | `internal/sessionstore` | 61 | 会话状态（Redis 会话存储） | W5+ |
 

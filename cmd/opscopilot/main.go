@@ -309,7 +309,8 @@ func main() {
 	}
 	logger.Printf("  events: 双链路（人工建单 POST /api/v1/incidents ∥ 外部导入 push/pull）+ SSE 实时推送 + 控制台事件页 /console")
 	logger.Printf("  metrics: GET /metrics (告警 fired→verdict / fired→通知 延迟分位 + 判决/闸门计数 + 内存有界结构规模/淘汰 opscopilot_mem_*)")
-	logger.Printf("  not wired (M2): rca, sessionstore（预留件，见 README「预留未接线的组件」；notify 闸门随 W9-1、渠道随 W9-2、/metrics 随 W9-4 已接线）")
+	logger.Printf("  rca: 按需最小链路已接线 GET /api/v1/incidents/{id}/rca（取证→假设→验证→归因→建议 规则+证据版；conclude 待 llm-gateway，ADR-003/014）")
+	logger.Printf("  not wired: sessionstore（预留件，见 README「预留未接线的组件」；notify 闸门随 W9-1、渠道随 W9-2、/metrics 随 W9-4、rca 随 #12 已接线）")
 	logger.Printf("POST %s (change events) | GET /healthz | listening on %s",
 		changeWebhookPath, addr)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

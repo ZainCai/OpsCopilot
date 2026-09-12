@@ -214,6 +214,16 @@ type TopologySection struct {
 	ChangePruneInterval time.Duration // OPS_CHANGE_PRUNE_INTERVAL 清理周期，默认 1h
 }
 
+// RCASection 按需根因分析最小链路（优化方案 #12 / ADR-014）。
+// 消费方唯一在 cmd/opscopilot/rca_orchestrator.go（装配显式注入，
+// internal/rca 不 import 本包——边界纪律）。
+type RCASection struct {
+	Enabled bool          // OPS_RCA on/off，默认 on（只读按需分析，无副作用面）
+	Timeout time.Duration // OPS_RCA_TIMEOUT 单次分析超时（含取证），默认 10s
+	Window  time.Duration // OPS_RCA_WINDOW 证据窗（T0 前多久内的变更算嫌疑），默认 30m
+	Depth   int           // OPS_RCA_DEPTH 故障域邻域取证跳数，默认 2（1..10，与 GetTopology 上限同源）
+}
+
 // MemLimitSection 内存有界化（优化方案 #6）：各无界/准无界进程内结构的
 // 容量上限与告警水位。上限按"开发/演示规模不可能触发"保守设定——
 // 正常规模行为与不设限完全一致；只有逼近病态增长才淘汰并计 WARN/指标。
@@ -265,6 +275,7 @@ type Config struct {
 	Notify    NotifySection
 	Retention RetentionSection
 	Topology  TopologySection
+	RCA       RCASection
 	MemLimit  MemLimitSection
 	Metrics   MetricsSection
 }
@@ -355,6 +366,16 @@ const (
 
 	DefaultChangePruneInterval = time.Hour
 
+	// 按需 RCA 最小链路默认值（优化方案 #12 / ADR-014）。证据窗 30m 对齐
+	// "告警前 30 分钟内有没有变更"的经典取证口径（change.go 文件头）；
+	// 超时 10s 覆盖内存态全图 AsOf + 邻域裁剪的最坏路径；深度 2 跳足以
+	// 圈住"服务→宿主→共享依赖"级别的故障域，且与 maxTopologyDepth=10 的
+	// 上限校验同源收口。默认 on：只读按需分析，无副作用面。
+	DefaultRCAEnabled = true
+	DefaultRCATimeout = 10 * time.Second
+	DefaultRCAWindow  = 30 * time.Minute
+	DefaultRCADepth   = 2
+
 	// 内存有界化默认上限（优化方案 #6）。取值依据：开发/演示环境规模
 	// （百台节点、每批数百告警、7 天影子期）距这些数字还差 2~3 个数量级
 	// ——**正常规模行为与不设限完全一致**；触限即淘汰最久未活跃并计
@@ -413,6 +434,10 @@ func Defaults() *Config {
 	c.Topology.ChangeWindow = DefaultChangeRetention
 	c.Topology.ChangeEnabled = true
 	c.Topology.ChangePruneInterval = DefaultChangePruneInterval
+	c.RCA.Enabled = DefaultRCAEnabled
+	c.RCA.Timeout = DefaultRCATimeout
+	c.RCA.Window = DefaultRCAWindow
+	c.RCA.Depth = DefaultRCADepth
 	c.MemLimit.WarnRatio = DefaultMemWarnRatio
 	c.MemLimit.TopologyNodes = DefaultMemTopologyNodes
 	c.MemLimit.TopologyEdges = DefaultMemTopologyEdges

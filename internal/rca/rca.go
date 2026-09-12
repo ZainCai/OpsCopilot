@@ -1,14 +1,21 @@
-// Package rca 根因分析流水线（M2 主干骨架，功能点 F-05/F-06）。
+// Package rca 根因分析流水线（M2 主干骨架 → 优化方案 #12 最小链路接线，
+// 功能点 F-05/F-06，ADR-014）。
 //
 // 六步框架对齐原型 rca 页（pipeline 形态）：取证 → 假设 → 验证 → 归因 →
-// 结论 → 建议。本文件只落**框架**：步骤接口、顺序执行、Findings 容器、
-// 根因标注占位。各步骤的具体算法（as_of 拓扑取证、变更关联假设等）留
-// W10 填充——占位步骤返回 StepPending，不臆造结论。
+// 结论 → 建议。#12 落地"规则 + 证据"版最小可用链路（steps.go）：
+// collect/hypothesize/verify/attribution/recommend 五步为确定性规则实现；
+// conclude 是唯一 LLM 挂点（Summarizer 接口，ADR-003 单出口——未注入时
+// 该步 pending，宁缺毋滥不出伪结论）。
 //
-// 数据源（均已就绪，W10 直接接）：
-//   - topology.AsOf(T0)：故障时刻时点拓扑（R2 锁内映射已封装）；
-//   - ChangeStore.ByNodeWithin：故障窗口内变更证据；
-//   - noise 簇：故障域节点集合。
+// 边界纪律（v1.3 §5.2，scripts/check_module_boundaries.py 实测）：本包
+// **不得** import internal/topology / internal/incident / internal/config——
+// 数据由编排层（cmd/opscopilot/rca_orchestrator.go）取证后以纯 DTO
+// （Input.Evidence / AlertedNodes）注入，本包只依赖标准库。
+//
+// 数据源（编排层负责采集，语义见 ADR-014）：
+//   - topology AsOf(T0) 时点拓扑（RCA 铁律：as_of 用 T0，禁止当前拓扑）；
+//   - ChangeBackend.ByNodeWithin/Within：故障窗口内变更证据；
+//   - noise 簇 NodeKeys：故障域节点集合（告警实际命中处）。
 package rca
 
 import (
@@ -29,20 +36,33 @@ const (
 // ErrNoInput 流水线缺必要输入（宁可报错不空跑）。
 var ErrNoInput = errors.New("rca: missing required input")
 
-// Input 单次分析输入（故障时刻 + 范围）。
+// Input 单次分析输入（故障时刻 + 范围 + 证据）。
+//
+// Evidence/AlertedNodes 由编排层（cmd）按 ADR-007/ADR-014 纪律预采集注入：
+// 拓扑为 T0 时点邻域（AsOf 语义），变更为 [T0-Window, T0] 窗口——
+// rca 包自身不触任何数据源（internal 禁互 import，边界检查强制）。
 type Input struct {
 	TenantID   string
 	ClusterKey string    // 触发分析的簇
 	T0         time.Time // 故障时刻（RCA 铁律：as_of 用 T0，禁止当前拓扑）
 	Window     time.Duration
+	// AlertedNodes 故障域节点集合（告警簇 NodeKeys 并集，编排层去重排序）。
+	// 空集 = 事件没有可定位的故障域（如无簇/簇已从内存聚类器淘汰），
+	// 各步骤按"证据不足"降级输出，不臆造假设。
+	AlertedNodes []string
+	// Evidence 预采集证据（时点拓扑 + 窗口变更）。
+	Evidence Evidence
 }
 
-// Finding 单步产出（证据/假设/结论的统一容器；W10 各步骤填充）。
+// Finding 单步产出（证据/假设/结论的统一容器）。
 type Finding struct {
 	Step       string // 步骤名
 	Summary    string
 	NodeKeys   []string // 涉及节点（根因标注挂这里）
 	Confidence string   // high / medium / low（ADR-007 同源口径）
+	// Ref 关联证据标识（变更事件 ID 等），供跨步骤引用（hypothesize→verify
+	// →attribution 链）。纯规则步骤的内部寻址键，不参与任何外部契约。
+	Ref string
 }
 
 // Step 单步：输入 → 产出。实现须幂等且只读外部数据（不做副作用）。
@@ -64,7 +84,7 @@ type Report struct {
 	Input      Input
 	Steps      []StepResult
 	Findings   []Finding // 全部产出（按步骤序）
-	RootCauses []Finding // 根因标注占位：Confidence=high 的归因结论（W10 实现）
+	RootCauses []Finding // 根因标注：Confidence=high 的归因结论（#12 规则版归因，见 steps.go）
 }
 
 // StepResult 单步执行回执（原型 pipeline 节点：done/failed/pending + 耗时）。
@@ -92,7 +112,7 @@ func (p *Pipeline) Run(in Input) (*Report, error) {
 			rep.Findings = append(rep.Findings, fs...)
 		case errors.Is(err, ErrNotImplemented):
 			sr.Status = StatusPending
-			sr.Err = "placeholder — W10"
+			sr.Err = "placeholder — llm egress not wired (ADR-003/ADR-014)"
 		default:
 			sr.Status = StatusFailed
 			sr.Err = err.Error()
@@ -105,8 +125,9 @@ func (p *Pipeline) Run(in Input) (*Report, error) {
 	return rep, nil
 }
 
-// rootCauses 从产出里挑根因标注（主干占位：只挑 Confidence=high 且
-// Step="attribution" 的条目；归因算法 W10 实现）。
+// rootCauses 从产出里挑根因标注：只挑 Confidence=high 且 Step="attribution"
+// 的条目（#12 规则版：归因步只在"变更直接命中故障域节点 + 因果门禁全过 +
+// 变更自身 high 置信"时才给 high——宁缺毋滥）。
 func rootCauses(fs []Finding) []Finding {
 	var out []Finding
 	for _, f := range fs {
@@ -117,8 +138,9 @@ func rootCauses(fs []Finding) []Finding {
 	return out
 }
 
-// ErrNotImplemented 占位步骤统一哨兵：Pipeline 用 errors.Is 识别并记
+// ErrNotImplemented 占位步骤统一哨兵（#12 起仅 conclude 步在 llm-gateway
+// 未接线时返回它，见 ADR-003/ADR-014）：Pipeline 用 errors.Is 识别并记
 // pending 继续。**正式步骤实现者不得复用此哨兵**表示真实失败；包装时
 // 必须 %w 传递（如 fmt.Errorf("query as_of: %w", err)），否则 Is 判定
 // 失效、错误分类漂移（R6 审核约定固化）。
-var ErrNotImplemented = errors.New("rca: step not implemented (W10)")
+var ErrNotImplemented = errors.New("rca: step not implemented (llm egress pending, ADR-003/ADR-014)")

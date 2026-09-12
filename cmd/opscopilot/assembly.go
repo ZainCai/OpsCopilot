@@ -63,6 +63,8 @@ type Assembly struct {
 	Poller *AlertPoller
 	// Escalation 值班升级（W9-3）：未 ack 超时重发一次（nil = 未启用）。
 	Escalation *EscalationPoller
+	// RCA 按需根因分析编排器（#12/ADR-014；nil = OPS_RCA=off，端点 503）。
+	RCA *RCAOrchestrator
 	// Events 实时广播器（W11：控制台事件页 SSE 订阅源）。
 	Events *EventHub
 	// NotifyReg 通知渠道注册表（W9-2）：渠道 CRUD 后由 reloadNotifyChannels
@@ -385,6 +387,20 @@ func NewAssembly(logger connector.Logger, cfg *config.Config) (*Assembly, error)
 	// W9-3 值班升级：未 ack 超时重发一次。需事件 Store（读 open）+ 通知
 	// 注册表（出口）。台账优先 PG（多实例安全），无库降级内存并告警。
 	asm.Escalation = buildEscalationPoller(cfg, asm.Incidents, asm.NotifyReg, pgPool, reg, logf)
+
+	// #12/ADR-014 按需 RCA 最小链路：编排器是"incident × 拓扑/变更取证 ×
+	// 六步流水线 × 审计"的唯一跨模块汇合点（internal/rca 只见纯 DTO）。
+	// 取证走 SemanticModelServer 直调（REST 网关同款复用，一套语义）；
+	// LLM 结论出口（Summarizer）本期不注入——conclude 步 pending，
+	// 二期在 llm-gateway 落地处接线（见 rca_orchestrator.go TODO）。
+	// OPS_RCA=off → 不构造，端点 503（降级不阻塞启动纪律不变）。
+	if cfg.RCA.Enabled {
+		asm.RCA = NewRCAOrchestrator(cfg.RCA, asm.Incidents, semantic, noiseEngine, audit,
+			cfg.Tenant, appMetrics, logf)
+		rest.SetRCA(asm.RCA)
+	} else {
+		logf("rca on-demand analysis disabled (OPS_RCA=off)")
+	}
 
 	// W9 双链路链路 A（外部导入）：入队通道需要 DB 队列（持久化/可积压/可重放）。
 	// 无 DB 时不注册队列——入队端点显式 503（见 Handler），比 404 可诊断。

@@ -42,6 +42,10 @@ const (
 	AuditExternalRecoveryIgnored AuditAction = "external_recovery_ignored"
 	AuditRateLimited             AuditAction = "rate_limited"
 	AuditIngestFailed            AuditAction = "ingest_failed"
+	// AuditRCA 按需根因分析留痕（#12/ADR-014）：谁在什么时候对哪一单跑了
+	// 一次 RCA、证据链体检结果进 Detail。incident_audit.action 的 CHECK
+	// 由 migration 000017 扩入本值。
+	AuditRCA AuditAction = "rca"
 )
 
 // AuditEntry 一条审计记录（json tag 与 Incident 同口径：REST 契约不暴露

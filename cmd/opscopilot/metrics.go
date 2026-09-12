@@ -82,10 +82,23 @@ type AppMetrics struct {
 	// 它同时是"源侧没给发射时刻"的唯一可观察信号（该情形下延迟指标
 	// 分母会系统性偏小，报告须声明）。
 	LatencySkipped map[string]*metrics.Counter
+	// RCARequests 按需根因分析请求数（#12），按结果（outcome = ok | error）
+	// 分桶。error 含 404/超时/Store 故障——运维关心"跑了多少次、多少次没
+	// 跑出报告"，细分原因看审计与服务日志，不在标签上炸维度。
+	RCARequests map[string]*metrics.Counter
+	// RCADuration 单次分析（取证 + 六步）端到端耗时。桶上界 20s 覆盖
+	// OPS_RCA_TIMEOUT 默认 10s 的超时红线（超出归 +Inf，即"该报警了"）。
+	RCADuration *metrics.Histogram
 }
 
 // latencyStages 延迟观测的两种阶段（跳过计数器的固定维度集合）。
 var latencyStages = []string{"verdict", "notify"}
+
+// rcaOutcomes RCA 请求计数固定维度（编译期确定，对齐 sinkStores 范式）。
+var rcaOutcomes = []string{"ok", "error"}
+
+// rcaBuckets RCA 分析耗时桶（秒）。上界 20s 覆盖默认超时 10s 之外一档。
+var rcaBuckets = []float64{0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20}
 
 // sinkStores 判决落库丢弃计数的固定维度集合（store 标签）：pg=真相源、
 // redis=加速层、other=装配了未知类型出口的兜底（含测试假出口）。
@@ -115,6 +128,13 @@ func NewAppMetrics() *AppMetrics {
 		SinkDrops:      make(map[string]*metrics.Counter, len(sinkStores)),
 		Verdicts:       make(map[string]*metrics.Counter, len(verdictReasons)),
 		LatencySkipped: make(map[string]*metrics.Counter, len(latencyStages)),
+		RCARequests:    make(map[string]*metrics.Counter, len(rcaOutcomes)),
+		RCADuration: reg.Histogram("opscopilot_rca_duration_seconds",
+			"On-demand RCA analysis latency (evidence collection + six-step pipeline), outcome-agnostic", nil, rcaBuckets, latencyWindow),
+	}
+	for _, s := range rcaOutcomes {
+		m.RCARequests[s] = reg.Counter("opscopilot_rca_requests_total",
+			"On-demand RCA analyses by outcome (ok = report produced; error = not-found/timeout/store failure)", metrics.LabelSet{"outcome": s})
 	}
 	for _, s := range sinkStores {
 		m.SinkDrops[s] = reg.Counter("opscopilot_noise_sink_drops_total",
@@ -174,6 +194,27 @@ func (m *AppMetrics) CountLatencySkipped(stage string) {
 	if c, ok := m.LatencySkipped[stage]; ok {
 		c.Inc()
 	}
+}
+
+// CountRCA 记一次按需分析（outcome = ok | error；未知归 error——
+// 新分支忘了归类时宁可高估故障面，不静默丢计数）。
+func (m *AppMetrics) CountRCA(outcome string) {
+	if m == nil {
+		return
+	}
+	c, ok := m.RCARequests[outcome]
+	if !ok {
+		c = m.RCARequests["error"]
+	}
+	c.Inc()
+}
+
+// ObserveRCALatency 记录单次分析端到端耗时。
+func (m *AppMetrics) ObserveRCALatency(d time.Duration) {
+	if m == nil {
+		return
+	}
+	m.RCADuration.Observe(d.Seconds())
 }
 
 // ObserveVerdictLatency 记录"发射 → 判决生成"延迟（口径见文件头 #8 注记）。

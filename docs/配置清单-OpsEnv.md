@@ -16,7 +16,7 @@
 >   （v1.2 C2 / G1"缺一拒绝启动"）不因收敛放松；两地址归一化后相同
 >   （`localhost` ≡ `127.0.0.1`、大小写/空白不敏感）同样拒绝启动。
 
-统计：**51 个运行时 env 键**（`OPS_*` 49 + `REDIS_*` 2），14 组。
+统计：**55 个运行时 env 键**（`OPS_*` 53 + `REDIS_*` 2），15 组。
 （优化方案 #8 判决异步落库队列 `OPS_NOISE_SINK_*` 4 键，**队满丢弃取向**：
 慢 DB/极端洪峰下丢持久化保采集节拍，宁漏库存不丢通知——**PG 判决流可缺
 条目，Redis/PG 镜像与内存态非强一致**，丢弃面看
@@ -26,6 +26,8 @@
 （优化方案 #11 新增 `OPS_INGEST_LEASE_DURATION`：ingest 认领租约，多实例并发消费互斥。）
 （优化方案 #11/ADR-012 新增 `OPS_LEADER_*` 组 2 键：PG advisory lock 选主
 （键 0x4F43504C），拓扑判决链路单 owner；无 DB 或 off → 恒 leader 降级。）
+（优化方案 #12/ADR-014 新增 `OPS_RCA_*` 组 4 键：按需根因分析开关/超时/
+证据窗/邻域跳数；只读链路，off 时端点显式 503。）
 另有 1 个测试门控键与 2 个独立 CLI 工具的键，见文末附录 B/C。
 
 ## 清单表
@@ -83,6 +85,10 @@
 | 49 | `OPS_MEMLIMIT_AUDIT` | 内存有界化 | 正整数 | `50000` | **启动失败** | `NewMemAuditLogWithLimits`（无 DB 时审计尾部截断丢最旧） |
 | 50 | `OPS_LEADER_ELECTION` | leader 选举 | on/off | `on`（**优化方案 #11/ADR-012 新增**：有 DB 即竞选） | 非 on/off → **启动失败** | `config.Leader.Election` → `NewLeaderElector`（cmd/leader.go，PG advisory lock 0x4F43504C）：leader 才跑 Host 采集/判决链路/告警拉取/Retention；无 DB 或 off 恒 leader（单实例语义不变）；本实例态看 `/metrics` gauge `opscopilot_is_leader`（ADR 观测章原名 `opscopilot_leader` 作等价别名同时暴露） |
 | 51 | `OPS_LEADER_RETRY_INTERVAL` | leader 选举 | 正 duration | `5s`（同上） | **启动失败** | 竞选节拍 = 持锁复检（连接探针）节拍 = failover 接管上界（ADR 验收标准 3 的 15s 限时 ≈ 3 个节拍余量） |
+| 52 | `OPS_RCA` | RCA 按需分析 | on/off | `on`（**优化方案 #12/ADR-014 新增**：只读按需链路无副作用面） | 非 on/off → **启动失败** | `config.RCA.Enabled` → `NewAssembly`（有值才构造 `RCAOrchestrator` 并 `RESTGateway.SetRCA`；off → `GET /api/v1/incidents/{id}/rca` 显式 503） |
+| 53 | `OPS_RCA_TIMEOUT` | RCA 按需分析 | 正 duration | `10s` | **启动失败** | 单次分析端到端预算（取证 + 六步；`context.WithTimeout` 阶段边界检查，超时 REST 504） |
+| 54 | `OPS_RCA_WINDOW` | RCA 按需分析 | 正 duration | `30m` | **启动失败** | 证据窗 [T0−window, T0]（"告警前 30 分钟"取证口径，进 `rca.Input.Window` 与 GetRecentChanges 窗口参数） |
+| 55 | `OPS_RCA_DEPTH` | RCA 按需分析 | 正整数（≤10 截断） | `2` | 非正整数 → **启动失败** | 故障域邻域取证跳数（`neighborhoodFacts` BFS 裁剪；上限与 `maxTopologyDepth` 同源，越界钳制不报错——取证参数非契约输入） |
 
 > #6 指标（非 env，登记于此便于对照）：每个有界结构两项——
 > `opscopilot_mem_entries{store="builder|builder_edges|incidents|escalation_ledger|noise_dedup|noise_clusters|noise_sigcache|audit"}`（gauge）

@@ -44,8 +44,8 @@ func TestPipelinePlaceholderStepsRunThrough(t *testing.T) {
 		t.Fatalf("steps = %d, want 2", len(rep.Steps))
 	}
 	for _, sr := range rep.Steps {
-		if sr.Status != StatusPending || !strings.Contains(sr.Err, "W10") {
-			t.Fatalf("step %s: %s / %s, want pending/W10", sr.Name, sr.Status, sr.Err)
+		if sr.Status != StatusPending || !strings.Contains(sr.Err, "placeholder") {
+			t.Fatalf("step %s: %s / %s, want pending/placeholder", sr.Name, sr.Status, sr.Err)
 		}
 	}
 	if len(rep.Findings) != 0 {
