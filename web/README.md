@@ -88,8 +88,27 @@ src/
 
 ## 构建状态
 
-本次脚手架环境（内网 Windows 机器）**未装 Node/npm**，`npm install` 与
-`npm run build` 未能在该机器执行——构建待有 Node ≥ 18 的环境验证。工程按
-TS 严格模式（strict + noUncheckedIndexedAccess 等）与 Vite 5 标准布局编写，
-代码已静态自查（导入闭环、端点/DTO 与 Go handler 逐字段核对）；如 build 报错，
-优先核对 `package.json` 依赖版本与 `tsconfig.json`。
+✅ **已验证通过**（2026-09-12，本机便携 Node 环境）：
+
+- **Node**：v22.23.2（win-x64 便携 zip，npmmirror 镜像下载），解压于
+  `C:\Users\<用户>\.qwenworkcn\tools\node\node-v22.23.2-win-x64\`（本机工具目录，
+  不入库）；npm 随包为 10.9.8。
+- **registry**：项目内 `web/.npmrc` 指向 `https://registry.npmmirror.com`
+  （仅镜像地址、无密钥，随仓库入库；不动全局 npm 配置）。
+- **结果**：`npm install`（68 包）→ `npm run build`（= `tsc --noEmit` +
+  `vite build`，产物 `dist/` 约 170 kB JS / gzip 55 kB）→ `npx tsc --noEmit`
+  三项全部一次通过，零类型/构建错误。
+
+复跑命令（Git Bash，绝对路径调用，无需永久 PATH）：
+
+```bash
+export PATH="$HOME/.qwenworkcn/tools/node/node-v22.23.2-win-x64:$PATH"
+cd opscopilot/web
+npm install && npm run build && npx tsc --noEmit
+```
+
+如需长期使用，可自行把 node 目录追加进用户 PATH（PowerShell）：
+
+```powershell
+[Environment]::SetEnvironmentVariable('Path', $env:Path + ';C:\Users\蔡\.qwenworkcn\tools\node\node-v22.23.2-win-x64', 'User')
+```
