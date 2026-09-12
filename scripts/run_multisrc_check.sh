@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # run_multisrc_check.sh —— #11 水平扩展"双实例同跑"手工验证入口（ADR-012 验收标准）。
 #
-# 用法：
-#   OPS_TEST_PG_DSN='postgres://opscopilot:opscopilot@localhost:5432/opscopilot?sslmode=disable' \
+# 用法（OPS_TEST_PG_DSN 须指向独立测试库，先跑 scripts/reset_test_pg.sh 建好）：
+#   OPS_TEST_PG_DSN='postgres://opscopilot:opscopilot@localhost:5432/opscopilot_test?sslmode=disable' \
 #     bash scripts/run_multisrc_check.sh
 #
 # 覆盖（同进程双 Assembly 共享一套 TimescaleDB，与双进程部署同语义——

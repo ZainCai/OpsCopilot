@@ -119,8 +119,22 @@
 
 | 键 | 用途 |
 |----|------|
-| `OPS_TEST_PG_DSN` | PG 集成测试的存在性门控：未设置 → 相关测试按仓库惯例 skip。测试内的**行为**控制已全部改为直接构造 `*config.Config`（#10：测试不再 `t.Setenv` 运行时键）。 |
+| `OPS_TEST_PG_DSN` | PG 集成测试的存在性门控：未设置 → 相关测试按仓库惯例 skip。测试内的**行为**控制已全部改为直接构造 `*config.Config`（#10：测试不再 `t.Setenv` 运行时键）。**须指向独立测试库**（见下），不要复用开发库。 |
 | `AZURE_ARM_TOKEN` / `AZURE_ARM_SUBSCRIPTION` / `AZURE_ARM_BASE_URL` | `internal/connector/azure` 真云集成测试门控（`t.Skip` if unset），与应用配置无关。 |
+
+### 测试库隔离（二期池波一-1）
+
+`OPS_TEST_PG_DSN` 若直接复用开发库（`DB_DSN`），incident 契约用例的翻页探针
+`walkAll`（≤100 页硬上限，`internal/incident/store_contract_test.go`）会翻遍
+过滤条件下的**全表**——开发库数据累积（压测/联调残留）超约 200 行即偶发变红。
+d87d89a 后实测：旧开发库 `-count=2` 稳定红 3 例
+（`TestContractUpsertExternalGenerations` / `TestContractListPage` /
+`TestContractConcurrency` 的 pgstore 子测试，均报
+`walk did not terminate within 100 pages`；`./cmd/...` 当时绿）。
+处置：`bash scripts/reset_test_pg.sh [--wipe]` 在同实例上建独立测试库
+`opscopilot_test` 并用纯 Go 助手 `scripts/migrate`（无 docker/psql 依赖）按序
+应用 `migrations/*.up.sql`；切库后上述 3 例全绿。属数据敏感断言而非真 bug，
+生产代码与测试逻辑零改动。
 
 ## 附录 C：独立 CLI 工具（未纳入统一 Config，保持各自 flag 默认）
 
