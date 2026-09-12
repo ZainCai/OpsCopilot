@@ -357,3 +357,89 @@ type fakeSummarizerStub struct{}
 func (fakeSummarizerStub) Summarize(rca.Input, []rca.Finding) (string, error) {
 	return "llm-conclusion", nil
 }
+
+// seedManyChanges 在故障域节点 n1 上记 n 条 high 置信 deploy 变更（各自
+// 独立 ID），每条产 hypothesize+verify+attribution 三行证据 → 撑高 findings
+// 数以触发 #6 截断。
+func (e *rcaEnv) seedManyChanges(t *testing.T, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		e.recordChange(t, topology.ChangeEvent{
+			ID:      "dep-" + string(rune('a'+i)) + string(rune('A'+i)), // 稳定唯一 ID
+			NodeKey: "prometheus://nodes/n1", Type: topology.ChangeDeploy,
+			Source: "jenkins", Author: "ci",
+			OccurredAt: time.Now().Add(-time.Duration(i+1) * time.Minute),
+			Confidence: topology.ConfidenceHigh,
+		})
+	}
+}
+
+// TestRCAOrchestratorFindingsTruncation 二期池波二 #6：报告按上限截断、
+// 全量留在 RCAResult、审计记截断版口径、根因（独立切片）不随截断丢失。
+func TestRCAOrchestratorFindingsTruncation(t *testing.T) {
+	// 6 条变更 → 6*(hypothesize+verify+attribution) + collect + recommend = 20 findings。
+	const nChange, maxF = 6, 5
+	e := newRCAEnv(t, func(s *config.RCASection) { s.MaxFindings = maxF })
+	e.seedIncident(t, "INC-trunc", "n1")
+	e.seedManyChanges(t, nChange)
+
+	res, err := e.orch.Analyze(context.Background(), "INC-trunc", "tester")
+	if err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	full := len(res.FindingsFull)
+	if full <= maxF {
+		t.Fatalf("fixture too small to truncate: full=%d max=%d", full, maxF)
+	}
+	if len(res.Report.Findings) != maxF {
+		t.Fatalf("report findings = %d, want %d (truncated view)", len(res.Report.Findings), maxF)
+	}
+	if res.Report.FindingsTruncated != full-maxF {
+		t.Fatalf("findings_truncated = %d, want %d", res.Report.FindingsTruncated, full-maxF)
+	}
+	// 根因（attribution high）来自全量口径，独立于被截的 findings 列表，必须仍在。
+	if len(res.Report.RootCauses) != nChange {
+		t.Fatalf("root causes = %d, want %d (survive truncation)", len(res.Report.RootCauses), nChange)
+	}
+	// 审计存截断版计数：findings=截断后条数，findings_truncated=被裁条数。
+	var last *AuditEntry
+	for i := range e.audit.entries {
+		if e.audit.entries[i].Action == AuditRCA {
+			last = &e.audit.entries[i]
+		}
+	}
+	if last == nil {
+		t.Fatal("audit must record rca entry")
+	}
+	if got := last.Detail["findings"]; got != maxF {
+		t.Fatalf("audit findings = %v, want %d", got, maxF)
+	}
+	if got := last.Detail["findings_truncated"]; got != full-maxF {
+		t.Fatalf("audit findings_truncated = %v, want %d", got, full-maxF)
+	}
+}
+
+// TestRCAOrchestratorFindingsDefaultNoTruncate 默认上限 200：小规模链路不
+// 触发截断（行为与转正前逐字节一致——findings_truncated=0、全量=截断版）。
+func TestRCAOrchestratorFindingsDefaultNoTruncate(t *testing.T) {
+	e := newRCAEnv(t, nil) // MaxFindings = 默认 200
+	if e.orch.spec.MaxFindings != config.DefaultRCAMaxFindings {
+		t.Fatalf("spec default MaxFindings = %d, want %d", e.orch.spec.MaxFindings, config.DefaultRCAMaxFindings)
+	}
+	e.seedIncident(t, "INC-small", "n1")
+	e.recordChange(t, topology.ChangeEvent{
+		ID: "dep-s", NodeKey: "prometheus://nodes/n1", Type: topology.ChangeDeploy,
+		Source: "jenkins", Author: "ci", OccurredAt: time.Now().Add(-2 * time.Minute),
+		Confidence: topology.ConfidenceHigh,
+	})
+	res, err := e.orch.Analyze(context.Background(), "INC-small", "")
+	if err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	if res.Report.FindingsTruncated != 0 {
+		t.Fatalf("small chain must not truncate: findings_truncated = %d", res.Report.FindingsTruncated)
+	}
+	if len(res.Report.Findings) != len(res.FindingsFull) {
+		t.Fatalf("untruncated report/full mismatch: %d vs %d", len(res.Report.Findings), len(res.FindingsFull))
+	}
+}

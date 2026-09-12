@@ -83,6 +83,11 @@ type RCAResult struct {
 	T0          time.Time
 	Window      time.Duration
 	Report      *rca.Report
+	// FindingsFull 未截断的全量 findings（二期池波二 #6）：Report.Findings
+	// 是按 OPS_RCA_MAX_FINDINGS 截断后的版本（审计/默认响应都用它），
+	// 本字段只服务 GET /rca?all=1 的一次性全量回显——同步报告本就在
+	// 内存里，游标分页是过度设计。未触发截断时与 Report.Findings 等值。
+	FindingsFull []rca.Finding
 }
 
 // Analyze 执行一次按需 RCA。actor 为触发者（查询方提供，审计用；
@@ -211,6 +216,18 @@ func (o *RCAOrchestrator) analyze(ctx context.Context, incidentID, actor string,
 			incidentID, strings.Join(missingClusters, ","))
 	}
 
+	// ③′ findings 上限截断（二期池波二 #6 / ADR-014 findings>200 处理）：
+	// 报告与审计只存**截断版**（置信度优先 + 同档时序，见 rca.TruncateFindings），
+	// 被截条数以 findings_truncated 入报告；全量留在 RCAResult 里供
+	// ?all=1 一次性回显。max<=0（防御：装配外手工构造）回退默认 200。
+	maxFindings := o.spec.MaxFindings
+	if maxFindings <= 0 {
+		maxFindings = config.DefaultRCAMaxFindings
+	}
+	findingsFull := rep.Findings
+	kept, dropped := rca.TruncateFindings(findingsFull, maxFindings)
+	rep.Findings, rep.FindingsTruncated = kept, dropped
+
 	// ④ 审计留痕（append-only；分析结论本身随响应返回，审计记"发生了什么"）。
 	if o.audit != nil {
 		done, pending, failed := 0, 0, 0
@@ -224,7 +241,9 @@ func (o *RCAOrchestrator) analyze(ctx context.Context, incidentID, actor string,
 				failed++
 			}
 		}
-		llmUsed := findingExists(rep, rca.StepConclude)
+		// llm_used 看全量：conclude finding 万一被截掉，"用过 LLM"这个
+		// 运维事实不能跟着一起丢。
+		llmUsed := findingExists(findingsFull, rca.StepConclude)
 		if actor == "" {
 			actor = "system:rca"
 		}
@@ -242,12 +261,15 @@ func (o *RCAOrchestrator) analyze(ctx context.Context, incidentID, actor string,
 				"steps_pending": pending,
 				"steps_failed":  failed,
 				"root_causes":   len(rep.RootCauses),
-				"llm_used":      llmUsed,
-				"duration_ms":   time.Since(start).Milliseconds(),
+				// findings 记截断版口径（与报告/默认响应一致，#6）。
+				"findings":           len(kept),
+				"findings_truncated": dropped,
+				"llm_used":           llmUsed,
+				"duration_ms":        time.Since(start).Milliseconds(),
 			}})
 	}
 	return &RCAResult{IncidentID: incidentID, ClusterKeys: inc.ClusterKeys,
-		T0: t0, Window: window, Report: rep}, nil
+		T0: t0, Window: window, Report: rep, FindingsFull: findingsFull}, nil
 }
 
 // runPipeline 在独立 goroutine 里跑六步（纯计算，但邻域遍历规模不可
@@ -277,8 +299,8 @@ func (o *RCAOrchestrator) runPipeline(ctx context.Context, in rca.Input) (*rca.R
 	}
 }
 
-func findingExists(rep *rca.Report, step string) bool {
-	for _, f := range rep.Findings {
+func findingExists(fs []rca.Finding, step string) bool {
+	for _, f := range fs {
 		if f.Step == step {
 			return true
 		}

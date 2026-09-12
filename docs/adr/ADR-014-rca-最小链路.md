@@ -78,17 +78,25 @@ gateway），`SetSummarizer` 注入即 conclude 转正——rca 包代码零改�
 - **证据不足 = 200 + 结构化报告**（非 503/404）："跑过但没结论"是可诊断
   的运维事实；findings 回显上限 200 条（truncated 旗标），原始证据不回显
   （体积不可控，计数进 `evidence`）。
+  **（已兑现并升级：二期池波二 #6——上限转正为 `OPS_RCA_MAX_FINDINGS`
+  （默认 200，数值零漂移）且从视图层上移到编排器：产报告时按"置信度优先 +
+  同档时序"截断（`rca.TruncateFindings`），被裁条数以 `findings_truncated`
+  入报告与审计；REST `?all=1`（Token 门禁内）一次性回显未截断全量。
+  findings>200 的"分页"诉求以此最小方案兑现，游标分页判定过度设计——
+  同步报告本就在内存里；llm-gateway prompt 证据行同守此上限。）**
 
 结果落审计：每次成功分析 append-only 追加 `action='rca'` 行（actor 取
 查询参数，默认 `system:rca`；detail 记 t0/窗口/证据计数/步状态/根因数/
-llm_used）。`incident_audit.action` 封闭 CHECK 由 **migration 000017**
-扩入 `'rca'`（对齐 000002 "扩枚举必同步扩 CHECK"纪律；down 回 7 值集）。
+llm_used；#6 起另记 `findings`（截断版条数）与 `findings_truncated`——
+审计存的是截断版口径）。`incident_audit.action` 封闭 CHECK 由 **migration
+000017** 扩入 `'rca'`（对齐 000002 "扩枚举必同步扩 CHECK"纪律；down 回 7 值集）。
 
 ### 6. 配置与观测
 
 - `OPS_RCA_*` 组 4 键（开关默认 on / 超时 10s / 证据窗 30m / 邻域深度 2），
   进 `internal/config` schema + `.env.example` + 配置清单（55 键 / 15 组）；
-  cmd 注入，rca 包不认 config。
+  cmd 注入，rca 包不认 config。**（二期扩至 6 键：#4 增 `OPS_RCA_AUTO`、
+  #6 增 `OPS_RCA_MAX_FINDINGS`，键数现状见配置清单。）**
 - 指标：`opscopilot_rca_requests_total{outcome=ok|error}` +
   `opscopilot_rca_duration_seconds`（取证+六步端到端）。
 
@@ -105,6 +113,14 @@ llm_used）。`incident_audit.action` 封闭 CHECK 由 **migration 000017**
   incident_audit 回读（action='rca' actor='auto'）双保险 + 有界队列满丢弃计
   `opscopilot_rca_autotrigger_dropped_total`，分析走独立 goroutine 绝不阻塞
   escalation。）**
+- **findings>200 分页与长任务化**：留桩（决策 5 的截断旗标之上，原设想
+  游标分页 + 异步 job）；
+  **（已兑现分页诉求：二期池波二 #6——`OPS_RCA_MAX_FINDINGS`（默认 200）
+  编排期按置信度+时序截断、`findings_truncated` 入报告/审计、REST `?all=1`
+  一次性全量回显；游标分页判定过度设计不引入（同步报告在内存里现成，分页
+  只服务一个本进程即算完的列表）。长任务化（异步 job + 完成通知）**仍不做**：
+  RCA 端到端预算 ≤ OPS_RCA_TIMEOUT（默认 10s，含取证），同步语义没有
+  "等待任务"场景——真需要后台批量归因时随 SSE `rca` 事件那条一起设计。）**
 - **SSE `rca` 事件**：现有 SSEMessage 契约绑定 incident 快照；RCA 是
   请求-响应型分析（结果当场返回，无"等待推送"场景），加事件反而诱导
   轮询式滥用——判定不做，二期若有"长任务完成通知"需求随任务化一起设计；

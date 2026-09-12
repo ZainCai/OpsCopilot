@@ -6,6 +6,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -194,5 +195,87 @@ func TestRESTRCAEmptyEvidenceStill200(t *testing.T) {
 	findings, _ := body["findings"].([]any)
 	if len(findings) == 0 {
 		t.Fatal("evidence report must still carry findings")
+	}
+}
+
+// seedRestChanges 在 n1 上追加 n 条 high 置信变更（每条产 3 行证据），
+// 用于把 findings 数撑过上限触发 #6 截断。
+func seedRestChanges(t *testing.T, asm *Assembly, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		if _, err := asm.Changes.Record(topology.ChangeEvent{
+			ID: fmt.Sprintf("dep-z%d", i), NodeKey: "prometheus://nodes/n1",
+			Type: topology.ChangeDeploy, Source: "jenkins", Author: "ci",
+			OccurredAt: time.Now().Add(-time.Duration(i+2) * time.Minute),
+			Confidence: topology.ConfidenceHigh,
+		}); err != nil {
+			t.Fatalf("record change %d: %v", i, err)
+		}
+	}
+}
+
+// TestRESTRCAFindingsTruncationAndAll #6 findings 超限处理（REST 面）：
+// 默认响应回显截断版（truncated=true + findings_truncated 计数），
+// ?all=1 一次性回显未截断全量（truncated=false 但计数仍在）。
+func TestRESTRCAFindingsTruncationAndAll(t *testing.T) {
+	const maxF = 6
+	cfg := testAssemblyConfig("tok")
+	cfg.RCA.MaxFindings = maxF
+	asm, h, id := rcaRESTEnv(t, cfg, true) // 自带 1 条 dep-r1
+	seedRestChanges(t, asm, 6)             // 每条 hypothesize+verify+attribution → 远超 maxF
+	path := "/api/v1/incidents/" + id + "/rca"
+
+	// 默认视图：截断版。
+	code, body := getRCARest(t, h, path, "tok")
+	if code != http.StatusOK {
+		t.Fatalf("default: code = %d body = %v", code, body)
+	}
+	findings, _ := body["findings"].([]any)
+	if len(findings) != maxF {
+		t.Fatalf("default findings = %d, want %d (truncated)", len(findings), maxF)
+	}
+	if body["truncated"] != true {
+		t.Fatalf("default truncated = %v, want true", body["truncated"])
+	}
+	dropped := int(body["findings_truncated"].(float64))
+	if dropped <= 0 {
+		t.Fatalf("default findings_truncated = %v, want > 0", body["findings_truncated"])
+	}
+
+	// ?all=1：未截断全量，truncated=false，但计数如实回显被裁了多少。
+	codeAll, bodyAll := getRCARest(t, h, path+"?all=1", "tok")
+	if codeAll != http.StatusOK {
+		t.Fatalf("all=1: code = %d body = %v", codeAll, bodyAll)
+	}
+	findingsAll, _ := bodyAll["findings"].([]any)
+	if want := maxF + dropped; len(findingsAll) != want {
+		t.Fatalf("all=1 findings = %d, want %d (= maxF + truncated)", len(findingsAll), want)
+	}
+	if bodyAll["truncated"] != false {
+		t.Fatalf("all=1 truncated = %v, want false", bodyAll["truncated"])
+	}
+	if int(bodyAll["findings_truncated"].(float64)) != dropped {
+		t.Fatalf("all=1 findings_truncated drifted: %v vs %v", bodyAll["findings_truncated"], dropped)
+	}
+
+	// 门禁同守：?all=1 也要 Token，缺则 401。
+	if c, _ := getRCARest(t, h, path+"?all=1", ""); c != http.StatusUnauthorized {
+		t.Fatalf("all=1 no-token: code = %d, want 401", c)
+	}
+}
+
+// TestRESTRCAFindingsDefaultNoTruncate 默认上限 200：常规规模链路不截断
+// （truncated=false、findings_truncated=0），行为与转正前逐字节一致。
+func TestRESTRCAFindingsDefaultNoTruncate(t *testing.T) {
+	cfg := testAssemblyConfig("tok")
+	// 不改 MaxFindings → 用默认 200。
+	_, h, id := rcaRESTEnv(t, cfg, true)
+	code, body := getRCARest(t, h, "/api/v1/incidents/"+id+"/rca", "tok")
+	if code != http.StatusOK {
+		t.Fatalf("code = %d body = %v", code, body)
+	}
+	if body["truncated"] != false || int(body["findings_truncated"].(float64)) != 0 {
+		t.Fatalf("default 200 cap must not truncate a small chain: truncated=%v count=%v",
+			body["truncated"], body["findings_truncated"])
 	}
 }

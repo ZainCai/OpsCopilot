@@ -406,7 +406,7 @@ func NewAssembly(logger connector.Logger, cfg *config.Config) (*Assembly, error)
 		if gw, gwErr := newLLMGateway(cfg.LLM); gwErr != nil {
 			logf("WARNING: llm gateway rejected by config, rca conclude stays pending: %v", gwErr)
 		} else if gw != nil {
-			asm.RCA.SetSummarizer(newLLMSummarizer(gw, appMetrics, logf))
+			asm.RCA.SetSummarizer(newLLMSummarizer(gw, appMetrics, logf, cfg.RCA.MaxFindings))
 			logf("rca conclude wired to llm gateway: endpoint=%s model=%s timeout=%s (api key masked)",
 				cfg.LLM.Endpoint, cfg.LLM.Model, cfg.LLM.Timeout)
 		}

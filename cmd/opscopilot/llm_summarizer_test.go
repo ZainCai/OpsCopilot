@@ -96,7 +96,7 @@ func newTestSummarizer(t *testing.T, endpoint string, timeout time.Duration) (*l
 		t.Fatalf("llmgw new: %v", err)
 	}
 	m := NewAppMetrics()
-	return newLLMSummarizer(gw, m, func(string, ...any) {}), m
+	return newLLMSummarizer(gw, m, func(string, ...any) {}, config.DefaultRCAMaxFindings), m
 }
 
 func sampleInput() rca.Input {
@@ -228,7 +228,7 @@ func TestLLMSummarizerNeverLeaks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := newLLMSummarizer(gw, NewAppMetrics(), func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) })
+	s := newLLMSummarizer(gw, NewAppMetrics(), func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }, config.DefaultRCAMaxFindings)
 	if _, err := s.Summarize(sampleInput(), sampleFindings()); !errors.Is(err, rca.ErrNotImplemented) {
 		t.Fatalf("want fail-open sentinel, got %v", err)
 	}
@@ -263,6 +263,48 @@ func TestLLMSummarizerTruncatesLongConclusion(t *testing.T) {
 	}
 }
 
+// TestLLMSummarizerPromptRespectsFindingsCap 二期池波二 #6：prompt 证据
+// 行同守 OPS_RCA_MAX_FINDINGS——超限按置信度优先截断（llmgw 输入不随大
+// 规模簇失控），并把 findings_truncated 如实告知模型（静默丢证据骗模型）。
+func TestLLMSummarizerPromptRespectsFindingsCap(t *testing.T) {
+	url, caps := mockGateway(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, completion(`{"conclusion":"上限内结论"}`))
+	})
+	gw, err := newLLMGateway(llmSectionTO(url, 2*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := newLLMSummarizer(gw, NewAppMetrics(), nil, 10)
+	var prev []rca.Finding
+	for i := 0; i < 15; i++ { // 15 条 low：同低档里再靠时序垫底
+		prev = append(prev, rca.Finding{Step: rca.StepVerify, Summary: fmt.Sprintf("low-%d", i),
+			Confidence: "low", Ref: fmt.Sprintf("lv%d", i)})
+	}
+	for i := 0; i < 10; i++ { // 10 条 high：置信度优先，必须全部存活
+		prev = append(prev, rca.Finding{Step: rca.StepAttribution, Summary: fmt.Sprintf("high-%d", i),
+			Confidence: "high", Ref: fmt.Sprintf("at%d", i)})
+	}
+	if _, err := s.Summarize(sampleInput(), prev); err != nil {
+		t.Fatalf("summarize: %v", err)
+	}
+	last := (*caps)[len(*caps)-1]
+	var doc llmEvidenceDoc
+	if err := json.Unmarshal([]byte(last.Messages[1].Content), &doc); err != nil {
+		t.Fatalf("prompt not JSON: %v", err)
+	}
+	if len(doc.Findings) != 10 || doc.FindingsTruncated != 15 {
+		t.Fatalf("prompt cap wrong: findings=%d truncated=%v, want 10/15", len(doc.Findings), doc.FindingsTruncated)
+	}
+	for _, f := range doc.Findings {
+		if f.Confidence != "high" {
+			t.Fatalf("confidence-first violated, low survived: %+v", doc.Findings)
+		}
+	}
+	if len(doc.RootCauses) != 10 { // high attribution 全保留 → root_causes 不缩水
+		t.Fatalf("root causes = %d, want 10", len(doc.RootCauses))
+	}
+}
+
 // TestRCAConcludeWiredThroughOrchestrator 端到端（内存形态）：注入接了假
 // 网关的真 Summarizer 后，conclude 步 done、finding 非空；REST 视图层面
 // conclusion 非 null 且 llm_used=true。
@@ -277,7 +319,7 @@ func TestRCAConcludeWiredThroughOrchestrator(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.orch.SetSummarizer(newLLMSummarizer(gw, NewAppMetrics(), nil))
+	e.orch.SetSummarizer(newLLMSummarizer(gw, NewAppMetrics(), nil, config.DefaultRCAMaxFindings))
 	res, err := e.orch.Analyze(context.Background(), "INC-gw", "")
 	if err != nil {
 		t.Fatalf("analyze: %v", err)
@@ -291,7 +333,7 @@ func TestRCAConcludeWiredThroughOrchestrator(t *testing.T) {
 	if !done {
 		t.Fatalf("conclude step not done: %+v", res.Report.Steps)
 	}
-	v := newRCAView(res, "mem")
+	v := newRCAView(res, "mem", false)
 	if v.Conclusion == nil || !strings.Contains(*v.Conclusion, "dep-wired") || !strings.Contains(*v.Conclusion, "仅一条变更证据") {
 		t.Fatalf("view conclusion = %v", v.Conclusion)
 	}
@@ -314,7 +356,7 @@ func TestRCAConcludeFailOpenThroughOrchestrator(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.orch.SetSummarizer(newLLMSummarizer(gw, NewAppMetrics(), nil))
+	e.orch.SetSummarizer(newLLMSummarizer(gw, NewAppMetrics(), nil, config.DefaultRCAMaxFindings))
 	res, err := e.orch.Analyze(context.Background(), "INC-deg", "")
 	if err != nil {
 		t.Fatalf("degraded analyze must not error: %v", err)
@@ -328,7 +370,7 @@ func TestRCAConcludeFailOpenThroughOrchestrator(t *testing.T) {
 	if !pending {
 		t.Fatalf("conclude step must be pending on gateway failure: %+v", res.Report.Steps)
 	}
-	v := newRCAView(res, "mem")
+	v := newRCAView(res, "mem", false)
 	if v.Conclusion != nil || v.LLMUsed {
 		t.Fatalf("fail-open view must keep conclusion=null/llm_used=false, got %v/%v", v.Conclusion, v.LLMUsed)
 	}
@@ -372,7 +414,7 @@ func TestRCAConcludeUnwiredStaysPending(t *testing.T) {
 	if err != nil {
 		t.Fatalf("analyze: %v", err)
 	}
-	v := newRCAView(res, "mem")
+	v := newRCAView(res, "mem", false)
 	if v.Conclusion != nil || v.LLMUsed {
 		t.Fatalf("unwired must keep conclusion=null/llm_used=false, got %v/%v", v.Conclusion, v.LLMUsed)
 	}

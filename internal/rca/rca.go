@@ -21,6 +21,7 @@ package rca
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -83,8 +84,13 @@ func NewPipeline(steps ...Step) *Pipeline { return &Pipeline{steps: steps} }
 type Report struct {
 	Input      Input
 	Steps      []StepResult
-	Findings   []Finding // 全部产出（按步骤序）
+	Findings   []Finding // 全部产出（按步骤序；编排层按上限截断后为截断版，见 TruncateFindings）
 	RootCauses []Finding // 根因标注：Confidence=high 的归因结论（#12 规则版归因，见 steps.go）
+	// FindingsTruncated 被 findings 上限（OPS_RCA_MAX_FINDINGS，二期池 #6）
+	// 裁掉的条数。0 = 未截断。流水线自身不截断（Run 产全量），截断是编排
+	// 层策略——本字段随报告走 REST/审计，让"少了几条 findings"成为可诊断
+	// 的运维事实而非静默丢失。
+	FindingsTruncated int
 }
 
 // StepResult 单步执行回执（原型 pipeline 节点：done/failed/pending + 耗时）。
@@ -136,6 +142,36 @@ func rootCauses(fs []Finding) []Finding {
 		}
 	}
 	return out
+}
+
+// TruncateFindings 按上限保留 findings（二期池 #6 / ADR-014 findings>200
+// 处理的最小方案——截断 + REST ?all=1 全量开关，替代游标分页：同步报告
+// 本就在内存里，分页是过度设计）。选择规则：
+//   - 置信度优先：high > medium > low（空/未知按 low，与 confRank 同口径）；
+//   - 同档按原时序（流水线步序即产出时序，稳定排序保原序在前者）；
+//   - 保留集按**原步骤序**重排输出——报告可读性/契约序不变，只是少了几条。
+//
+// max<=0 或 len(fs)<=max 时原样返回、截断数 0（"不限/未触限"零行为差异）。
+// 纯函数不改入参切片，返回的保留集是新切片（入参可继续持有全量）。
+func TruncateFindings(fs []Finding, max int) (kept []Finding, truncated int) {
+	if max <= 0 || len(fs) <= max {
+		return fs, 0
+	}
+	order := make([]int, len(fs))
+	for i := range fs {
+		order[i] = i
+	}
+	// 置信度降序优先；SliceStable 保证同档保持原时序。
+	sort.SliceStable(order, func(i, j int) bool {
+		return confRank(fs[order[i]].Confidence) > confRank(fs[order[j]].Confidence)
+	})
+	keep := order[:max]
+	sort.Ints(keep) // 还原步骤序呈现
+	kept = make([]Finding, 0, max)
+	for _, i := range keep {
+		kept = append(kept, fs[i])
+	}
+	return kept, len(fs) - max
 }
 
 // ErrNotImplemented 占位步骤统一哨兵（#12 起仅 conclude 步在 llm-gateway

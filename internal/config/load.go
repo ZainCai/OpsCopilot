@@ -78,6 +78,9 @@ const (
 	EnvRCASTimeout = "OPS_RCA_TIMEOUT"
 	EnvRCAWindow   = "OPS_RCA_WINDOW"
 	EnvRCADepth    = "OPS_RCA_DEPTH"
+	// EnvRCAMaxFindings 二期池波二 #6：报告 findings 截断上限（默认 200，
+	// 超限按置信度+时序截断并计 findings_truncated；REST ?all=1 取全量）。
+	EnvRCAMaxFindings = "OPS_RCA_MAX_FINDINGS"
 
 	// llm-gateway（二期池二 #3 / ADR-015）。APIKey 是 Secret：raw 承接、
 	// 绝不进任何日志/审计/指标标签。
@@ -182,6 +185,7 @@ func LoadFrom(lookup LookupFunc) (*Config, error) {
 	c.RCA.Timeout = p.posDur(EnvRCASTimeout, DefaultRCATimeout)
 	c.RCA.Window = p.posDur(EnvRCAWindow, DefaultRCAWindow)
 	c.RCA.Depth = p.posInt(EnvRCADepth, DefaultRCADepth)
+	c.RCA.MaxFindings = p.posInt(EnvRCAMaxFindings, DefaultRCAMaxFindings)
 
 	// llm-gateway：Endpoint 空 = 禁用（conclude 维持 pending 现状）。
 	// 结构性约束（Model 必填 / 超时预算 / URL 形态）在 Validate 汇入。

@@ -228,6 +228,11 @@ type RCASection struct {
 	Timeout time.Duration // OPS_RCA_TIMEOUT 单次分析超时（含取证），默认 10s
 	Window  time.Duration // OPS_RCA_WINDOW 证据窗（T0 前多久内的变更算嫌疑），默认 30m
 	Depth   int           // OPS_RCA_DEPTH 故障域邻域取证跳数，默认 2（1..10，与 GetTopology 上限同源）
+	// MaxFindings 报告 findings 截断上限（OPS_RCA_MAX_FINDINGS，默认 200，
+	// 二期池波二 #6）：编排器产报告时按"置信度优先 + 同档时序"截断，被截
+	// 条数记入报告 findings_truncated 与审计；REST ?all=1 返回未截断全量；
+	// llm_summarizer 的 prompt 证据行数同守此上限（llmgw 输入不超限）。
+	MaxFindings int
 }
 
 // LLMSection llm-gateway（二期池波二 #3 / ADR-015）：通用 OpenAI-compatible
@@ -457,6 +462,12 @@ const (
 	// 显式 OPS_RCA_AUTO=on 才开启。
 	DefaultRCAAuto = false
 
+	// DefaultRCAMaxFindings findings 截断上限（二期池波二 #6）——ADR-014
+	// "findings 回显上限 200 条"的可配置化：数值与转正前 rest_rca.go 的
+	// 硬编码 rcaFindingsLimit=200 逐字节一致，默认行为零漂移。200 条覆盖
+	// 绝大多数真实故障域的证据链规模；超限按置信度+时序截断，?all=1 取全量。
+	DefaultRCAMaxFindings = 200
+
 	// llm-gateway 默认值（二期池波二 #3 / ADR-015）。**Endpoint/Model 无默认**
 	// ——默认禁用（Endpoint 空 = conclude 维持 pending 现状，行为与 ADR-014
 	// 逐字节一致）且不做厂商中立性倒退的模型名预设。超时 8s 是预算纪律
@@ -535,6 +546,7 @@ func Defaults() *Config {
 	c.RCA.Timeout = DefaultRCATimeout
 	c.RCA.Window = DefaultRCAWindow
 	c.RCA.Depth = DefaultRCADepth
+	c.RCA.MaxFindings = DefaultRCAMaxFindings
 	c.LLM.Timeout = DefaultLLMTimeout
 	c.LLM.MaxTokens = DefaultLLMMaxTokens
 	c.MemLimit.WarnRatio = DefaultMemWarnRatio

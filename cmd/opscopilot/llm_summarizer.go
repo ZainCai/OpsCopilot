@@ -56,16 +56,22 @@ type llmSummarizer struct {
 	gw   *llmgw.Client
 	m    *AppMetrics
 	logf func(string, ...any)
+	// maxFindings prompt 证据行上限（二期池波二 #6，装配注入
+	// OPS_RCA_MAX_FINDINGS）：与报告截断同一策略/同一排序（置信度+时序），
+	// 保证 llmgw 的 prompt 输入行数不随大规模簇失控（1MiB 预算纪律的
+	// 输入侧防线）。<=0 在 Summarize 内回退默认 200（与编排器同款防御）。
+	maxFindings int
 }
 
 // newLLMSummarizer 构造（gw 必非 nil；禁用路径由装配层判 config.LLM.Endpoint
 // 决定根本不构造本类型——OPS_LLM_ENDPOINT 未配置时 conclude 维持注入 nil
-// 的现状，行为与 ADR-014 逐字节一致）。
-func newLLMSummarizer(gw *llmgw.Client, m *AppMetrics, logf func(string, ...any)) *llmSummarizer {
+// 的现状，行为与 ADR-014 逐字节一致）。maxFindings 传 config.RCA.MaxFindings
+// （#6：prompt 组装与报告截断共用同一上限）。
+func newLLMSummarizer(gw *llmgw.Client, m *AppMetrics, logf func(string, ...any), maxFindings int) *llmSummarizer {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	return &llmSummarizer{gw: gw, m: m, logf: logf}
+	return &llmSummarizer{gw: gw, m: m, logf: logf, maxFindings: maxFindings}
 }
 
 // newLLMGateway config.LLMSection → llmgw 协议客户端（纯值搬运 + Sender
@@ -101,6 +107,9 @@ type llmEvidenceDoc struct {
 	EvidenceCounts map[string]int `json:"evidence_counts"`
 	Findings       []llmFinding   `json:"findings"`
 	RootCauses     []llmFinding   `json:"root_causes"`
+	// FindingsTruncated 被 OPS_RCA_MAX_FINDINGS 裁掉的证据行数（#6）：
+	// 如实告知模型"证据被截断过"，结论该当谨慎——静默丢证据既骗模型也骗人。
+	FindingsTruncated int `json:"findings_truncated,omitempty"`
 }
 
 // llmConclusion 模型应答的期望结构（ADR-015 输出契约）。
@@ -115,7 +124,14 @@ type llmConclusion struct {
 // wrap(rca.ErrNotImplemented)——conclude 步记 pending、报告退回证据链形态。
 func (s *llmSummarizer) Summarize(in rca.Input, prev []rca.Finding) (string, error) {
 	start := time.Now()
-	doc := buildEvidenceDoc(in, prev)
+	// #6 prompt 输入上限：与报告截断同一策略（rca.TruncateFindings，
+	// 置信度+时序），同一防御回退（<=0 → 默认 200）——大规模簇不得把
+	// llmgw 的 prompt 撑爆（响应侧 1MiB 上限救不了输入侧）。
+	maxFindings := s.maxFindings
+	if maxFindings <= 0 {
+		maxFindings = config.DefaultRCAMaxFindings
+	}
+	doc := buildEvidenceDoc(in, prev, maxFindings)
 	payload, err := json.Marshal(doc)
 	if err != nil { // 纯字符串 DTO 不可序列化 = 编程错误，同样 fail-open
 		s.observe("error", start)
@@ -170,8 +186,10 @@ func outcomeOf(err error) string {
 
 // buildEvidenceDoc 证据信封装配（root_causes 与 rca.rootCauses 同口径：
 // attribution 步 + high——复制三行过滤而非导出内部函数，避免为此改动
-// internal/rca 契约）。
-func buildEvidenceDoc(in rca.Input, prev []rca.Finding) llmEvidenceDoc {
+// internal/rca 契约）。maxFindings<=0 视同不限（调用方 Summarize 已回退
+// 默认值，这里只保纯函数语义）。
+func buildEvidenceDoc(in rca.Input, prev []rca.Finding, maxFindings int) llmEvidenceDoc {
+	kept, dropped := rca.TruncateFindings(prev, maxFindings)
 	doc := llmEvidenceDoc{
 		T0:           in.T0.UTC().Format(time.RFC3339Nano),
 		Window:       in.Window.String(),
@@ -181,8 +199,9 @@ func buildEvidenceDoc(in rca.Input, prev []rca.Finding) llmEvidenceDoc {
 			"edges":   len(in.Evidence.Edges),
 			"changes": len(in.Evidence.Changes),
 		},
+		FindingsTruncated: dropped,
 	}
-	for _, f := range prev {
+	for _, f := range kept {
 		v := llmFinding{Step: f.Step, Summary: f.Summary, Confidence: f.Confidence, Ref: f.Ref}
 		doc.Findings = append(doc.Findings, v)
 		if f.Step == rca.StepAttribution && f.Confidence == string(rca.ConfidenceHigh) {

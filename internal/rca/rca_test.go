@@ -81,3 +81,66 @@ func TestRootCausePicking(t *testing.T) {
 		t.Fatalf("root causes = %+v, want only high-confidence n1", rep.RootCauses)
 	}
 }
+
+// TestTruncateFindings 二期池波二 #6 截断策略单测：置信度优先保留、同档
+// 保时序（原步序）、保留集按步骤序回排、未触限/非正上限零行为差异。
+func TestTruncateFindings(t *testing.T) {
+	f := func(step, conf, ref string) Finding {
+		return Finding{Step: step, Summary: step + ":" + ref, Confidence: conf, Ref: ref}
+	}
+	cases := []struct {
+		name     string
+		in       []Finding
+		max      int
+		wantKeep []string // 期望保留集（按输出序 = 原步骤序的 Ref）
+		wantDrop int
+	}{
+		{
+			name: "未超上限原样返回",
+			in:   []Finding{f("collect", "high", "a"), f("verify", "low", "b")},
+			max:  5, wantKeep: []string{"a", "b"}, wantDrop: 0,
+		},
+		{
+			name: "上限非正视同不限",
+			in:   []Finding{f("collect", "high", "a"), f("verify", "low", "b")},
+			max:  0, wantKeep: []string{"a", "b"}, wantDrop: 0,
+		},
+		{
+			name: "置信度优先：low 先出局，保留集仍按步骤序",
+			in: []Finding{
+				f("collect", "low", "c1"), f("hypothesize", "high", "h1"),
+				f("verify", "low", "v1"), f("attribution", "medium", "m1"),
+			},
+			max: 2, wantKeep: []string{"h1", "m1"}, wantDrop: 2,
+		},
+		{
+			name: "同档保时序：先产出者优先（步骤序）",
+			in: []Finding{
+				f("hypothesize", "high", "first"), f("hypothesize", "high", "second"),
+				f("hypothesize", "high", "third"),
+			},
+			max: 2, wantKeep: []string{"first", "second"}, wantDrop: 1,
+		},
+		{
+			name: "空/未知置信按 low 保守出局",
+			in: []Finding{
+				f("collect", "", "blank"), f("verify", "unknown", "weird"),
+				f("attribution", "medium", "keepme"),
+			},
+			max: 1, wantKeep: []string{"keepme"}, wantDrop: 2,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			kept, dropped := TruncateFindings(tc.in, tc.max)
+			if dropped != tc.wantDrop || len(kept) != len(tc.wantKeep) {
+				t.Fatalf("kept=%d dropped=%d, want kept=%d dropped=%d", len(kept), dropped, len(tc.wantKeep), tc.wantDrop)
+			}
+			for i := range kept {
+				if kept[i].Ref != tc.wantKeep[i] {
+					t.Fatalf("kept[%s] order wrong, want %v got %+v", t.Name(), tc.wantKeep, kept)
+				}
+			}
+		})
+	}
+}

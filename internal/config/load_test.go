@@ -34,6 +34,41 @@ func TestLoadFromDefaultsRCA(t *testing.T) {
 		c.RCA.Window != DefaultRCAWindow || c.RCA.Depth != DefaultRCADepth {
 		t.Fatalf("rca defaults = %+v, want on/%s/%s/%d", c.RCA, DefaultRCATimeout, DefaultRCAWindow, DefaultRCADepth)
 	}
+	if c.RCA.MaxFindings != DefaultRCAMaxFindings {
+		t.Fatalf("OPS_RCA_MAX_FINDINGS default = %d, want %d", c.RCA.MaxFindings, DefaultRCAMaxFindings)
+	}
+}
+
+// TestRCAMaxFindingsKey OPS_RCA_MAX_FINDINGS（二期池波二 #6）表驱动：
+// 缺失 = 200（与转正前 rest_rca.go 硬编码上限一致，默认行为零漂移）、
+// 合法覆盖生效、非正整数汇入统一聚合报错（fail-fast）。
+func TestRCAMaxFindingsKey(t *testing.T) {
+	t.Run("override", func(t *testing.T) {
+		env := redisEnv("127.0.0.1:6380", "127.0.0.1:6381")
+		env[EnvRCAMaxFindings] = "50"
+		c, err := LoadFrom(envMap(env))
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if c.RCA.MaxFindings != 50 {
+			t.Fatalf("override not applied: %+v", c.RCA)
+		}
+	})
+	t.Run("invalid-aggregate", func(t *testing.T) {
+		env := redisEnv("127.0.0.1:6380", "127.0.0.1:6381")
+		env[EnvRCAMaxFindings] = "0" // 非正 → 拒绝（0 不承诺"不限"语义，防手滑关掉上限）
+		env[EnvRCAWindow] = "abc"    // 陪衬项：确认汇入同一聚合报错
+		_, err := LoadFrom(envMap(env))
+		var agg *Error
+		if !errors.As(err, &agg) || len(agg.Errs) != 2 {
+			t.Fatalf("want 2 aggregated errors, got %v", err)
+		}
+		for _, key := range []string{EnvRCAMaxFindings, EnvRCAWindow} {
+			if !strings.Contains(err.Error(), key) {
+				t.Errorf("aggregate must mention %s: %v", key, err)
+			}
+		}
+	})
 }
 
 func TestLoadFromDefaultsRCAAuto(t *testing.T) {
@@ -126,14 +161,15 @@ func TestLoadFromAggregatesAllErrors(t *testing.T) {
 	env[EnvRCASTimeout] = "-1s"        // #12：非正 duration 拒绝
 	env[EnvRCAWindow] = "soon"         // #12：非法 duration 拒绝
 	env[EnvRCADepth] = "0"             // #12：跳数须为正整数
+	env[EnvRCAMaxFindings] = "-7"      // #6 二期：findings 上限须为正整数
 
 	_, err := LoadFrom(envMap(env))
 	var agg *Error
 	if !errors.As(err, &agg) {
 		t.Fatalf("want *Error, got %T: %v", err, err)
 	}
-	if len(agg.Errs) != 17 {
-		t.Fatalf("want 17 aggregated errors, got %d: %v", len(agg.Errs), err)
+	if len(agg.Errs) != 18 {
+		t.Fatalf("want 18 aggregated errors, got %d: %v", len(agg.Errs), err)
 	}
 	for _, key := range []string{
 		EnvDBMaxConns, EnvPullInterval, EnvEscalationAfter, EnvNoiseWindow,
@@ -141,6 +177,7 @@ func TestLoadFromAggregatesAllErrors(t *testing.T) {
 		EnvChangePruneInterval, EnvCORSOrigin, EnvIngestBatch,
 		EnvLeaderElection, EnvLeaderRetryInterval,
 		EnvRCAEnabled, EnvRCAAuto, EnvRCASTimeout, EnvRCAWindow, EnvRCADepth,
+		EnvRCAMaxFindings,
 	} {
 		if !strings.Contains(err.Error(), key) {
 			t.Errorf("aggregated error must mention %s, got:\n%v", key, err)
@@ -214,6 +251,7 @@ func TestLoadFromValidOverrides(t *testing.T) {
 	env[EnvRCASTimeout] = "30s"
 	env[EnvRCAWindow] = "1h"
 	env[EnvRCADepth] = "3"
+	env[EnvRCAMaxFindings] = "500"
 
 	c, err := LoadFrom(envMap(env))
 	if err != nil {

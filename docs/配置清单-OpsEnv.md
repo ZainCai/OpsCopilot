@@ -16,7 +16,7 @@
 >   （v1.2 C2 / G1"缺一拒绝启动"）不因收敛放松；两地址归一化后相同
 >   （`localhost` ≡ `127.0.0.1`、大小写/空白不敏感）同样拒绝启动。
 
-统计：**61 个运行时 env 键**（`OPS_*` 59 + `REDIS_*` 2），16 组。
+统计：**62 个运行时 env 键**（`OPS_*` 60 + `REDIS_*` 2），16 组。
 （优化方案 #8 判决异步落库队列 `OPS_NOISE_SINK_*` 4 键，**队满丢弃取向**：
 慢 DB/极端洪峰下丢持久化保采集节拍，宁漏库存不丢通知——**PG 判决流可缺
 条目，Redis/PG 镜像与内存态非强一致**，丢弃面看
@@ -39,6 +39,12 @@ OpenAI-compatible，不绑厂商）**默认禁用**（Endpoint 空 = conclude �
 pending）；密钥 Secret 绝不入库/入日志；超时预算 LLM ≤ RCA − 2s 硬预留；
 LLM 协议出口唯一 internal/llmgw、物理发送唯一 internal/transport——
 notify 渠道投递同步迁至 transport 路径，业务模块禁持 http.Client。）
+（二期池波二 #6 新增 `OPS_RCA_MAX_FINDINGS`（RCA 组第 6 键，默认 200）：
+报告 findings 超限按"置信度优先 + 同档时序"截断，被裁条数以
+`findings_truncated` 记入报告与审计；REST 默认回显截断版、`?all=1`（Token
+门禁内）取全量——以一次性全量开关替代游标分页（同步报告在内存里现成），
+**长任务化（异步 job）仍不做**（ADR-014 留桩兑现说明）。conclude 步送
+llm-gateway 的 prompt 证据行同守此上限（llmgw 输入侧预算防线）。）
 另有 1 个测试门控键与 2 个独立 CLI 工具的键，见文末附录 B/C。
 
 ## 清单表
@@ -101,11 +107,12 @@ notify 渠道投递同步迁至 transport 路径，业务模块禁持 http.Clien
 | 54 | `OPS_RCA_TIMEOUT` | RCA 按需分析 | 正 duration | `10s` | **启动失败** | 单次分析端到端预算（取证 + 六步；`context.WithTimeout` 阶段边界检查，超时 REST 504） |
 | 55 | `OPS_RCA_WINDOW` | RCA 按需分析 | 正 duration | `30m` | **启动失败** | 证据窗 [T0−window, T0]（"告警前 30 分钟"取证口径，进 `rca.Input.Window` 与 GetRecentChanges 窗口参数） |
 | 56 | `OPS_RCA_DEPTH` | RCA 按需分析 | 正整数（≤10 截断） | `2` | 非正整数 → **启动失败** | 故障域邻域取证跳数（`neighborhoodFacts` BFS 裁剪；上限与 `maxTopologyDepth` 同源，越界钳制不报错——取证参数非契约输入） |
-| 57 | `OPS_LLM_ENDPOINT` | LLM 网关 | http(s) 绝对 URL（可空） | **空 = 禁用**（**二期池波二 #3/ADR-015 新增**：默认不接线，conclude 维持 pending、`conclusion=null`，与 ADR-014 逐字节一致） | 非 http(s)/含 userinfo → **启动失败** | `assembly.go` → `newLLMGateway`（非空才构造 `llmgw.Client` 并 `SetSummarizer` 注入 `RCAOrchestrator`；物理发送经 `transport.NewHTTPClient`） |
-| 58 | `OPS_LLM_API_KEY` | LLM 网关 | **Secret** | 空 = 不发 Authorization（本地无鉴权网关） | 无非法值概念；**绝不入库、绝不进日志/指标/审计**（`.env` 已在 `.gitignore`）；仅容忍行尾空白（`TrimRight`），其余原样 | `llmgw.Client` 构造参数（Bearer 头；错误值/日志均不携带） |
-| 59 | `OPS_LLM_MODEL` | LLM 网关 | 字符串 | 无默认（**不给厂商预设模型名**） | Endpoint 非空而本键缺失 → **启动失败**（`config.Validate`） | `llmgw` 请求体 `model` 字段 |
-| 60 | `OPS_LLM_TIMEOUT` | LLM 网关 | 正 duration | `8s` | 非正 duration → 启动失败；**超时预算**：`LLM + 2s ≤ OPS_RCA_TIMEOUT` 不满足 → 启动失败（2s 硬预留给取证 IO + 前四步规则计算，默认 8s+2s=10s 恰好压线） | `transport.NewHTTPClient(timeout)`（llmgw 不持 http.Client，发送器构造期锁定；超时 REST 侧不 5xx——conclude fail-open 回 pending） |
-| 61 | `OPS_LLM_MAX_TOKENS` | LLM 网关 | 正整数 | `1024` | 非正整数 → **启动失败** | `llmgw` 请求体 `max_tokens` 字段（结论千字级顶天；响应侧另有 1MiB 业务上限） |
+| 57 | `OPS_RCA_MAX_FINDINGS` | RCA 按需分析 | 正整数 | `200`（**二期池波二 #6 新增**：转正前 `rest_rca.go` 硬编码回显上限 200 的可配置化，默认行为零漂移） | 非正整数 → **启动失败**（0 不承诺"不限"语义，防手滑关掉上限） | `config.RCA.MaxFindings` → `RCAOrchestrator`（产报告时按"置信度优先 + 同档时序"截断（`rca.TruncateFindings`），被裁条数以 `findings_truncated` 入报告与审计；REST 默认回显截断版 `truncated=true`，`?all=1` 在 Token 门禁内一次性取未截断全量——替代游标分页；`llm_summarizer` 的 prompt 证据行同守此上限，llmgw 输入侧预算防线） |
+| 58 | `OPS_LLM_ENDPOINT` | LLM 网关 | http(s) 绝对 URL（可空） | **空 = 禁用**（**二期池波二 #3/ADR-015 新增**：默认不接线，conclude 维持 pending、`conclusion=null`，与 ADR-014 逐字节一致） | 非 http(s)/含 userinfo → **启动失败** | `assembly.go` → `newLLMGateway`（非空才构造 `llmgw.Client` 并 `SetSummarizer` 注入 `RCAOrchestrator`；物理发送经 `transport.NewHTTPClient`） |
+| 59 | `OPS_LLM_API_KEY` | LLM 网关 | **Secret** | 空 = 不发 Authorization（本地无鉴权网关） | 无非法值概念；**绝不入库、绝不进日志/指标/审计**（`.env` 已在 `.gitignore`）；仅容忍行尾空白（`TrimRight`），其余原样 | `llmgw.Client` 构造参数（Bearer 头；错误值/日志均不携带） |
+| 60 | `OPS_LLM_MODEL` | LLM 网关 | 字符串 | 无默认（**不给厂商预设模型名**） | Endpoint 非空而本键缺失 → **启动失败**（`config.Validate`） | `llmgw` 请求体 `model` 字段 |
+| 61 | `OPS_LLM_TIMEOUT` | LLM 网关 | 正 duration | `8s` | 非正 duration → 启动失败；**超时预算**：`LLM + 2s ≤ OPS_RCA_TIMEOUT` 不满足 → 启动失败（2s 硬预留给取证 IO + 前四步规则计算，默认 8s+2s=10s 恰好压线） | `transport.NewHTTPClient(timeout)`（llmgw 不持 http.Client，发送器构造期锁定；超时 REST 侧不 5xx——conclude fail-open 回 pending） |
+| 62 | `OPS_LLM_MAX_TOKENS` | LLM 网关 | 正整数 | `1024` | 非正整数 → **启动失败** | `llmgw` 请求体 `max_tokens` 字段（结论千字级顶天；响应侧另有 1MiB 业务上限） |
 
 > #6 指标（非 env，登记于此便于对照）：每个有界结构两项——
 > `opscopilot_mem_entries{store="builder|builder_edges|incidents|escalation_ledger|noise_dedup|noise_clusters|noise_sigcache|audit"}`（gauge）
