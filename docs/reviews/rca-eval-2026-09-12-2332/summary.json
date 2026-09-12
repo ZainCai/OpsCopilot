@@ -1,0 +1,57 @@
+{
+  "run_id": "20260912-233220",
+  "tenant": "rca-eval-20260912-233220",
+  "mode": "evidence(--no-llm)",
+  "generated_at": "2026-09-12T15:37:31.6135859Z",
+  "threshold": 0.85,
+  "units_total": 4,
+  "units_completed": 4,
+  "top1_hits": 4,
+  "top3_hits": 4,
+  "evidence_complete": 4,
+  "silence_guards_total": 3,
+  "silence_guards_pass": 3,
+  "top1_rate": 1,
+  "top3_rate": 1,
+  "evidence_complete_rate": 1,
+  "detect_lag_ms": {
+    "n": 4,
+    "min": 9474,
+    "p50": 9478,
+    "p95": 9498,
+    "max": 9498
+  },
+  "rca_http_ms": {
+    "n": 4,
+    "min": 5,
+    "p50": 5,
+    "p95": 9,
+    "max": 9
+  },
+  "audit_duration_ms": {
+    "n": 4,
+    "min": 2,
+    "p50": 2,
+    "p95": 3,
+    "max": 3
+  },
+  "findings": null,
+  "gate_passed": true,
+  "promotion": {
+    "applicable": false,
+    "threshold": 0.85,
+    "g1_total": 0,
+    "g1_hits": 0,
+    "g1_rate": 0,
+    "g1_pass": false,
+    "g2_total": 0,
+    "g2_pass": 0,
+    "g2_pass_all": false,
+    "g3_total": 0,
+    "g3_pass": 0,
+    "g3_suspect": 0,
+    "g3_fail": 0,
+    "g3_pass_all": false,
+    "pass": false
+  }
+}
