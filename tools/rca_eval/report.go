@@ -151,9 +151,9 @@ func renderReport(s summary, units []unit, g *goldenDoc, ab *answerbook, noLLM b
 	b.WriteString("- 簇→事件无生产自动关联路径（`audit.go:37` 注释自证），评测器按 `AttachCluster` SQL 语义直写\n")
 	b.WriteString("  `incident_cluster` 桥接——转正前该链路必须有产品化挂点（如影子判决 new-incident 时联动建单挂簇）。\n")
 	b.WriteString("- 一簇一事件（`idx_incident_cluster_unique`）：多指纹共簇时其余事件无域，RCA 只能逐簇一单。\n")
-	b.WriteString("- 变更证据链不按租户隔离：`PGChangeStore` 读取侧无 tenant 过滤（`change_pg.go:157` 注释自认\n")
-	b.WriteString("  M1 单租户假设）——同节点重复评测/多租户共存时，他租户（他 run）的变更会进本租户事件的\n")
-	b.WriteString("  root_causes（本轮 `findings` 里的跨 run 泄漏即实锤；排名靠“置信→贴 T0”暂未被翻盘，但属正确性隐患）。\n\n")
+	b.WriteString("- 变更证据链已按装配租户隔离：`PGChangeStore.LoadSince` 回放恒带 `tenant_id` 过滤\n")
+	b.WriteString("  （评测 0129078 的跨 run 泄漏实锤后收口，#4 遗留的\"M3 补\"提前兑现）——`foreign_refs`\n")
+	b.WriteString("  探测保留为回归防线：本轮 findings 再出现跨 run 泄漏即过滤失守/回滚，转正前必须查。\n\n")
 
 	b.WriteString("## 6. ≥85% 转正门禁（W12）\n\n")
 	fmt.Fprintf(&b, "- 门禁语义：**LLM 对外转正**要求带 LLM 结论的评测集准确率 ≥%0.f%%（二期池文档 / ADR-015）。\n", s.Threshold*100)

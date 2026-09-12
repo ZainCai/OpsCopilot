@@ -4,7 +4,7 @@
     "1) 场景告警/期望簇/expected_new_incidents 的唯一权威是 tools/faultinjector/main.go playbook()(L54-87) 与 alerts()(L169-203)；本文件逐条抄录并标行号。",
     "2) 修改注入器剧本后，先跑 tools/rca_eval 的启动期 drift 校验（对照 injector /answerbook 的段序/场景码/expected_new_incidents），不一致评测直接退出（退出码 2），防答案漂移。",
     "3) changes[] 是评测侧注入的变更证据（faultinjector 不产变更）：root=场景标注根因，distractor_*=干扰项；role 语义见 tools/rca_eval/main.go 注释。",
-    "4) 变更逻辑 ID 会在运行时拼上租户后缀（chg-<run>-<logical_id>）：独立租户隔离事件/判决/审计，但【不隔离变更证据】（PGChangeStore 读取无 tenant 过滤，change_pg.go:157 M1 单租户假设）——同节点历史 run 的变更会残留进 root_causes，评测器将其记为 foreign_refs 暴露（§5），不判 FAIL。"
+    "4) 变更逻辑 ID 会在运行时拼上租户后缀（chg-<run>-<logical_id>）：独立租户隔离事件/判决/审计，变更证据同样隔离（PGChangeStore.LoadSince 回放恒带 tenant_id 过滤——评测 0129078 实锤后收口）——历史 run 的变更不再残留进 root_causes；若 §5 再出现 foreign_refs 即租户过滤回归，转正前必须查清。"
   ],
   "source": {
     "playbook": "tools/faultinjector/main.go playbook() L54-87",

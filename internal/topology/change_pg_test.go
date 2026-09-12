@@ -140,6 +140,67 @@ func TestPGChangeStoreReplayWindow(t *testing.T) {
 	}
 }
 
+// TestPGChangeStoreReplayTenantIsolation 回放恒按装配租户过滤（跨租户/跨 run
+// 证据泄漏收口，评测 0129078 实锤）：双租户各播一条同节点变更，A 租户视角
+// 重启只回放 A 的行、B 的行不得进读缓存；B 视角对称。全量回放（零值 since）
+// 同样限本租户。
+func TestPGChangeStoreReplayTenantIsolation(t *testing.T) {
+	pool := pgChangePoolForTest(t)
+	prefix := fmt.Sprintf("chgpg-iso-%d-", time.Now().Unix())
+	tenantA, tenantB := prefix+"tenant-a", prefix+"tenant-b"
+	cleanupChangeEvents(t, pool, prefix)
+	t.Cleanup(func() {
+		cleanupChangeEvents(t, pool, prefix)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for _, id := range []string{tenantA, tenantB} {
+			if _, err := pool.Exec(ctx, `DELETE FROM tenant WHERE id = $1`, id); err != nil {
+				t.Fatalf("cleanup tenant %s: %v", id, err)
+			}
+		}
+	})
+
+	at := time.Now().Truncate(time.Millisecond)
+	evA := ChangeEvent{ID: prefix + "a", NodeKey: "host:iso", Type: ChangeDeploy, OccurredAt: at}
+	evB := ChangeEvent{ID: prefix + "b", NodeKey: "host:iso", Type: ChangeConfig, OccurredAt: at}
+	for _, rec := range []struct {
+		tenant string
+		ev     ChangeEvent
+	}{{tenantA, evA}, {tenantB, evB}} {
+		s := NewPGChangeStore(NewChangeStore(nil), pool, rec.tenant, t.Logf)
+		if _, err := s.Record(rec.ev); err != nil {
+			t.Fatalf("record %s under tenant %s: %v", rec.ev.ID, rec.tenant, err)
+		}
+	}
+
+	// A 视角"重启"：全量回放也只该带回 A 自己的证据。
+	replayA := NewPGChangeStore(NewChangeStore(nil), pool, tenantA, t.Logf)
+	n, err := replayA.LoadSince(time.Time{})
+	if err != nil {
+		t.Fatalf("tenant-A replay: %v", err)
+	}
+	if n < 1 {
+		t.Fatalf("tenant-A replay loaded %d events, want >=1", n)
+	}
+	if _, ok := replayA.Get(evA.ID); !ok {
+		t.Error("own-tenant event missing after replay")
+	}
+	if _, ok := replayA.Get(evB.ID); ok {
+		t.Error("foreign-tenant event leaked into tenant-A replay (cross-run evidence leak)")
+	}
+
+	replayB := NewPGChangeStore(NewChangeStore(nil), pool, tenantB, t.Logf)
+	if _, err := replayB.LoadSince(time.Time{}); err != nil {
+		t.Fatalf("tenant-B replay: %v", err)
+	}
+	if _, ok := replayB.Get(evA.ID); ok {
+		t.Error("tenant-A event leaked into tenant-B replay")
+	}
+	if _, ok := replayB.Get(evB.ID); !ok {
+		t.Error("tenant-B own event missing after replay")
+	}
+}
+
 // TestPGChangeStoreDuplicateAndNodeCheck 判重/校验仍由内存层把守：
 // 重复 ID → ErrDuplicateChange；nodeCheck 拒绝的节点不落库。
 func TestPGChangeStoreDuplicateAndNodeCheck(t *testing.T) {

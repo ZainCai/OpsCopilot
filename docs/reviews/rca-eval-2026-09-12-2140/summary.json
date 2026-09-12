@@ -1,0 +1,40 @@
+{
+  "run_id": "20260912-214048",
+  "tenant": "rca-eval-20260912-214048",
+  "mode": "evidence(--no-llm)",
+  "generated_at": "2026-09-12T13:45:59.57683Z",
+  "threshold": 0.85,
+  "units_total": 4,
+  "units_completed": 4,
+  "top1_hits": 4,
+  "top3_hits": 4,
+  "evidence_complete": 4,
+  "silence_guards_total": 3,
+  "silence_guards_pass": 3,
+  "top1_rate": 1,
+  "top3_rate": 1,
+  "evidence_complete_rate": 1,
+  "detect_lag_ms": {
+    "n": 4,
+    "min": 14819,
+    "p50": 14819,
+    "p95": 14826,
+    "max": 14826
+  },
+  "rca_http_ms": {
+    "n": 4,
+    "min": 3,
+    "p50": 4,
+    "p95": 6,
+    "max": 6
+  },
+  "audit_duration_ms": {
+    "n": 4,
+    "min": 1,
+    "p50": 1,
+    "p95": 3,
+    "max": 3
+  },
+  "findings": null,
+  "gate_passed": true
+}

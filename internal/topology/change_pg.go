@@ -6,10 +6,13 @@
 //     抖动丢出采集链路（webhook 是 RCA 取证入口，500 会诱导 CI 侧重发风暴）；
 //     丢失的落库行由 DB 恢复后自然被后续窗口查询遗漏——如实降级、响亮日志；
 //   - 读：全部走内存缓存（*ChangeStore 嵌入方法直接复用，零改动）；
-//   - 启动回放：LoadSince 把保留窗内的历史证据从 PG 灌回内存，
-//     重启不再丢变更取证（本实现存在的唯一理由）；
+//   - 启动回放：LoadSince 把保留窗内、**属于装配租户**的历史证据从 PG 灌回
+//     内存，重启不再丢变更取证（本实现存在的唯一理由）；他租户/历史 run 的
+//     同节点行不入回放——租户过滤是评测 0129078 实锤跨 run 证据泄漏后的收口
+//     （口径见 LoadSince）；
 //   - 清理：PruneBefore 同时清内存与 PG，两侧保留窗对齐（000015 的
-//     (tenant_id, occurred_at) 索引即为此查询而生）。
+//     (tenant_id, occurred_at) 索引即为此查询而生；PG 侧按时间全局清理、
+//     不带 tenant 过滤是刻意决策，理由见 PruneBefore）。
 //
 // 表：复用 change_record（000001 建表 + 000002 对齐列映射与幂等键），
 // 不新建表。列映射（000002 文件头契约的兑现）：
@@ -137,6 +140,13 @@ ON CONFLICT (tenant_id, event_id) DO NOTHING`,
 // PruneBefore 保留窗清理：先清内存（返回条数以内存为准，与纯内存实现
 // 口径一致），再清 PG 同窗口。PG 删除失败只告警——残留行在下次启动
 // 回放时按窗口过滤，不会再进读缓存，下一轮清理会再试。
+//
+// 跨租户口径：PG 侧 DELETE 按 occurred_at 全局删、**刻意不带 tenant 过滤**
+// ——这不是泄漏收口时被漏掉的一处：保留窗是进程级配置（OPS_CHANGE_
+// RETENTION），早于 cutoff 的行对任何装配租户的回放窗口都无价值，全局删
+// 只是兑现过期清理、不截断任何在窗证据；反之若按租户圈删，共享 DB 里
+// 不再有实例认领的租户残行将永远无人清理。将来多租户各配保留窗时，需先
+// 把清理器改成租户级窗口配置，再在此补 tenant 过滤。
 func (s *PGChangeStore) PruneBefore(cutoff time.Time) int {
 	removed := s.ChangeStore.PruneBefore(cutoff)
 	ctx, cancel := context.WithTimeout(context.Background(), changeSQLTimeout)
@@ -148,13 +158,20 @@ func (s *PGChangeStore) PruneBefore(cutoff time.Time) int {
 	return removed
 }
 
-// LoadSince 启动回放：把 occurred_at ≥ since 的全部事件从 PG 灌进内存
-// 缓存，返回灌入条数。since 零值 = 不设下界（保留窗关闭时的"全量回放"）。
+// LoadSince 启动回放：把 occurred_at ≥ since 且属于**装配租户**的全部事件
+// 从 PG 灌进内存缓存，返回灌入条数。since 零值 = 不设下界（保留窗关闭时
+// 的"全量回放"，仍限本租户）。
 //
 // 任何 DB 错误原样上抛——调用方（assembly）据此降级纯内存，不阻塞启动。
 // 幂等：走 load（ID 已存在则跳过），可安全重复调用。
-// 跨租户：回放不限租户（内存判重以全局 ID 为准，读缓存本就不分租户；
-// M1 单租户下等价，多租户隔离落地时在 WHERE 里补 tenant 过滤）。
+// 租户边界（#4 遗留的"M3 补 tenant 过滤"提前收口）：回放恒带
+// WHERE tenant_id——他租户/历史 run 的同节点变更一旦灌进读缓存，就会以
+// 本租户证据的身份进 RCA 根因链（评测 0129078 的 foreign_refs 实锤）。
+// 代价与语义：事件显式携带非装配租户时（persist 按事件自身 TenantID 落库）
+// 重启后不再被回放带回——跨租户证据本就不该进单租户实例的取证链，缺席即
+// 正确；tenant_id 传空串恒不命中（DB 行必带非空租户，FK + ensureTenant
+// 保证），宁可空缓存也不放大范围。000015 的 (tenant_id, occurred_at)
+// 索引正为此形态服务。
 func (s *PGChangeStore) LoadSince(since time.Time) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), changeLoadTimeout)
 	defer cancel()
@@ -162,10 +179,11 @@ func (s *PGChangeStore) LoadSince(since time.Time) (int, error) {
 SELECT tenant_id, event_id, node_key, change_type, occurred_at,
        COALESCE(actor, ''), source, COALESCE(ref, ''), COALESCE(revision, ''),
        COALESCE(summary, ''), confidence
-FROM change_record`
-	args := []any{}
+FROM change_record
+WHERE tenant_id = $1`
+	args := []any{s.tenantID}
 	if !since.IsZero() {
-		query += ` WHERE occurred_at >= $1`
+		query += ` AND occurred_at >= $2`
 		args = append(args, since)
 	}
 	query += ` ORDER BY occurred_at`

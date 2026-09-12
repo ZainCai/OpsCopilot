@@ -191,9 +191,10 @@ type unit struct {
 	AlertedNodes   []string `json:"alerted_nodes,omitempty"`
 	RootRefs       []string `json:"root_refs,omitempty"`
 	RootConfidence []string `json:"root_confidence,omitempty"`
-	// ForeignRefs：根因链里混入的其他评测 run 的变更（change_record 读取
-	// 无租户过滤——internal/topology/change_pg.go:157 注释自证 M1 单租户
-	// 假设）。不判 FAIL（本轮 top1 仍须正确），但进 findings 暴露。
+	// ForeignRefs：根因链里混入的其他评测 run 的变更。回放已按装配租户
+	// 过滤（internal/topology/change_pg.go LoadSince，评测 0129078 实锤后
+	// 收口），本字段常态应为空——非空即租户过滤回归（漏装配租户/回滚），
+	// 不判 FAIL（top1 仍须正确），但进 findings 响亮暴露。
 	ForeignRefs []string `json:"foreign_refs,omitempty"`
 
 	Status           string `json:"status"` // OK / ALERT_MISS / CLUSTER_SPLIT / CLUSTER_MERGED / INCIDENT_MISS / ATTACH_FAIL / RCA_HTTP_ERR / RCA_UNPARSEABLE / GUARD_PASS / GUARD_FAIL
@@ -577,8 +578,8 @@ WHERE tenant_id=$1 AND fingerprint=$2 AND occurred_at >= $3 AND occurred_at < $4
 				break
 			}
 		}
-		// 跨 run 变更证据泄漏探测（change_record 读取无租户过滤，见 unit
-		// 字段注释）——top1 正确与否另行判定，这里只如实记账。
+		// 跨 run 变更证据泄漏回归探测（回放已按装配租户过滤——change_pg.go
+		// LoadSince，见 unit 字段注释）——top1 判定与此无关，非空即响亮记账。
 		myPrefix := "chg-" + runSuffix + "-"
 		for _, r := range u.RootRefs {
 			if !strings.HasPrefix(r, myPrefix) {
@@ -586,7 +587,7 @@ WHERE tenant_id=$1 AND fingerprint=$2 AND occurred_at >= $3 AND occurred_at < $4
 			}
 		}
 		if len(u.ForeignRefs) > 0 {
-			u.Notes = append(u.Notes, fmt.Sprintf("根因链混入他 run 变更 %v（变更证据未按租户隔离——§5 暴露项）", u.ForeignRefs))
+			u.Notes = append(u.Notes, fmt.Sprintf("根因链混入他 run 变更 %v（回放租户过滤回归——§5 暴露项）", u.ForeignRefs))
 		}
 
 		// ⑤ 审计直读（#4 落库形态）：action='rca' 行的 detail。
@@ -712,7 +713,7 @@ func buildSummary(units []unit, runID, tenant string, noLLM bool, thr float64) s
 				s.Findings = append(s.Findings, fmt.Sprintf("证据不完整（%s/%s）：%v", u.SegCode, u.ClusterID, u.Notes))
 			}
 			if len(u.ForeignRefs) > 0 {
-				s.Findings = append(s.Findings, fmt.Sprintf("跨 run 变更证据泄漏（%s/%s）：根因链含他 run 变更 %v——change_record 读取无租户过滤（internal/topology/change_pg.go:157 注释自证 M1 单租户假设），多租户转正前必须收口",
+				s.Findings = append(s.Findings, fmt.Sprintf("跨 run 变更证据泄漏回归（%s/%s）：根因链含他 run 变更 %v——LoadSince 回放应按装配租户过滤（internal/topology/change_pg.go，评测 0129078 实锤后收口），非空即过滤失守/回滚，转正前必须查",
 					u.SegCode, u.ClusterID, u.ForeignRefs))
 			}
 		default:
