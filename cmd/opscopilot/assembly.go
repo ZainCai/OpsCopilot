@@ -74,6 +74,9 @@ type Assembly struct {
 	// 绑告警实例 Redis（role 误绑启动期 panic 由包构造器锁定）；只做 TTL 热态
 	// 缓冲，真相在 PG（migration 000018）——S2 编排器消费本字段做懒恢复。
 	SessionHot *sessionstore.Store
+	// Session RCA 复盘会话编排器（二期池 #7 S2；nil = OPS_SESSION=off——
+	// GET/POST /api/v1/incidents/{id}/rca/session 显式 503）。
+	Session *SessionOrchestrator
 	// Events 实时广播器（W11：控制台事件页 SSE 订阅源）。
 	Events *EventHub
 	// NotifyReg 通知渠道注册表（W9-2）：渠道 CRUD 后由 reloadNotifyChannels
@@ -447,8 +450,33 @@ func NewAssembly(logger connector.Logger, cfg *config.Config) (*Assembly, error)
 		asm.SessionHot = sessionstore.New(sessRDB, string(config.RedisAlert))
 		logf("rca review session: hot buffer wired (alert redis %s, ttl %s; truth = PG rca_session/000018)",
 			cfg.Redis.Alert.Addr, sessionstore.DefaultTTL)
-		if pgPool == nil {
-			logf("WARNING: OPS_SESSION=on but no DB pool — session truth degrades to memory (single-instance, restart loses turns)")
+		// S2 编排器：真相层优先 PG（多实例共享 + 行锁发号恰一序）；无库退
+		// 化内存并响亮告警（升级台账同款纪律——不让运维误以为已持久化）。
+		var truth sessionTruth
+		if pgPool != nil {
+			truth = newPGSessionTruth(pgPool, cfg.Tenant)
+		} else {
+			logf("WARNING: OPS_SESSION=on but no DB pool — session truth is in-memory: restart loses turns, single-instance only")
+			truth = newMemSessionTruth()
+		}
+		if asm.RCA == nil {
+			// config.Validate 保证 Session=on ⇒ RCA=on；走到这里只可能是
+			// 嵌入式装配绕过了校验（测试直接构造 Config）。宁关会话不半成品：
+			// prompt 必携带 RCA findings，无编排器即拒装配。
+			logf("WARNING: OPS_SESSION=on but RCA not wired (OPS_RCA=off?) — review session DISABLED (endpoints 503)")
+		} else {
+			var chat sessionChat
+			if gw, gwErr := newLLMGateway(cfg.LLM); gwErr != nil {
+				logf("WARNING: session llm gateway rejected by config, assistant stays pending: %v", gwErr)
+			} else if gw != nil {
+				chat = gw
+			} else {
+				logf("session assistant: llm-gateway not configured (OPS_LLM_ENDPOINT empty) — turns stay pending (never fabricated)")
+			}
+			asm.Session = NewSessionOrchestrator(truth, asm.SessionHot, asm.Incidents, asm.RCA,
+				chat, cfg.RCA.MaxFindings, cfg.Tenant, appMetrics, logf)
+			rest.SetSession(asm.Session)
+			logf("rca review session: ON (GET/POST /api/v1/incidents/{id}/rca/session, truth=%s, incident 级共享, 懒恢复热态)", truth.persistence())
 		}
 	} else {
 		logf("rca review session disabled (OPS_SESSION=off)")

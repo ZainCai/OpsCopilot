@@ -66,10 +66,16 @@ type RESTGateway struct {
 	reloadChannels func() (int, error)
 	// rca 按需根因分析编排器（#12/ADR-014；nil = OPS_RCA=off，端点 503）。
 	rca *RCAOrchestrator
+	// session RCA 复盘会话编排器（二期池 #7 S2；nil = OPS_SESSION=off，
+	// GET/POST /api/v1/incidents/{id}/rca/session 显式 503）。
+	session *SessionOrchestrator
 }
 
 // SetRCA 挂载按需 RCA 编排器（装配期调用；nil = 关闭，端点显式 503）。
 func (g *RESTGateway) SetRCA(o *RCAOrchestrator) { g.rca = o }
+
+// SetSession 挂载 RCA 复盘会话编排器（装配期调用；nil = 关闭，端点显式 503）。
+func (g *RESTGateway) SetSession(o *SessionOrchestrator) { g.session = o }
 
 // SetChannels 挂载通知渠道配置存储与重载回调（装配期调用）。
 func (g *RESTGateway) SetChannels(store *ChannelStore, reload func() (int, error)) {
@@ -145,6 +151,9 @@ func (g *RESTGateway) Register(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/incidents", h)
 	mux.Handle("GET /api/v1/incidents/{id}", h)
 	mux.Handle("GET /api/v1/incidents/{id}/rca", h) // #12 按需根因分析（Token 门禁在 handler 内）
+	// 二期池 #7 S2：RCA 复盘会话（incident 子路径，拍板④；Token 门禁在 handler 内）。
+	mux.Handle("GET /api/v1/incidents/{id}/rca/session", h)
+	mux.HandleFunc("POST /api/v1/incidents/{id}/rca/session", g.handleSessionWrite)
 	mux.HandleFunc("POST /api/v1/incidents", g.handleCreateIncident)
 	mux.Handle("GET /api/v1/incidents/{id}/duplicates", h)
 	mux.Handle("GET /api/v1/incidents/{id}/audit", h)
@@ -194,6 +203,8 @@ func (g *RESTGateway) route(w http.ResponseWriter, r *http.Request) {
 				g.handleDuplicates(w, r)
 			case strings.HasSuffix(r.URL.Path, "/audit"):
 				g.handleAudit(w, r)
+			case strings.HasSuffix(r.URL.Path, "/rca/session"):
+				g.handleSessionRead(w, r) // 二期池 #7：复盘会话读（懒恢复在编排器内）
 			case strings.HasSuffix(r.URL.Path, "/rca"):
 				g.handleRCA(w, r)
 			default:

@@ -101,6 +101,13 @@ type AppMetrics struct {
 	// 丢弃的触发请求数。升级风暴/慢分析积压下"绝不阻塞 escalation"的代价面：
 	// 丢的是自动分析（可事后按需 GET /rca 补），绝不丢升级通知本身。
 	RCATriggerDropped *metrics.Counter
+	// SessionLLMRequests RCA 复盘会话 assistant 轮的 llmgw 出站请求数（二期池 #7
+	// S2，OPS_SESSION），按结果（outcome = ok | timeout | error）分桶。
+	// timeout/error → assistant_status=pending 不假答——复盘会话的降级面必须
+	// 可计数（与 opscopilot_llm_requests_total 分账：两条消费链的降级各自可观测）。
+	SessionLLMRequests map[string]*metrics.Counter
+	// SessionLLMDuration 复盘会话单次 chat 耗时。桶/维度纪律与 LLMRequests 同款。
+	SessionLLMDuration *metrics.Histogram
 }
 
 // latencyStages 延迟观测的两种阶段（跳过计数器的固定维度集合）。
@@ -145,15 +152,18 @@ func NewAppMetrics() *AppMetrics {
 			"Latency from alert fired (startsAt) to verdict generated (queue submit; persistence is async since opt #8, see docs/W9-4)", nil, latencyBuckets, latencyWindow),
 		AlertsToNotify: reg.Histogram("opscopilot_alert_fired_to_notify_seconds",
 			"Latency from alert fired (startsAt) to notification delivered (enforce mode, admitted only)", nil, latencyBuckets, latencyWindow),
-		SinkDrops:      make(map[string]*metrics.Counter, len(sinkStores)),
-		Verdicts:       make(map[string]*metrics.Counter, len(verdictReasons)),
-		LatencySkipped: make(map[string]*metrics.Counter, len(latencyStages)),
-		RCARequests:    make(map[string]*metrics.Counter, len(rcaOutcomes)),
-		LLMRequests:    make(map[string]*metrics.Counter, len(llmOutcomes)),
+		SinkDrops:          make(map[string]*metrics.Counter, len(sinkStores)),
+		Verdicts:           make(map[string]*metrics.Counter, len(verdictReasons)),
+		LatencySkipped:     make(map[string]*metrics.Counter, len(latencyStages)),
+		RCARequests:        make(map[string]*metrics.Counter, len(rcaOutcomes)),
+		LLMRequests:        make(map[string]*metrics.Counter, len(llmOutcomes)),
+		SessionLLMRequests: make(map[string]*metrics.Counter, len(llmOutcomes)),
 		RCADuration: reg.Histogram("opscopilot_rca_duration_seconds",
 			"On-demand RCA analysis latency (evidence collection + six-step pipeline), outcome-agnostic", nil, rcaBuckets, latencyWindow),
 		LLMDuration: reg.Histogram("opscopilot_llm_duration_seconds",
 			"llm-gateway chat request latency (RCA conclude egress, ADR-015); degradation surface = outcome!=ok", nil, llmBuckets, latencyWindow),
+		SessionLLMDuration: reg.Histogram("opscopilot_session_llm_duration_seconds",
+			"llm-gateway chat request latency for RCA review-session assistant turns (OPS_SESSION, #7)", nil, llmBuckets, latencyWindow),
 		RCATriggerDropped: reg.Counter("opscopilot_rca_autotrigger_dropped_total",
 			"Auto RCA trigger requests dropped because the bounded async queue was full (OPS_RCA_AUTO, #4) — escalation notification itself is never blocked or lost", nil),
 	}
@@ -164,6 +174,10 @@ func NewAppMetrics() *AppMetrics {
 	for _, s := range llmOutcomes {
 		m.LLMRequests[s] = reg.Counter("opscopilot_llm_requests_total",
 			"llm-gateway chat requests by outcome (ok = conclusion produced; timeout/error = conclude fail-open to pending, ADR-015)", metrics.LabelSet{"outcome": s})
+	}
+	for _, s := range llmOutcomes {
+		m.SessionLLMRequests[s] = reg.Counter("opscopilot_session_llm_requests_total",
+			"llm-gateway chat requests serving RCA review-session assistant turns (OPS_SESSION, #7) by outcome (timeout/error = assistant fail-open to pending, never fabricated)", metrics.LabelSet{"outcome": s})
 	}
 	for _, s := range sinkStores {
 		m.SinkDrops[s] = reg.Counter("opscopilot_noise_sink_drops_total",
@@ -265,6 +279,27 @@ func (m *AppMetrics) ObserveLLMLatency(d time.Duration) {
 		return
 	}
 	m.LLMDuration.Observe(d.Seconds())
+}
+
+// CountSessionLLM 记一次复盘会话 assistant 轮的 llmgw 出站请求
+// （outcome = ok | timeout | error；未知归 error，对齐 CountLLM 纪律）。
+func (m *AppMetrics) CountSessionLLM(outcome string) {
+	if m == nil {
+		return
+	}
+	c, ok := m.SessionLLMRequests[outcome]
+	if !ok {
+		c = m.SessionLLMRequests["error"]
+	}
+	c.Inc()
+}
+
+// ObserveSessionLLMLatency 记录复盘会话单次 chat 耗时。
+func (m *AppMetrics) ObserveSessionLLMLatency(d time.Duration) {
+	if m == nil {
+		return
+	}
+	m.SessionLLMDuration.Observe(d.Seconds())
 }
 
 // CountRCATriggerDrop 记一次自动 RCA 触发被有界队列丢弃（OPS_RCA_AUTO 队满，#4）。
