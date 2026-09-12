@@ -113,6 +113,24 @@ curl -s -H "X-OpsCopilot-Token: <key>" '.../incidents/<id>/rca/session'  # 复�
 - 只读按需分析，`OPS_RCA=off` 时端点显式 503；每次分析落 `incident_audit`（action=rca）；
 - conclude 步是唯一 LLM 挂点：`OPS_LLM_*` 未配置时恒 pending（宁缺不假答，ADR-003 禁止伪 RCA）；LLM 故障 fail-open 回 pending，绝不 5xx。
 
+### 事件混合时间线（F-03 / W10-1）
+
+`GET /api/v1/incidents/{id}/timeline` 把三源按时间归并成一条叙事：**告警进出**（alert_event 影子判决：`alert_in` 进场 / `alert_out` 降噪收敛）∥ **变更记录**（故障域节点、事件生命周期窗口内的 change_record）∥ **人工处置动作**（incident_audit）。读路径，鉴权口径同现有 GET。
+
+```bash
+curl -s 'http://127.0.0.1:8080/api/v1/incidents/<id>/timeline?limit=50'   # 首 50 条（默认 200，上限 1000）
+curl -s '.../timeline?limit=50&cursor=<next_cursor>'                        # 翻页（不透明游标，空=到末尾）
+# => {"incident_id":"...","items":[{"ts":"2026-09-12T15:58:27+08:00","kind":"change",
+#      "source_id":"change:chg-1","summary":"deploy on prometheus://nodes/n1 by bot — v2",
+#      "confidence":"high"}, {"ts":"…","kind":"alert_in","source_id":"alert:fp-1:…",
+#      "summary":"DiskFull（new-incident） @c:fp-1","severity":"critical"}, …],
+#     "count":3,"total":3,"next_cursor":"","partial":false,"missing":{}}
+```
+
+- 排序固定**时间升序**；同刻稳定序 `change < action < alert_in < alert_out`（因果阅读序，见 `cmd/opscopilot/rest_timeline.go` 文件头）；
+- `partial=true` + `missing` 表达降级：依赖源缺席（无 DSN ⇒ 告警源、降噪关闭 ⇒ 变更无法归因、无审计 ⇒ 处置源）或查询失败/截断时，**可用源照常归并返回 200**，缺席原因逐源透出；单条源故障不拖垮整页；
+- 前端落 `web/` 事件详情区（console.html 已冻结），kind 徽标 + 游标"加载更多"。
+
 ### 通知渠道配置（W9-2）
 
 `OPS_NOISE_MODE=enforce` 时，降噪判定为**新事件**的告警会经渠道发出通知（窗口重复 / 故障域并入不重复通知）。渠道配置存 DB（`notify_channel`，迁移 000012），**保存即热生效，无需重启**：

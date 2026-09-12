@@ -157,6 +157,9 @@ func (g *RESTGateway) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/incidents", g.handleCreateIncident)
 	mux.Handle("GET /api/v1/incidents/{id}/duplicates", h)
 	mux.Handle("GET /api/v1/incidents/{id}/audit", h)
+	// W10-1（F-03）事件混合时间线：告警进出∥变更∥处置三源归并（读路径，
+	// 鉴权口径同现有 GET）。
+	mux.Handle("GET /api/v1/incidents/{id}/timeline", h)
 	mux.HandleFunc("POST /api/v1/incidents/{id}/merge", g.handleMergeIncident)
 	mux.HandleFunc("POST /api/v1/incidents/{id}/transition", g.handleTransitionIncident)
 	mux.HandleFunc("GET /api/v1/auth/status", g.handleAuthStatus)
@@ -203,6 +206,8 @@ func (g *RESTGateway) route(w http.ResponseWriter, r *http.Request) {
 				g.handleDuplicates(w, r)
 			case strings.HasSuffix(r.URL.Path, "/audit"):
 				g.handleAudit(w, r)
+			case strings.HasSuffix(r.URL.Path, "/timeline"):
+				g.handleIncidentTimeline(w, r)
 			case strings.HasSuffix(r.URL.Path, "/rca/session"):
 				g.handleSessionRead(w, r) // 二期池 #7：复盘会话读（懒恢复在编排器内）
 			case strings.HasSuffix(r.URL.Path, "/rca"):
