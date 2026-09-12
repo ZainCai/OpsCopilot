@@ -10,6 +10,11 @@
 //     而非 HTTP 方法）。阈值见 maxQueryURLLen；
 //   - 鉴权 Token 必须来自只读凭证（Config.Credential），并在构造期由
 //     pkg/readonly.Validate 强制校验——把"只读"从注释固化为代码。
+//   - 出口纪律（ADR-015 波三迁移，照 notify/channel_webhook 范式）：
+//     本包不 import net/http、不持有 http.Client——物理发送唯一经
+//     internal/transport.HTTPClient（白名单放行的出口消费者）；无注入时
+//     经 transport.NewHTTPClientLimit 构造默认发送器，旧的裸 http.Client
+//     自建兜底已删除。
 package prometheus
 
 import (
@@ -17,12 +22,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"net/url"
-	"strings"
 	"time"
 
 	"opscopilot/internal/connector"
+	"opscopilot/internal/transport"
 	"opscopilot/pkg/httpx"
 	"opscopilot/pkg/readonly"
 )
@@ -30,6 +34,13 @@ import (
 // maxQueryURLLen 单条 PromQL 编码后允许放进 URL 的最大长度。
 // 超过则自动改用 POST form，规避代理/服务端对 URL 长度的常见限制（约 2~8KB）。
 const maxQueryURLLen = 1800
+
+// statusOK HTTP 200 本地常量：出口纪律（ADR-015）禁本包 import net/http，
+// 数值取 RFC 9110 固定语义。
+const statusOK = 200
+
+// defaultRequestTimeout 无注入时默认发送器的请求超时（transport 派生 ctx 兑现）。
+const defaultRequestTimeout = 15 * time.Second
 
 // Query 一条指标查询配置。
 type Query struct {
@@ -64,8 +75,12 @@ type Config struct {
 	// 为空则不采集指标（默认，向后兼容 W2 早期只采告警的行为）；
 	// 非空时逐条执行 /api/v1/query 并归一化进 CollectResult.Metrics。
 	Queries []Query
-	// HTTPClient 可选自定义客户端；为空则用带超时的默认客户端。
-	HTTPClient *http.Client
+	// HTTPClient 可注入 transport 发送器（测试/装配用）。为空时 New() 经
+	// transport.NewHTTPClientLimit(defaultRequestTimeout, MaxResponseBytes)
+	// 构造默认发送器——物理发送唯一归 internal/transport（ADR-015 波三
+	// 迁移，删除旧的裸 http.Client 自建兜底）。注入的发送器自带响应体
+	// 上限，MaxResponseBytes 此时仅对默认构造路径生效。
+	HTTPClient *transport.HTTPClient
 	// MaxResponseBytes 响应体上限，<=0 时用默认值 32MiB。
 	MaxResponseBytes int64
 	// 以下端点路径可覆盖（一般不必）。
@@ -76,8 +91,9 @@ type Config struct {
 
 // PrometheusConnector 对接 Prometheus 的只读连接器。
 type PrometheusConnector struct {
-	cfg    Config
-	client *http.Client
+	cfg Config
+	// sender 唯一物理发送出口（transport.HTTPClient，并发安全、字段只读）。
+	sender *transport.HTTPClient
 }
 
 // New 构造连接器并做基本校验（含只读凭证强制）。
@@ -124,11 +140,13 @@ func New(cfg Config) (*PrometheusConnector, error) {
 			return nil, fmt.Errorf("prometheus: Queries[%d].Expr is empty", i)
 		}
 	}
-	client := cfg.HTTPClient
-	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
+	sender := cfg.HTTPClient
+	if sender == nil {
+		// 无注入 → 默认发送器仍唯一经 transport（ADR-015）；
+		// 旧的 `&http.Client{Timeout: 15s}` 自建兜底已删除。
+		sender = transport.NewHTTPClientLimit(defaultRequestTimeout, cfg.MaxResponseBytes)
 	}
-	return &PrometheusConnector{cfg: cfg, client: client}, nil
+	return &PrometheusConnector{cfg: cfg, sender: sender}, nil
 }
 
 // ID 实现 connector.Connector。
@@ -143,7 +161,7 @@ func (p *PrometheusConnector) HealthCheck(ctx context.Context) (connector.Health
 	if err != nil {
 		return connector.Health{Status: connector.HealthDown, Detail: err.Error(), CheckedAt: time.Now()}, err
 	}
-	if status != http.StatusOK {
+	if status != statusOK {
 		d := fmt.Sprintf("unexpected status %d: %s", status, httpx.Excerpt(body, 200))
 		return connector.Health{Status: connector.HealthDegraded, Detail: d, CheckedAt: time.Now()}, nil
 	}
@@ -169,7 +187,7 @@ func (p *PrometheusConnector) Collect(ctx context.Context, req connector.Collect
 	if err != nil {
 		return nil, err
 	}
-	if status != http.StatusOK {
+	if status != statusOK {
 		return nil, fmt.Errorf("prometheus[%s] alerts endpoint HTTP %d: %s",
 			p.cfg.ID, status, httpx.Excerpt(body, 200))
 	}
@@ -230,7 +248,7 @@ func (p *PrometheusConnector) queryMetrics(ctx context.Context, q Query) ([]conn
 	if err != nil {
 		return nil, err
 	}
-	if status != http.StatusOK {
+	if status != statusOK {
 		return nil, fmt.Errorf("prometheus[%s] query endpoint HTTP %d: %s",
 			p.cfg.ID, status, httpx.Excerpt(body, 200))
 	}
@@ -260,7 +278,7 @@ func (p *PrometheusConnector) Discover(ctx context.Context) (*connector.Discover
 	if err != nil {
 		return nil, err
 	}
-	if status != http.StatusOK {
+	if status != statusOK {
 		return nil, fmt.Errorf("prometheus[%s] targets endpoint HTTP %d: %s",
 			p.cfg.ID, status, httpx.Excerpt(body, 200))
 	}
@@ -294,10 +312,16 @@ func (p *PrometheusConnector) errWith(op, endpoint string, err error) error {
 }
 
 // get 发起只读 GET，返回状态码、响应体、错误。
-// 响应体读取受 MaxResponseBytes 限制，避免异常响应耗尽内存。
+// 响应体读取受发送器上限（构造期 MaxResponseBytes）约束，避免异常响应耗尽内存。
 func (p *PrometheusConnector) get(ctx context.Context, path string) (int, []byte, error) {
-	// 共享 HTTP 层（全局审查 C1）：Bearer 注入与响应体上限统一在 pkg/httpx。
-	status, _, body, err := httpx.Get(ctx, p.client, p.cfg.BaseURL+path, p.cfg.Token, p.cfg.MaxResponseBytes)
+	// 出口纪律（ADR-015 波三）：物理发送唯一经 transport.HTTPClient
+	// （替代原 pkg/httpx.Get + 自建 http.Client）。头语义与原共享层
+	// 逐字一致：Accept JSON + 非空 Token 注 Bearer。
+	headers := map[string]string{"Accept": "application/json"}
+	if p.cfg.Token != "" {
+		headers["Authorization"] = "Bearer " + p.cfg.Token
+	}
+	status, _, body, err := p.sender.Get(ctx, p.cfg.BaseURL+path, headers)
 	if err != nil {
 		// 网络错误 / 响应体超限——C11：叶子处统一裹上下文，避免裸 err 逃逸。
 		return status, body, p.errWith("GET", path, err)
@@ -314,25 +338,17 @@ func (p *PrometheusConnector) postQuery(ctx context.Context, expr string) (int, 
 	form := url.Values{}
 	form.Set("query", expr)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		p.cfg.BaseURL+p.cfg.QueryPath, strings.NewReader(form.Encode()))
-	if err != nil {
-		return 0, nil, p.errWith("POST", p.cfg.QueryPath, err)
+	headers := map[string]string{
+		"Content-Type": "application/x-www-form-urlencoded",
+		"Accept":       "application/json",
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
 	if p.cfg.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+p.cfg.Token)
+		headers["Authorization"] = "Bearer " + p.cfg.Token
 	}
-	resp, err := p.client.Do(req)
+	// 同一出口纪律：POST form 也唯一经 transport 发送器。
+	status, body, err := p.sender.Post(ctx, p.cfg.BaseURL+p.cfg.QueryPath, headers, []byte(form.Encode()))
 	if err != nil {
-		return 0, nil, p.errWith("POST", p.cfg.QueryPath, err)
+		return status, nil, p.errWith("POST", p.cfg.QueryPath, err)
 	}
-	defer resp.Body.Close()
-
-	body, err := httpx.ReadLimited(resp.Body, p.cfg.MaxResponseBytes)
-	if err != nil {
-		return resp.StatusCode, nil, p.errWith("POST", p.cfg.QueryPath, err)
-	}
-	return resp.StatusCode, body, nil
+	return status, body, nil
 }

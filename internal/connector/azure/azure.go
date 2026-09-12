@@ -7,8 +7,12 @@
 // 设计纪律：
 //   - 只读（ADR-002）：仅 GET 类操作；凭证必须通过 readonly.Validate
 //     （写权限凭证在构造期即被拒绝）。
-//   - 零第三方 SDK：直接走 ARM REST（net/http），M1 只需要"列表 + 分页"，
-//     引入 azure-sdk-for-go 的收益配不上其依赖体积；后续需求复杂了再评估。
+//   - 零第三方 SDK：ARM REST 手拼，M1 只需要"列表 + 分页"，引入
+//     azure-sdk-for-go 的收益配不上其依赖体积；后续需求复杂了再评估。
+//   - 出口纪律（ADR-015 波三迁移，照 notify/channel_webhook 范式）：
+//     本包不 import net/http、不持有 http.Client——物理发送唯一经
+//     internal/transport.HTTPClient（白名单放行的出口消费者）；无注入时
+//     经 transport.NewHTTPClientLimit 构造默认发送器，不再自建裸客户端。
 //   - 归一化：ARM 资源形状（id/name/location/properties）不外泄，
 //     出口只有 ResourceNode；Key 采用 "azure://vm/<vmId>"（vmId 是订阅内
 //     稳定 GUID，不随改名/迁移变化）。
@@ -23,15 +27,24 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	"opscopilot/internal/connector"
+	"opscopilot/internal/transport"
 	"opscopilot/pkg/httpx"
 	"opscopilot/pkg/readonly"
+)
+
+// HTTP 状态码本地常量：出口纪律（ADR-015）禁本包 import net/http，
+// 数值取 RFC 9110 固定语义。
+const (
+	statusOK              = 200
+	statusUnauthorized    = 401
+	statusForbidden       = 403
+	statusTooManyRequests = 429
 )
 
 const (
@@ -39,6 +52,8 @@ const (
 	defaultBaseURL = "https://management.azure.com"
 	// defaultAPIVersion 虚拟机列表 API 版本（稳定 GA 版本，不追新）。
 	defaultAPIVersion = "2022-11-01"
+	// defaultRequestTimeout 无注入时的默认发送器超时（transport 派生 ctx 兑现）。
+	defaultRequestTimeout = 15 * time.Second
 	// maxPages 分页硬上限：防御恶意/异常服务端用 nextLink 造成死循环。
 	maxPages = 100
 	// maxRetriesOn429 ARM 限流（HTTP 429）的最大重试次数。
@@ -63,8 +78,12 @@ type Config struct {
 	APIVersion string
 	// MaxResponseBytes 单页响应体上限，<=0 用默认 32MiB。
 	MaxResponseBytes int64
-	// HTTPClient 可注入自定义客户端（测试用）；默认 15s 超时。
-	HTTPClient *http.Client
+	// HTTPClient 可注入 transport 发送器（测试/装配用）。为空时 New() 经
+	// transport.NewHTTPClientLimit(defaultRequestTimeout, MaxResponseBytes)
+	// 构造默认发送器——物理发送唯一归 internal/transport（ADR-015 波三
+	// 迁移，删除旧的裸 http.Client 自建兜底）。注入的发送器自带响应体
+	// 上限，MaxResponseBytes 此时仅对默认构造路径生效。
+	HTTPClient *transport.HTTPClient
 }
 
 // Discoverer Azure ARM 只读发现连接器。
@@ -72,8 +91,9 @@ type Config struct {
 // Collect 明确返回 ErrUnsupported（指标采集要走 Azure Monitor，
 // 属后续迭代，不静默假装支持）。
 type Discoverer struct {
-	cfg    Config
-	client *http.Client
+	cfg Config
+	// sender 唯一物理发送出口（transport.HTTPClient，并发安全、字段只读）。
+	sender *transport.HTTPClient
 	// armHost BaseURL 的主机名（构造期解析）。nextLink 跟随前必须校验
 	// 目标 host 与之一致——被入侵/配置错乱的源若能引导我们带着 Bearer
 	// 访问任意主机，等于把令牌递出去（W3 审查 P2-2）。
@@ -105,15 +125,17 @@ func New(cfg Config) (*Discoverer, error) {
 	if cfg.MaxResponseBytes <= 0 {
 		cfg.MaxResponseBytes = httpx.DefaultMaxResponseBytes
 	}
-	client := cfg.HTTPClient
-	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
+	sender := cfg.HTTPClient
+	if sender == nil {
+		// 无注入 → 默认发送器仍唯一经 transport（ADR-015）；
+		// 旧的 `&http.Client{Timeout: 15s}` 自建兜底已删除。
+		sender = transport.NewHTTPClientLimit(defaultRequestTimeout, cfg.MaxResponseBytes)
 	}
 	base, err := url.Parse(cfg.BaseURL)
 	if err != nil || base.Host == "" {
 		return nil, fmt.Errorf("azure: invalid BaseURL %q", cfg.BaseURL)
 	}
-	return &Discoverer{cfg: cfg, client: client, armHost: base.Host}, nil
+	return &Discoverer{cfg: cfg, sender: sender, armHost: base.Host}, nil
 }
 
 // ID 实现 connector.Connector。
@@ -152,9 +174,9 @@ func (d *Discoverer) HealthCheck(ctx context.Context) (connector.Health, error) 
 			d.errWith("probe", probe, err)
 	}
 	switch {
-	case status == http.StatusOK:
+	case status == statusOK:
 		return connector.Health{Status: connector.HealthHealthy, Detail: "ARM reachable, credential valid", CheckedAt: now}, nil
-	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+	case status == statusUnauthorized || status == statusForbidden:
 		return connector.Health{Status: connector.HealthDegraded, Detail: fmt.Sprintf("credential rejected: HTTP %d", status), CheckedAt: now}, nil
 	default:
 		return connector.Health{Status: connector.HealthDegraded, Detail: fmt.Sprintf("unexpected HTTP %d", status), CheckedAt: now}, nil
@@ -181,7 +203,7 @@ func (d *Discoverer) Discover(ctx context.Context) (*connector.DiscoverResult, e
 		if err != nil {
 			return nil, d.errWith("list virtualMachines", pageURL, err)
 		}
-		if status != http.StatusOK {
+		if status != statusOK {
 			// 带响应体摘要便于排障（ARM 错误 body 含错误码与消息；
 			// 不含凭证——Authorization 只在请求头）。
 			return nil, fmt.Errorf("azure[%s] list virtualMachines HTTP %d: %.256s",
@@ -277,11 +299,13 @@ func resourceGroupOf(id string) string {
 	return ""
 }
 
-// get 统一 GET：注入 Bearer 凭证，读取响应体受上限约束。
-// 返回响应头（Retry-After 等控制信息由调用方消费）。
+// get 统一 GET：Bearer 凭证与 Accept 头显式传给 transport 发送器，
+// 响应体上限由发送器承载（构造期锁定）。返回状态码、响应头
+// （Retry-After 等控制信息由调用方消费；以裸 map 呈现，本包不再
+// import net/http 指认 http.Header 类型）与响应体。
 // pathOrURL 为相对路径时用 baseURL+path 并按需追加 api-version；
 // 为绝对 URL 时原样请求（分页 nextLink 场景，host 校验在调用方）。
-func (d *Discoverer) get(ctx context.Context, pathOrURL, apiVersion string) (int, http.Header, []byte, error) {
+func (d *Discoverer) get(ctx context.Context, pathOrURL, apiVersion string) (int, map[string][]string, []byte, error) {
 	reqURL := pathOrURL
 	if !strings.HasPrefix(reqURL, "http://") && !strings.HasPrefix(reqURL, "https://") {
 		reqURL = d.cfg.BaseURL + pathOrURL
@@ -293,17 +317,26 @@ func (d *Discoverer) get(ctx context.Context, pathOrURL, apiVersion string) (int
 			reqURL += sep + "api-version=" + url.QueryEscape(apiVersion)
 		}
 	}
-	// 共享 HTTP 层（全局审查 C1）：Bearer 注入与响应体上限统一在 pkg/httpx。
-	return httpx.Get(ctx, d.client, reqURL, d.cfg.Credential.Secret, d.cfg.MaxResponseBytes)
+	// 出口纪律（ADR-015 波三）：物理发送唯一经 transport.HTTPClient
+	// （白名单出口消费者；替代原 pkg/httpx.Get + 自建 http.Client）。
+	headers := map[string]string{"Accept": "application/json"}
+	if tok := d.cfg.Credential.Secret; tok != "" {
+		headers["Authorization"] = "Bearer " + tok
+	}
+	status, hdr, body, err := d.sender.Get(ctx, reqURL, headers)
+	if err != nil {
+		return status, hdr, nil, err
+	}
+	return status, hdr, body, nil
 }
 
 // getWithRetry 对 429（ARM 限流）按 Retry-After 退避重试，最多
 // maxRetriesOn429 次——生产 ARM 在批量列举时几乎必然限流，
 // 不处理就是"测试通过、上线即挂"（W3 审查 P2-3）。
-func (d *Discoverer) getWithRetry(ctx context.Context, reqURL string) (int, http.Header, []byte, error) {
+func (d *Discoverer) getWithRetry(ctx context.Context, reqURL string) (int, map[string][]string, []byte, error) {
 	for attempt := 0; ; attempt++ {
 		status, hdr, body, err := d.get(ctx, reqURL, "")
-		if err != nil || status != http.StatusTooManyRequests || attempt >= maxRetriesOn429 {
+		if err != nil || status != statusTooManyRequests || attempt >= maxRetriesOn429 {
 			return status, hdr, body, err
 		}
 		wait := retryAfterDelay(hdr)
@@ -317,17 +350,23 @@ func (d *Discoverer) getWithRetry(ctx context.Context, reqURL string) (int, http
 	}
 }
 
-// retryAfterDelay 从响应头解析退避时长：支持秒数与 HTTP-date 两种
-// 形式；解析失败退回 1s；封顶 maxRetryAfterSecs 防御恶意大值。
-func retryAfterDelay(h http.Header) time.Duration {
-	v := h.Get("Retry-After")
+// retryAfterDelay 从响应头解析退避时长：支持秒数与 HTTP-date
+// （IMF-fixdate/RFC1123，Retry-After 的标准日期形态）两种形式；
+// 解析失败退回 1s；封顶 maxRetryAfterSecs 防御恶意大值。
+// 头以 map[string][]string 呈现（http.Header 的底层类型）——出口迁移后
+// 本包不再 import net/http，键按 canonical 形式直查即可。
+func retryAfterDelay(h map[string][]string) time.Duration {
+	v := ""
+	if vs := h["Retry-After"]; len(vs) > 0 {
+		v = vs[0]
+	}
 	if secs, err := strconv.Atoi(v); err == nil {
 		if secs > maxRetryAfterSecs {
 			secs = maxRetryAfterSecs
 		}
 		return time.Duration(secs) * time.Second
 	}
-	if t, err := http.ParseTime(v); err == nil {
+	if t, err := time.Parse(time.RFC1123, v); err == nil {
 		d := time.Until(t)
 		if d < 0 {
 			d = 0

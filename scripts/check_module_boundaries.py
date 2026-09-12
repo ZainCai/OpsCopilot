@@ -13,10 +13,12 @@
        internal/transport（出站 IO 统一承载层：gRPC 拨号 + HTTPClient
        发送器）；transport 自身不得反向依赖任何业务模块。
   3. internal/contracts 与 pkg/ 不得 import 任何 internal/<module>。
-  4. （ADR-015 出口纪律）llmgw 与 notify 为纯逻辑层：生产代码禁止 import
-     net/http——物理发送唯一归 internal/transport（llmgw 经装配注入的
-     Sender=transport.NewHTTPClient；notify 直接以 transport.HTTPClient
-     为发送器）。业务模块直持 http.Client = 第二个不受控出口。
+  4. （ADR-015 出口纪律）llmgw、notify 与 connector 为纯逻辑层：生产代码
+     禁止 import net/http——物理发送唯一归 internal/transport（llmgw 经装配
+     注入的 Sender=transport.NewHTTPClient；notify 直接以 transport.HTTPClient
+     为发送器；connector 的 azure/prometheus 数据源拉取同挂 transport，
+     二期池波三迁移删除了旧的裸 http.Client 注入兜底）。业务模块直持
+     http.Client = 第二个不受控出口。
 
 用法：python scripts/check_module_boundaries.py [项目根目录]
 退出码：0=通过；1=存在违例。
@@ -27,8 +29,8 @@ from pathlib import Path
 
 IMPORT_RE = re.compile(r'^\s*(?:import\s+)?(?:[_\w]+(?:\.[_\w]+)*\s+)?"(opscopilot/[^"]+)"')
 STDLIB_NETHTTP_RE = re.compile(r'^\s*(?:import\s+)?(?:[_\w]+(?:\.[_\w]+)*\s+)?"net/http"')
-# 出口模块（生产码禁 net/http）：LLM 协议层与通知投递层。
-NO_SOCKET_MODULES = ("llmgw", "notify")
+# 出口模块（生产码禁 net/http）：LLM 协议层、通知投递层、数据源连接器层。
+NO_SOCKET_MODULES = ("llmgw", "notify", "connector")
 ALLOWED_SHARED = ("opscopilot/internal/contracts", "opscopilot/pkg")
 
 
@@ -55,8 +57,8 @@ def check(root: Path) -> list[str]:
 
         mod = module_name(go_file, internal_root)
         text = go_file.read_text(encoding="utf-8")
-        # 规则 4（ADR-015）：出口模块（llmgw/notify）生产码禁 import net/http，
-        # 物理发送唯一归 internal/transport。
+        # 规则 4（ADR-015 出口纪律）：出口模块（llmgw/notify/connector）生产码
+        # import net/http 必须被抓到，物理发送唯一归 internal/transport。
         if mod in NO_SOCKET_MODULES and not go_file.name.endswith("_test.go"):
             for line in text.splitlines():
                 if STDLIB_NETHTTP_RE.match(line):
@@ -115,10 +117,11 @@ def selftest() -> int:
             if actual != expected:
                 failed += 1
             print(f"  [{status}] {name}")
-        # 规则 4（ADR-015 出口纪律）：出口模块（llmgw/notify）生产码 import
-        # net/http 必须被抓到；测试文件与"不 import net/http"的生产码放行。
+        # 规则 4（ADR-015 出口纪律）：出口模块（llmgw/notify/connector）生产码
+        # import net/http 必须被抓到；测试文件与"不 import net/http"的生产码放行。
+        # connector 为波三出口迁移新纳入名单——三模块同构校验，防规则名单静默失效。
         rule4 = []
-        for m in ("llmgw", "notify"):
+        for m in ("llmgw", "notify", "connector"):
             rule4 += [
                 (f"{m} 生产码 import net/http 应被抓到", m, "sample.go",
                  f'package {m}\n\nimport (\n\t"net/http"\n\t"strings"\n)\n\nvar _ = strings.TrimSpace\nvar _ = http.MethodPost\n', 1),

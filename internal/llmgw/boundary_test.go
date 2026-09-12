@@ -131,9 +131,11 @@ func TestLLMGwImportedByCmdOnly(t *testing.T) {
 	}
 }
 
-// TestTransportHTTPClientConstructionPoints transport.NewHTTPClient（物理
-// 发送件）的构造点全仓锁定在三个合法位置：cmd 装配（llmgw 的 Sender 注入）、
-// internal/notify（渠道投递，白名单出口消费者）、internal/transport 本包。
+// TestTransportHTTPClientConstructionPoints transport.NewHTTPClient /
+// NewHTTPClientLimit（物理发送件的两种构造形态）的构造点全仓锁定在四类合法位置：
+// cmd 装配（llmgw 的 Sender 注入）、
+// internal/notify（渠道投递，白名单出口消费者）、internal/connector
+// （数据源拉取，波三出口迁移的白名单消费者）、internal/transport 本包。
 // 别处出现 = 有人绕开统一出口私搭发送路径。
 func TestTransportHTTPClientIsOnlySender(t *testing.T) {
 	root := repoRoot(t)
@@ -143,14 +145,16 @@ func TestTransportHTTPClientIsOnlySender(t *testing.T) {
 			return // 规则只锁生产代码（本测试文件自身就含被扫描字面量）
 		}
 		r := rel(t, root, path)
-		if strings.HasPrefix(r, "internal/transport/") || strings.HasPrefix(r, "internal/notify/") || strings.HasPrefix(r, "cmd/") {
+		if strings.HasPrefix(r, "internal/transport/") || strings.HasPrefix(r, "internal/notify/") ||
+			strings.HasPrefix(r, "internal/connector/") || strings.HasPrefix(r, "cmd/") {
 			return
 		}
-		if strings.Contains(string(src), "transport.NewHTTPClient(") {
+		if strings.Contains(string(src), "transport.NewHTTPClient(") ||
+			strings.Contains(string(src), "transport.NewHTTPClientLimit(") {
 			hits = append(hits, r)
 		}
 	})
 	if len(hits) > 0 {
-		t.Fatalf("transport.NewHTTPClient 在合法构造点（cmd 装配 / notify）之外被构造：%v", hits)
+		t.Fatalf("transport.NewHTTPClient 在合法构造点（cmd 装配 / notify / connector）之外被构造：%v", hits)
 	}
 }
