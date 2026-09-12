@@ -6,6 +6,10 @@
 //
 // #2 配置收敛：本文件不再 os.Getenv——OPS_NOISE_* 的读取、默认值与非法值
 // fail-fast 统一在 internal/config.Load；这里只消费解析好的 config.NoiseSection。
+//
+// TODO(#9 巨型文件拆分)：本文件 ~597 行仍偏大，但 NoiseEngine 结构与
+// ProcessAlerts 落库/Gate 分支高度内聚（锁边界纪律贯穿全文），机械切分收益
+// 低于风险，本轮暂不拆，留待后续按"引擎构造/落库路径/Gate 路径"评估收口。
 package main
 
 import (
