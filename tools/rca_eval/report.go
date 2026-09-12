@@ -78,7 +78,14 @@ func renderReport(s summary, units []unit, g *goldenDoc, ab *answerbook, noLLM b
 	fmt.Fprintf(&b, "| 证据完整率 | %.0f%%（%d/%d） |\n", s.EvidenceRate*100, s.EvidenceOK, s.UnitsCompleted)
 	fmt.Fprintf(&b, "| 静默守护（防误报） | %d/%d 通过 |\n", s.GuardsPass, s.GuardsTotal)
 	fmt.Fprintf(&b, "| GET /rca 延迟 P50/P95 | %dms / %dms |\n", s.RCAHTTPMS.P50, s.RCAHTTPMS.P95)
-	fmt.Fprintf(&b, "| 出口判定 | %s |\n\n", map[bool]string{true: "PASS", false: "FAIL（基线如实暴露，见 §5）"}[s.GatePassed])
+	fmt.Fprintf(&b, "| 出口判定 | %s |\n", map[bool]string{true: "PASS", false: "FAIL（基线如实暴露，见 §5）"}[s.GatePassed])
+	if !noLLM {
+		p := s.Promotion
+		fmt.Fprintf(&b, "| **§7 转正三门禁** | G1 %d/%d=%.0f%% ∧ G2 %d/%d ∧ G3 fail=%d suspect=%d → **%s** |\n",
+			p.G1Hits, p.G1Total, p.G1Rate*100, p.G2Pass, p.G2Total, p.G3Fail, p.G3Suspect,
+			map[bool]string{true: "PASS 可转正", false: "FAIL 不得转正"}[p.Pass])
+	}
+	b.WriteString("\n")
 
 	b.WriteString("## 1. 管线与口径\n\n")
 	b.WriteString("```\ngolden 段起点前注入变更(POST /api/v1/changes, occurred_at 钉在段前)\n" +
@@ -156,25 +163,74 @@ func renderReport(s summary, units []unit, g *goldenDoc, ab *answerbook, noLLM b
 	b.WriteString("  探测保留为回归防线：本轮 findings 再出现跨 run 泄漏即过滤失守/回滚，转正前必须查。\n\n")
 
 	b.WriteString("## 6. ≥85% 转正门禁（W12）\n\n")
-	fmt.Fprintf(&b, "- 门禁语义：**LLM 对外转正**要求带 LLM 结论的评测集准确率 ≥%0.f%%（二期池文档 / ADR-015）。\n", s.Threshold*100)
+	fmt.Fprintf(&b, "- 门禁语义：**LLM 对外转正**要求带 LLM 结论的评测集准确率 ≥%0.f%%（二期池文档 / ADR-015），\n", s.Threshold*100)
+	fmt.Fprintf(&b, "  完整判定见 §7 三门禁（G1 归因不回退 ∧ G2 结论产出 ∧ G3 结论-证据一致性）。\n")
 	if noLLM {
 		b.WriteString("- 本轮为**证据版基线**（本机 LLM 未配置，`--no-llm` 跑分并在报告标注）：conclude 恒 pending、\n")
 		b.WriteString("  conclusion=null 属预期正确形态；**转正判定不适用本轮**。\n")
 		fmt.Fprintf(&b, "- 规则链参考读数：top-1 %.0f%% / top-3 %.0f%%（%.0f%% 线）——证据链与归因排序先行达标，\n",
 			s.Top1Rate*100, s.Top3Rate*100, s.Threshold*100)
-		b.WriteString("  LLM 接线后同集重跑（`--no-llm=false` + OPS_LLM_*）才是转正证据。\n")
+		b.WriteString("  LLM 接线后同集重跑（`run_rca_eval.sh --with-llm` + .env 配 OPS_LLM_*）才是转正证据。\n")
 	} else {
 		fmt.Fprintf(&b, "- 本轮带 LLM 跑分：top-1 %.0f%% → %s。\n", s.Top1Rate*100,
-			map[bool]string{true: "达门禁线", false: "未达门禁线，不得转正"}[s.GatePassed])
+			map[bool]string{true: "达门禁线", false: "未达门禁线，不得转正"}[s.Promotion.G1Pass])
 	}
-	b.WriteString("\n## 7. golden 维护协议\n\n")
+	b.WriteString("\n## 7. §转正判定（W12 · LLM 三门禁）\n\n")
+	if noLLM {
+		b.WriteString("**本轮不适用**——证据版基线（`--no-llm`）：LLM 未接线，conclude 恒 pending 是预期形态，\n" +
+			"三门禁无任何一分可判；转正判定只在带 LLM 跑分（`--with-llm`）时生效。\n\n")
+	} else {
+		p := s.Promotion
+		mark := func(ok bool) string { return map[bool]string{true: "✅ PASS", false: "❌ FAIL"}[ok] }
+		b.WriteString("三门禁各自独立计数（G1/G2 分母 = 全部 RCA 计划单元——未跑通的单元在分母里挂账，" +
+			"不存在\"报错即出局\"刷通过率的通道）：\n\n")
+		fmt.Fprintf(&b, "| 门禁 | 定义 | 读数 | 判定 |\n|---|---|---|---|\n")
+		fmt.Fprintf(&b, "| **G1 归因不回退** | LLM 只改写叙述，root_causes top1 仍须命中 golden | %d/%d = %.0f%%（线 %.0f%%） | %s |\n",
+			p.G1Hits, p.G1Total, p.G1Rate*100, p.Threshold*100, mark(p.G1Pass))
+		fmt.Fprintf(&b, "| **G2 结论产出** | llm_used=true ∧ conclusion 非空 ∧ steps[conclude]=done（配了 LLM 就必须出结论） | %d/%d（须 100%%） | %s |\n",
+			p.G2Pass, p.G2Total, mark(p.G2Pass_))
+		fmt.Fprintf(&b, "| **G3 结论-证据一致性**（启发式，不接第二个 LLM 当裁判） | 矛盾话术（证据不足/待定/pending…）= 硬性失败；conclusion 去分隔符折大小写后须含首要 root_cause 锚点（ref 或 node_key），未命中仅入存疑清单人工终审 | pass %d / suspect %d / **fail %d**（须 0） | %s |\n",
+			p.G3Pass, p.G3Suspect, p.G3Fail, mark(p.G3Pass_))
+		b.WriteString("\n")
+		if len(p.G2Fails) > 0 {
+			b.WriteString("**G2 缺项明细**：\n\n| 段 | 单元 | status | 缺项 |\n|---|---|---|---|\n")
+			for _, g := range p.G2Fails {
+				fmt.Fprintf(&b, "| %s | %s | %s | %v |\n", g.SegCode, g.ClusterID, g.Status, g.Missing)
+			}
+			b.WriteString("\n")
+		}
+		if len(p.HardFails) > 0 {
+			b.WriteString("**G3 硬性失败（一票否决转正）**：\n\n| 段 | 单元 | ref | 命中话术 | conclusion 摘要 |\n|---|---|---|---|---|\n")
+			for _, h := range p.HardFails {
+				fmt.Fprintf(&b, "| %s | %s | %s | %v | %s |\n", h.SegCode, h.ClusterID, h.Ref, h.Phrases, h.Conclusion)
+			}
+			b.WriteString("\n")
+		}
+		if len(p.Suspects) > 0 {
+			b.WriteString("**G3 存疑清单（锚点未命中、无矛盾话术——不自动判死，人工终审）**：\n\n" +
+				"| 段 | 单元 | 首要 root_cause ref | 期望锚点 | conclusion 摘要 | 终审 |\n|---|---|---|---|---|---|\n")
+			for _, su := range p.Suspects {
+				fmt.Fprintf(&b, "| %s | %s | %s | %v | %s | ☐ |\n",
+					su.SegCode, su.ClusterID, su.Ref, su.Anchors, su.Conclusion)
+			}
+			b.WriteString("\n存疑 ≠ 失败：启发式只保证\"结论提到了被归因的变更/节点\"，语义对错由上表逐条人核。\n\n")
+		} else {
+			b.WriteString("G3 存疑清单：空（所有结论都锚点命中）。\n\n")
+		}
+		for _, n := range p.GuardNotes {
+			b.WriteString("- 否决项：" + n + "\n")
+		}
+		fmt.Fprintf(&b, "**总判定：%s**（规则：G1 ≥%.0f%% ∧ G2 100%% ∧ G3 无硬性失败 ∧ 静默守护全过）\n\n",
+			map[bool]string{true: "PASS——可转正", false: "FAIL——不得转正"}[p.Pass], p.Threshold*100)
+	}
+	b.WriteString("## 8. golden 维护协议\n\n")
 	for _, m := range g.Maintenance {
 		b.WriteString("- " + m + "\n")
 	}
 	b.WriteString("- promFingerprint 算法双定义：`tools/rca_eval/main.go` 与\n")
 	b.WriteString("  `cmd/opscopilot/pull_alerts.go`——改标签构成时以 INCIDENT_MISS 暴露，两处必须同步。\n\n")
 
-	b.WriteString("## 8. 复跑\n\n```\nbash scripts/run_rca_eval.sh              # 默认证据版基线（--no-llm, scale=0.1）\nbash scripts/run_rca_eval.sh --llm           # LLM 接线后的转正跑分\nbash scripts/run_rca_eval.sh stop            # 清理残留进程（pidfile 兜底）\n```\n")
+	b.WriteString("## 9. 复跑\n\n```\nbash scripts/run_rca_eval.sh                    # 默认证据版基线（--no-llm, scale=0.1）\nbash scripts/run_rca_eval.sh --with-llm         # LLM 转正跑分（OPS_LLM_* 配在 .env，未配置拒跑不降级）\nbash scripts/run_rca_eval.sh stop               # 清理残留进程（pidfile 兜底）\n```\n")
 	return b.String()
 }
 
@@ -200,6 +256,12 @@ func printConsole(s summary, units []unit) {
 	}
 	fmt.Printf("top1=%.0f%% top3=%.0f%% evidence=%.0f%% guards=%d/%d gate=%v\n",
 		s.Top1Rate*100, s.Top3Rate*100, s.EvidenceRate*100, s.GuardsPass, s.GuardsTotal, s.GatePassed)
+	if s.Promotion.Applicable {
+		p := s.Promotion
+		fmt.Printf("§转正判定 G1 %d/%d=%.0f%%(≥%.0f%%) G2 %d/%d(=100%%) G3 fail=%d suspect=%d → %s\n",
+			p.G1Hits, p.G1Total, p.G1Rate*100, p.Threshold*100, p.G2Pass, p.G2Total, p.G3Fail, p.G3Suspect,
+			map[bool]string{true: "PASS 可转正", false: "FAIL 不得转正"}[p.Pass])
+	}
 	for _, f := range s.Findings {
 		fmt.Println("FINDING:", f)
 	}

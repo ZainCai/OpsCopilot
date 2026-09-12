@@ -26,6 +26,20 @@
 //	⑤ 产出：逐评测单元 JSONL + 汇总（命中率、延迟分布、证据完整率）+
 //	  report.md（含 ≥85% 转正门禁章节；--no-llm 证据版基线在报告中显式标注）。
 //
+// W12 LLM 转正三门禁（gates.go；仅 LLM 模式即 --no-llm=false 时判定，
+// 三道各自独立计数、报告 §7 分节呈现）：
+//
+//	G1 归因不回退：LLM 只改写叙述不动规则链归因——root_causes top1 仍命中
+//	   golden，全单元分母、≥阈值（85%）；
+//	G2 结论产出：llm_used=true ∧ conclusion 非空 ∧ steps[conclude]=done，
+//	   配置了 LLM 就必须出结论 → 100% 硬线；
+//	G3 结论-证据一致性（启发式，不接第二个 LLM 当裁判）：矛盾话术（证据
+//	   不足/待定/pending…）= 硬性失败一票否决；conclusion 归一化（去分隔
+//	   符、折大小写）后必须包含首要 root_cause 的锚点（ref 或其 node_key），
+//	   未命中不判死、进"存疑清单"（conclusion 摘要 + ref）人工终审。
+//
+//	总判定：G1 ≥85% ∧ G2 100% ∧ G3 无硬性失败 ∧ 静默守护全过 → PASS=可转正。
+//
 // C（静默）段不产事件 → 转为"防误报守护"：段窗内影子判决必须为 0、
 // 不得新建本剧本之外的 Incident。
 //
@@ -204,6 +218,15 @@ type unit struct {
 	AuditPresent     bool   `json:"audit_present"`
 	LLMUsed          bool   `json:"llm_used"`
 
+	// LLM 转正三门禁（gates.go）：G2 看 Conclusion/ConcludeDone/LLMUsed，
+	// G3 看 G3Status（fail=矛盾话术硬失败，suspect=进存疑清单人工终审）。
+	Conclusion   string   `json:"conclusion,omitempty"` // 全文（判分用）；报告只回显摘要
+	ConcludeDone bool     `json:"conclude_done"`
+	G3Anchors    []string `json:"g3_anchors,omitempty"`
+	G3Status     string   `json:"g3_status,omitempty"` // pass | suspect | fail | ""(无结论)
+	G3Matched    string   `json:"g3_matched,omitempty"`
+	G3Phrases    []string `json:"g3_phrases,omitempty"`
+
 	DetectLagMS     int64 `json:"detect_lag_ms"`     // T0 - 段起点（告警→成单可见延迟）
 	RCAHTTPMS       int64 `json:"rca_http_ms"`       // GET /rca 端到端
 	AuditDurationMS int64 `json:"audit_duration_ms"` // 审计 detail.duration_ms（编排层耗时）
@@ -240,6 +263,8 @@ type summary struct {
 	AuditDurMS  quantiles `json:"audit_duration_ms"`
 	Findings    []string  `json:"findings"`
 	GatePassed  bool      `json:"gate_passed"`
+	// LLM 转正三门禁（--no-llm 时 Applicable=false，仅 LLM 模式承载转正判定）。
+	Promotion promotion `json:"promotion"`
 }
 
 type quantiles struct {
@@ -278,7 +303,7 @@ func main() {
 		goldenP = flag.String("golden", "tools/rca_eval/golden.json", "golden 定义文件")
 		outDir  = flag.String("out-dir", ".rca-eval", "JSONL/summary 产物目录（.gitignore 已覆盖）")
 		repDir  = flag.String("report-dir", "", "report.md 输出目录（空 = 不写，只出控制台与 JSONL）")
-		noLLM   = flag.Bool("no-llm", true, "证据版基线：断言 conclude pending / llm_used=false（LLM 未接线的转正前形态）")
+		noLLM   = flag.Bool("no-llm", true, "true=证据版基线（断言 conclude pending / llm_used=false）；false=LLM 模式，启用 G1/G2/G3 转正三门禁（gates.go）")
 		thr     = flag.Float64("threshold", 0.85, "W12 转正门禁线（作用于 top1 命中率；证据版基线跑分时仅作参考并如实报告）")
 		lead    = flag.Duration("inject-lead", 6*time.Second, "段起点前多少秒注入变更")
 		grace   = flag.Duration("incident-grace", 40*time.Second, "周期结束后等待成单落库的宽限（阶段 2 起始门槛）")
@@ -568,7 +593,15 @@ WHERE tenant_id=$1 AND fingerprint=$2 AND occurred_at >= $3 AND occurred_at < $4
 			u.RootConfidence = append(u.RootConfidence, rc.Confidence)
 		}
 		u.StepsDone, u.StepsPending, u.StepsFailed = countSteps(rr)
-		u.LLMUsed = rr.LLMUsed
+		// LLM 三门禁字段（G1 复用上面 Top1；这里填 G2/G3 输入）。
+		myPrefix := "chg-" + runSuffix + "-"
+		logicalNode := map[string]string{}
+		for _, c := range seg.Changes {
+			if c.Node != "" {
+				logicalNode[c.LogicalID] = "prometheus://nodes/" + c.Node
+			}
+		}
+		hydrateUnit(&u, &rr, myPrefix, logicalNode)
 		if len(u.RootRefs) > 0 && u.RootRefs[0] == u.ExpectedChange {
 			u.Top1 = true
 		}
@@ -580,7 +613,6 @@ WHERE tenant_id=$1 AND fingerprint=$2 AND occurred_at >= $3 AND occurred_at < $4
 		}
 		// 跨 run 变更证据泄漏回归探测（回放已按装配租户过滤——change_pg.go
 		// LoadSince，见 unit 字段注释）——top1 判定与此无关，非空即响亮记账。
-		myPrefix := "chg-" + runSuffix + "-"
 		for _, r := range u.RootRefs {
 			if !strings.HasPrefix(r, myPrefix) {
 				u.ForeignRefs = append(u.ForeignRefs, r)
@@ -730,8 +762,29 @@ func buildSummary(units []unit, runID, tenant string, noLLM bool, thr float64) s
 	s.DetectLagMS = computeQuantiles(lags)
 	s.RCAHTTPMS = computeQuantiles(https)
 	s.AuditDurMS = computeQuantiles(durs)
-	s.GatePassed = s.UnitsTotal > 0 && s.UnitsTotal == s.UnitsCompleted &&
-		s.Top1Rate >= s.Threshold && s.GuardsTotal == s.GuardsPass
+	s.Promotion = evalPromotion(units, noLLM, thr, s.GuardsTotal, s.GuardsPass)
+	if noLLM {
+		// 证据版基线：规则链参考读数 + 守护，转正判定不适用（报告 §7 明示）。
+		s.GatePassed = s.UnitsTotal > 0 && s.UnitsTotal == s.UnitsCompleted &&
+			s.Top1Rate >= s.Threshold && s.GuardsTotal == s.GuardsPass
+	} else {
+		// LLM 模式：总判定 = 三门禁（G1 全单元 ≥阈值 ∧ G2 100% ∧ G3 无硬性
+		// 失败）∧ 静默守护全过。未跑通的单元在 G1/G2 分母里挂账，不存在
+		//"从分母消失刷通过率"的通道。
+		s.GatePassed = s.UnitsTotal > 0 && s.Promotion.Pass
+		for _, g := range s.Promotion.G2Fails {
+			s.Findings = append(s.Findings, fmt.Sprintf("G2 结论产出 FAIL（%s/%s，status=%s）：缺 %v",
+				g.SegCode, g.ClusterID, g.Status, g.Missing))
+		}
+		for _, h := range s.Promotion.HardFails {
+			s.Findings = append(s.Findings, fmt.Sprintf("G3 硬性失败（%s/%s，ref=%s）：conclusion 出现矛盾话术 %v——%q",
+				h.SegCode, h.ClusterID, h.Ref, h.Phrases, truncateRunes(h.Conclusion, 120)))
+		}
+		for _, su := range s.Promotion.Suspects {
+			s.Findings = append(s.Findings, fmt.Sprintf("G3 存疑（%s/%s，ref=%s）：锚点未命中，进 §7 存疑清单人工终审",
+				su.SegCode, su.ClusterID, su.Ref))
+		}
+	}
 	return s
 }
 
