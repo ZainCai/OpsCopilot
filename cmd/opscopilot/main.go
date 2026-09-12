@@ -291,6 +291,9 @@ func main() {
 	} else {
 		logger.Printf("  noise: shadow (alerts annotated, NOT suppressed; window %s)", cfg.Noise.Window)
 	}
+	if cfg.Noise.AutoAttach {
+		logger.Printf("  noise autoattach: ON (W10-6 enforce new-incident → 建单+挂簇+attach_cluster 审计; 结果看 opscopilot_autoattach_total{outcome})")
+	}
 	if asm.Ingest != nil {
 		logger.Printf("  ingest: ON (POST /api/v1/ingest/{alertmanager,webhook}; auto-create %s)",
 			onOffLabel(cfg.Ingest.AutoCreate))

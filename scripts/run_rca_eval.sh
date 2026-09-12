@@ -3,9 +3,11 @@
 #
 # 流程（编排范式抄 scripts/run_demo.sh + tools/evaluate.py 的门禁语义）：
 #   compose 起栈 → build faultinjector/opscopilot/rca_eval → run_demo 式启动
-#   （注入器 + 被测 app，独立租户、加速节拍）→ 跑 rca_eval（默认 --no-llm
-#   证据版基线）→ 出 docs/reviews/rca-eval-<date>/report.md（含 ≥85% 转正
-#   门禁章节）→ 退出前杀干净本次拉起的进程。
+#   （注入器 + 被测 app，独立租户、加速节拍；W10-6 起评测接线走生产挂簇路径
+#   OPS_NOISE_MODE=enforce + OPS_AUTOATTACH=on，评测器不再直写 incident_cluster
+#   桥接——除非被测 app 未开开关，note 会显式标注回退）→ 跑 rca_eval
+#   （默认 --no-llm 证据版基线）→ 出 docs/reviews/rca-eval-<date>/report.md
+#   （含 ≥85% 转正门禁章节）→ 退出前杀干净本次拉起的进程。
 #
 # 用法：
 #   bash scripts/run_rca_eval.sh                # 证据版基线（LLM 未配即此形态）
@@ -137,7 +139,7 @@ nohup "$OUT/faultinjector.exe" -addr 127.0.0.1:19090 -scale "$SCALE" -warmup "$W
   > "$OUT/injector.log" 2>&1 &
 echo $! >> "$PIDFILE"
 
-echo "starting opscopilot (eval wiring: pull+autocreate on, 10s 节拍, 25s 噪声窗)..."
+echo "starting opscopilot (eval wiring: pull+autocreate on, enforce+autoattach on [W10-6 生产挂簇路径], 10s 节拍, 25s 噪声窗)..."
 start_app() {
   REDIS_ALERT_ADDR=127.0.0.1:6380 \
   REDIS_CACHE_ADDR=127.0.0.1:6381 \
@@ -147,6 +149,7 @@ start_app() {
   OPS_DB_DSN="$DSN" \
   OPS_LISTEN_ADDR=127.0.0.1:8080 \
   OPS_PULL_ALERTS=on OPS_INCIDENT_AUTOCREATE=on \
+  OPS_NOISE_MODE=enforce OPS_AUTOATTACH=on \
   OPS_CONNECTOR_INTERVAL=10s OPS_PULL_INTERVAL=10s \
   OPS_NOISE_WINDOW=25s \
   OPS_RCA=on \

@@ -134,6 +134,13 @@ type NoiseSection struct {
 	Enabled bool          // OPS_NOISE_SHADOW=off 整体关闭（默认开）
 	Window  time.Duration // OPS_NOISE_WINDOW 去重/聚类窗，默认 10m
 	Mode    string        // OPS_NOISE_MODE：shadow（默认）| enforce；非法启动失败
+	// AutoAttach W10-6 簇→事件生产自动挂簇（OPS_AUTOATTACH，默认 off）：
+	// enforce 判决 new-incident（成簇即建单阈值）联动 UpsertExternal 建单 +
+	// AttachCluster 挂簇 + attach_cluster 审计。挂点在 enforce 判决出口，
+	// shadow 下永不触发——Validate 强制 on ⇒ 降噪启用且 enforce（配置矛盾
+	// fail-fast，同款 OPS_RCA_AUTO/OPS_SESSION）。与 OPS_INCIDENT_AUTOCREATE
+	// 无硬依赖（不同链路写库同走 (origin,source_ref) 幂等键，天然收敛一单）。
+	AutoAttach bool
 	// DedupWindow L2 事件相似度的时间邻近窗口（原 cmd 常量 dedupWindow，
 	// #10 魔法数字）。归入降噪组：与告警去重同一语义。
 	DedupWindow time.Duration // OPS_DEDUP_WINDOW，默认 30m
@@ -351,6 +358,13 @@ func (c *Config) Validate() error {
 	if c.Session.Enabled && !c.RCA.Enabled {
 		return fmt.Errorf("%s=on requires %s=on (the review session embeds RCA findings in every assistant prompt; the orchestrator is not wired when RCA is off)", EnvSessionEnabled, EnvRCAEnabled)
 	}
+	// W10-6 自动挂簇（OPS_AUTOATTACH）：挂点在 enforce 判决 new-incident
+	// 联动路径——shadow/降噪关闭时永远不触发，"配了开关却静默无效"是配置
+	// 矛盾，同款 OPS_RCA_AUTO/OPS_SESSION 的 fail-fast 纪律。
+	if c.Noise.AutoAttach && !(c.Noise.Enabled && c.Noise.Mode == NoiseModeEnforce) {
+		return fmt.Errorf("%s=on requires %s=on and %s=enforce (auto attach hooks the enforce new-incident path; it would silently never fire otherwise)",
+			EnvAutoAttach, EnvNoiseShadow, EnvNoiseMode)
+	}
 	if err := c.validateLLM(); err != nil {
 		return err
 	}
@@ -440,6 +454,11 @@ const (
 	// Noise 模式枚举。
 	NoiseModeShadow  = "shadow"
 	NoiseModeEnforce = "enforce"
+
+	// DefaultAutoAttach W10-6 簇→事件自动挂簇（OPS_AUTOATTACH）默认 off——
+	// 新增"判决→建单+挂簇+审计"副作用面，显式开启才生效（off 零行为变化，
+	// 与 OPS_RCA_AUTO/OPS_SESSION 同款默认取向）。
+	DefaultAutoAttach = false
 
 	DefaultPullInterval = 30 * time.Second
 
@@ -541,6 +560,7 @@ func Defaults() *Config {
 	c.Noise.Enabled = true
 	c.Noise.Window = DefaultNoiseWindow
 	c.Noise.Mode = NoiseModeShadow
+	c.Noise.AutoAttach = DefaultAutoAttach
 	c.Noise.DedupWindow = DefaultDedupWindow
 	c.Noise.SinkQueue = DefaultNoiseSinkQueue
 	c.Noise.SinkBatch = DefaultNoiseSinkBatch

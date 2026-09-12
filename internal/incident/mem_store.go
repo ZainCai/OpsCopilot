@@ -136,7 +136,7 @@ func (s *MemStore) AttachCluster(id, clusterKey string) error {
 		return ErrNotFound
 	}
 	if prev, taken := s.byCluster[clusterKey]; taken && prev != id {
-		return fmt.Errorf("incident: cluster %q already attached to %q", clusterKey, prev)
+		return &ClusterTakenError{ClusterKey: clusterKey, Owner: prev}
 	}
 	for _, k := range inc.ClusterKeys {
 		if k == clusterKey {

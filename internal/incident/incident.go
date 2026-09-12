@@ -75,6 +75,24 @@ func CanTransition(from, to State) bool {
 // ErrNotFound 事件不存在。
 var ErrNotFound = errors.New("incident not found")
 
+// ErrClusterTaken 簇已被另一事件挂走的哨兵根因（一簇一事件唯一约束，
+// idx_incident_cluster_unique）。W10-6 生产自动挂簇（OPS_AUTOATTACH）用
+// errors.Is(err, ErrClusterTaken) 区分"共簇冲突→跳过并计数"与真实存储
+// 故障——多指纹共簇仅首单持故障域，冲突不是错误，绝不级联上抛。
+var ErrClusterTaken = errors.New("incident: cluster already attached")
+
+// ClusterTakenError 冲突详情（簇键 + 现主事件）。Error() 文本与历史裸
+// fmt.Errorf 逐字节一致（有调用方按整串消息断言），errors.Is 经 Unwrap
+// 命中 ErrClusterTaken。
+type ClusterTakenError struct{ ClusterKey, Owner string }
+
+func (e *ClusterTakenError) Error() string {
+	return fmt.Sprintf("incident: cluster %q already attached to %q", e.ClusterKey, e.Owner)
+}
+
+// Unwrap 挂上哨兵，供 errors.Is(err, ErrClusterTaken) 判定。
+func (e *ClusterTakenError) Unwrap() error { return ErrClusterTaken }
+
 // ErrInvalidTransition 非法状态转换（宁可报错，不静默改状态）。
 type ErrInvalidTransition struct{ From, To State }
 
@@ -152,6 +170,9 @@ type Store interface {
 	Create(id, title, severity, createdBy string) (*Incident, error)
 	Get(id string) (Incident, error)
 	Transition(id string, to State, actor string) (Incident, error)
+	// AttachCluster 簇→事件关联。语义：重复挂同簇同单幂等（不产生副本、
+	// 不覆盖首挂）；簇已被他单占用返回可被 errors.Is(err, ErrClusterTaken)
+	// 判定的冲突（W10-6 自动挂簇据此"跳过并计数"，不当故障上抛）。
 	AttachCluster(id, clusterKey string) error
 	List(state State) ([]Incident, error)
 	// ListPage 分页读取事件（D4 决策 A：游标分页，按创建时间倒序=最新优先）。

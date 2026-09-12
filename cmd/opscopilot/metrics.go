@@ -108,6 +108,14 @@ type AppMetrics struct {
 	SessionLLMRequests map[string]*metrics.Counter
 	// SessionLLMDuration 复盘会话单次 chat 耗时。桶/维度纪律与 LLMRequests 同款。
 	SessionLLMDuration *metrics.Histogram
+	// AutoAttach W10-6 簇→事件生产自动挂簇（OPS_AUTOATTACH，enforce 判决
+	// new-incident 联动）结果分桶（固定维度，编译期确定）：
+	//   attached = 建单/刷新 + 挂簇成功（审计 attach_cluster 已落）；
+	//   conflict = 一簇一事件唯一索引下簇已被他单占用 → 跳过（多指纹共簇
+	//              仅首单持故障域，冲突是常态不是故障，不计 skipped）；
+	//   skipped  = 建单/挂簇 IO 异常或 labels 缺失算不出幂等键（异常面，
+	//              伴 WARNING 与 attachFailures 累计）。
+	AutoAttach map[string]*metrics.Counter
 }
 
 // latencyStages 延迟观测的两种阶段（跳过计数器的固定维度集合）。
@@ -119,6 +127,9 @@ var rcaOutcomes = []string{"ok", "error"}
 // llmOutcomes llm-gateway 请求计数固定维度：timeout 单列（超时预算的
 // 直接观测面），其余失败（非 200/坏 JSON/空结论/传输错）归 error。
 var llmOutcomes = []string{"ok", "timeout", "error"}
+
+// autoAttachOutcomes W10-6 自动挂簇计数的固定维度集合（见字段注释）。
+var autoAttachOutcomes = []string{"attached", "conflict", "skipped"}
 
 // llmBuckets LLM 请求耗时桶（秒）。8s（OPS_LLM_TIMEOUT 默认）两侧都留
 // 观测精度，30s +Inf 兜住病态慢网关。
@@ -158,6 +169,7 @@ func NewAppMetrics() *AppMetrics {
 		RCARequests:        make(map[string]*metrics.Counter, len(rcaOutcomes)),
 		LLMRequests:        make(map[string]*metrics.Counter, len(llmOutcomes)),
 		SessionLLMRequests: make(map[string]*metrics.Counter, len(llmOutcomes)),
+		AutoAttach:         make(map[string]*metrics.Counter, len(autoAttachOutcomes)),
 		RCADuration: reg.Histogram("opscopilot_rca_duration_seconds",
 			"On-demand RCA analysis latency (evidence collection + six-step pipeline), outcome-agnostic", nil, rcaBuckets, latencyWindow),
 		LLMDuration: reg.Histogram("opscopilot_llm_duration_seconds",
@@ -190,6 +202,10 @@ func NewAppMetrics() *AppMetrics {
 	for _, s := range latencyStages {
 		m.LatencySkipped[s] = reg.Counter("opscopilot_alert_latency_skipped_total",
 			"Alerts excluded from latency observation because the source provided no fired time", metrics.LabelSet{"stage": s})
+	}
+	for _, s := range autoAttachOutcomes {
+		m.AutoAttach[s] = reg.Counter("opscopilot_autoattach_total",
+			"Cluster-to-incident auto-attach attempts (OPS_AUTOATTACH, enforce new-incident path) by outcome: attached = incident upserted + cluster attached (audited); conflict = one-cluster-one-incident unique index owned by another incident, skipped by design (first ticket holds the fault domain); skipped = create/attach failure or no labels to derive source_ref", metrics.LabelSet{"outcome": s})
 	}
 	return m
 }
@@ -308,6 +324,20 @@ func (m *AppMetrics) CountRCATriggerDrop() {
 		return
 	}
 	m.RCATriggerDropped.Inc()
+}
+
+// CountAutoAttach 记一次 W10-6 自动挂簇结果（outcome = attached|conflict|
+// skipped；未知归 skipped 兜底——忘了归类时宁可高估异常面，对齐 CountVerdict
+// 纪律；nil 安全：指标缺失不得影响告警链路）。
+func (m *AppMetrics) CountAutoAttach(outcome string) {
+	if m == nil {
+		return
+	}
+	c, ok := m.AutoAttach[outcome]
+	if !ok {
+		c = m.AutoAttach["skipped"]
+	}
+	c.Inc()
 }
 
 // ObserveVerdictLatency 记录"发射 → 判决生成"延迟（口径见文件头 #8 注记）。

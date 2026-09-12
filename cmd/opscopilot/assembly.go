@@ -403,6 +403,21 @@ func NewAssembly(logger connector.Logger, cfg *config.Config) (*Assembly, error)
 	// 重启才生效——"配置改了没反应"是运维最恨的一类 bug）。
 	rest.SetChannels(asm.Channels, asm.reloadNotifyChannels)
 
+	// W10-6 簇→事件生产自动挂簇（OPS_AUTOATTACH，config.Validate 已保证
+	// on ⇒ 降噪启用且 enforce——挂点只在 enforce 判决 new-incident 出口）。
+	// 挂**装饰后**的 asm.Incidents：自动建单/挂簇同样推 SSE 给控制台。
+	// 依赖口径：与 OPS_INCIDENT_AUTOCREATE 无硬依赖（那条管链路 A 的队列
+	// 消费，本路径走判决直写；两路同开时 (origin,source_ref) 幂等键同源，
+	// 天然收敛一单）。off（默认）= 不挂载不触发，零行为变化。
+	if cfg.Noise.AutoAttach && noiseEngine != nil {
+		noiseEngine.SetAutoAttach(asm.Incidents, audit)
+		logf("noise autoattach: ON (enforce new-incident -> UpsertExternal+AttachCluster, audit attach_cluster, actor=%s; metric opscopilot_autoattach_total{outcome})", autoAttachActor)
+	} else if cfg.Noise.AutoAttach {
+		// 只可能是嵌入式装配绕过 Validate（测试直接构造 Config）——响亮
+		// WARNING 不放哑（同款"配置了却静默无效"的告警口径）。
+		logf("WARNING: OPS_AUTOATTACH=on but noise engine absent (OPS_NOISE_SHADOW=off?) — auto attach will never fire")
+	}
+
 	// W9-3 值班升级：未 ack 超时重发一次。需事件 Store（读 open）+ 通知
 	// 注册表（出口）。台账优先 PG（多实例安全），无库降级内存并告警。
 	asm.Escalation = buildEscalationPoller(cfg, asm.Incidents, asm.NotifyReg, pgPool, reg, logf)

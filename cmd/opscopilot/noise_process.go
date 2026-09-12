@@ -11,10 +11,13 @@
 package main
 
 import (
+	"errors"
 	"strconv"
+	"strings"
 	"time"
 
 	"opscopilot/internal/connector"
+	"opscopilot/internal/incident"
 	"opscopilot/internal/noise"
 	"opscopilot/internal/notify"
 )
@@ -56,6 +59,18 @@ func (n *NoiseEngine) ProcessAlerts(alerts []connector.Alert) {
 	// fired 与 verdicts 平行：告警发射时刻（零值 = 上游没给，不打点）。
 	var fired []time.Time
 	var pending []pendingDecision
+	// W10-6 自动挂簇（OPS_AUTOATTACH）：enforce 判决 new-incident（成簇即
+	// 达建单阈值）收集联动任务，锁外执行建单+挂簇 IO——与落库/Gate 同一
+	// 锁边界纪律。三重与条件缺一不可（enforce 开关 × autoAttach × 出口
+	// 已挂载），shadow 引擎零行为。
+	autoAttachOn := n.enforce && n.autoAttach && n.incStore != nil
+	var attachReqs []autoAttachRequest
+	var attachStore incident.Store
+	var attachAudit AuditLog
+	if autoAttachOn {
+		attachStore = n.incStore
+		attachAudit = n.auditLog
+	}
 	for _, a := range alerts {
 		e := n.toEvent(a, view)
 		v := n.shadow.Process(e)
@@ -77,6 +92,15 @@ func (n *NoiseEngine) ProcessAlerts(alerts []connector.Alert) {
 		}
 		if v.ClusterCreated {
 			created++
+			if autoAttachOn && v.ClusterKey != "" {
+				attachReqs = append(attachReqs, autoAttachRequest{
+					labels:      a.Labels,
+					fingerprint: v.Fingerprint,
+					clusterKey:  v.ClusterKey,
+					severity:    v.Severity,
+					summary:     v.Summary,
+				})
+			}
 		}
 		if n.enforce && n.gate != nil {
 			// enforce 模式（ADR-011）：每条判决都过闸门——
@@ -119,6 +143,11 @@ func (n *NoiseEngine) ProcessAlerts(alerts []connector.Alert) {
 	if len(pending) > 0 && gate != nil {
 		n.admitDecisions(gate, gs, pending)
 	}
+	if len(attachReqs) > 0 {
+		// W10-6：建单+挂簇放在 Gate 之后——通知是告警关键路径，事件域联动
+		// （DB 写）不得把渠道 Send 的节拍拖慢；两者优先级由调用次序表达。
+		n.autoAttachClusters(attachStore, attachAudit, attachReqs)
+	}
 }
 
 // admitDecisions enforce 模式闸门执行（锁外，与落库 IO 同一锁边界纪律：
@@ -160,6 +189,119 @@ func (n *NoiseEngine) admitDecisions(gate *notify.Gate, gs GateStatsSink, decisi
 	}
 	n.logf("enforce gate: %d decisions (admitted %d, suppressed %d) — cumulative suppressed=%d dispatched=%d",
 		len(decisions), admitted, len(decisions)-admitted, st.Suppressed, st.Dispatched)
+}
+
+// autoAttachActor W10-6 自动挂簇的建单/审计署名（人工操作永远不是这个值）。
+const autoAttachActor = "system:autoattach"
+
+// autoAttachRequest 一条 new-incident 判决的建单+挂簇联动任务（锁内收集，
+// 锁外执行）。labels 用于按链路 A 同款算法算 source_ref（见 autoAttachClusters）。
+type autoAttachRequest struct {
+	labels      map[string]string
+	fingerprint string // 降噪侧身份（审计/日志回显；非 source_ref）
+	clusterKey  string
+	severity    string
+	summary     string
+}
+
+// autoAttachClusters W10-6 簇→事件生产自动挂簇（OPS_AUTOATTACH，enforce 判决
+// new-incident 出口）：成簇即达建单阈值 → UpsertExternal 建单 + AttachCluster
+// 挂簇 + attach_cluster 审计（AuditAttachCluster 自此不再是死代码）。
+//
+// 建单幂等键与链路 A 收敛（方案《双链路事件来源》L1 口径）：
+// source_ref 用 promFingerprint(labels)——与拉取链路逐字同源的算法、同
+// origin=prometheus。同一 Prometheus 告警两链路写库天然命中同一单
+// （刷新分支共享），不会双建；labels 缺失算不出幂等键 → skipped 计数
+// （宁可不建，不造第二身份）。与 OPS_INCIDENT_AUTOCREATE 无硬依赖：
+// 该开关管链路 A 的队列消费，autoattach 走判决直写——两路都开也只是一单。
+//
+// 语义纪律（W10-6 验收）：
+//   - AttachCluster 幂等：重复挂同簇同单不产生副本、不覆盖首挂（Store 双实现
+//     契约，见 internal/incident）；
+//   - 一簇一事件唯一索引（idx_incident_cluster_unique）：簇已被他单占用
+//     （errors.Is(err, incident.ErrClusterTaken)）→ **跳过并计 conflict，
+//     不报错不级联**——多指纹共簇仅首单持故障域：后续指纹被聚类器判
+//     cluster-merge 并入首簇、不再触发挂点，其自身事件（若由链路 A 建立）
+//     无域；处置口径 = 人工 MergeInto 归并到首单（L2 只提示不自动，
+//     自动挂簇绝不抢挂/覆盖首挂）。见 docs/M2执行排期 W10-6 注记；
+//   - 三出口只计数不抛错：opscopilot_autoattach_total{outcome=
+//     attached|conflict|skipped}——skipped 兜住建单/挂簇 IO 异常与幂等键
+//     缺失（同时累计 attachFailures + WARNING），单条失败不影响批内后续，
+//     更不触碰通知链路。
+func (n *NoiseEngine) autoAttachClusters(store incident.Store, audit AuditLog, reqs []autoAttachRequest) {
+	if store == nil || len(reqs) == 0 {
+		return
+	}
+	var attached, conflict, skipped int
+	for _, r := range reqs {
+		ref := promFingerprint(r.labels)
+		if ref == "" {
+			skipped++
+			n.attachFailures.Add(1)
+			n.logf("WARNING: autoattach skipped (no labels to derive source_ref; cluster %s fp %s) — cumulative %d",
+				r.clusterKey, r.fingerprint, n.attachFailures.Load())
+			n.m.CountAutoAttach("skipped")
+			continue
+		}
+		title := strings.TrimSpace(r.summary)
+		if title == "" {
+			title = "告警新事件 " + r.fingerprint
+		}
+		inc, _, err := store.UpsertExternal(incident.OriginPrometheus, ref, title, r.severity, autoAttachActor, "{}")
+		if err != nil || inc == nil || inc.ID == "" {
+			skipped++
+			n.attachFailures.Add(1)
+			n.logf("WARNING: autoattach create incident failed (skipped, cluster %s): %v — cumulative %d",
+				r.clusterKey, err, n.attachFailures.Load())
+			n.m.CountAutoAttach("skipped")
+			continue
+		}
+		err = store.AttachCluster(inc.ID, r.clusterKey)
+		switch {
+		case err == nil:
+			attached++
+			if audit != nil {
+				audit.Append(AuditEntry{
+					IncidentID: inc.ID,
+					Action:     AuditAttachCluster,
+					Actor:      autoAttachActor,
+					Detail: map[string]any{
+						"cluster_key": r.clusterKey,
+						"fingerprint": r.fingerprint,
+						"source_ref":  ref,
+						"path":        "enforce-new-incident",
+					},
+				})
+			}
+		case errors.Is(err, incident.ErrClusterTaken):
+			// 共簇冲突：一簇一事件，首单持域，跳过即可（不是故障）。
+			conflict++
+			n.logf("autoattach: cluster %s already owned by another incident — skipped (one-cluster-one-incident, first ticket holds domain): %v",
+				r.clusterKey, err)
+		default:
+			skipped++
+			n.attachFailures.Add(1)
+			n.logf("WARNING: autoattach AttachCluster failed (skipped, inc %s cluster %s): %v — cumulative %d",
+				inc.ID, r.clusterKey, err, n.attachFailures.Load())
+		}
+		n.m.CountAutoAttach(autoAttachOutcomeFor(err == nil, err))
+	}
+	n.logf("autoattach: %d new-incident verdicts (attached %d, conflict %d, skipped %d) — cumulative failures %d",
+		len(reqs), attached, conflict, skipped, n.attachFailures.Load())
+}
+
+// autoAttachOutcomeFor 把"挂簇结果"映射到 outcome 标签（attached/conflict/
+// skipped 固定维度，未知一律归 skipped 兜底——对齐 CountVerdict 的
+// "忘了分类宁可进兜底桶"纪律，绝不让维度集合在运行期扩张）。
+func autoAttachOutcomeFor(ok bool, err error) string {
+	switch {
+	case ok:
+		return "attached"
+	case errors.Is(err, incident.ErrClusterTaken):
+		return "conflict"
+	default:
+		return "skipped"
+	}
 }
 
 // submitVerdicts 判决落库分发（W6-1，锁外）——优化方案 #8 的入口：

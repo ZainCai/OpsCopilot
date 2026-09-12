@@ -136,7 +136,7 @@ WHERE ic.cluster_key=$1`, clusterKey).Scan(&prevIncidentID)
 		if *prevIncidentID == id {
 			return nil // 幂等
 		}
-		return fmt.Errorf("incident: cluster %q already attached to %q", clusterKey, *prevIncidentID)
+		return &ClusterTakenError{ClusterKey: clusterKey, Owner: *prevIncidentID}
 	}
 	if _, err = tx.Exec(ctx, `
 INSERT INTO incident_cluster (incident_row_id, cluster_key) VALUES ($1, $2)`,

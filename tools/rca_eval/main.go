@@ -17,9 +17,10 @@
 //	② 等待成单：PG 轮询 alert_event（影子判决 → cluster_key）与 incident
 //	  （origin='prometheus'，source_ref=promFingerprint(labels)，算法与
 //	  cmd/opscopilot/pull_alerts.go promFingerprint() L140-158 逐字节一致）。
-//	③ 挂簇：按 AttachCluster 的 SQL 语义直写 incident_cluster——生产尚无
-//	  "簇→事件"自动关联路径（audit.go:37 注释为证），评测桥接 + 报告 §5
-//	  把缺口列为暴露项。
+//	③ 挂簇：生产自动挂簇路径优先（W10-6 OPS_AUTOATTACH=on+enforce，评测接线
+//	  默认如此）——轮询 incident_cluster 验证簇已挂到持域事件；被测 app 未开
+//	  开关时回退按 AttachCluster SQL 语义直写桥接（兼容旧形态，note 显式标注
+//	  "生产挂簇路径未被验证"）。
 //	④ 判分：GET /api/v1/incidents/{id}/rca → 比对 root_causes[].ref 是否
 //	  命中场景标注根因（top-1 / top-3 两档）；直读 incident_audit
 //	  (action='rca') 校验 #4 审计落库形态与 duration_ms。
@@ -563,12 +564,38 @@ WHERE tenant_id=$1 AND fingerprint=$2 AND occurred_at >= $3 AND occurred_at < $4
 		u.T0 = t0
 		u.DetectLagMS = t0.Sub(abs.Start).Milliseconds()
 
-		// ③ 挂簇（AttachCluster SQL 语义桥接；生产缺自动挂簇路径 = 报告暴露项）。
-		if err := attachCluster(ctx, pool, rowID, key); err != nil {
-			u.Status = "ATTACH_FAIL"
-			u.Notes = append(u.Notes, err.Error())
-			units = append(units, u)
-			continue
+		// ③ 挂簇：生产自动挂簇路径优先（W10-6 OPS_AUTOATTACH=on +
+		// OPS_NOISE_MODE=enforce，run_rca_eval.sh 评测接线默认如此）——
+		// new-incident 判决已联动 UpsertExternal+AttachCluster，轮询
+		// incident_cluster 等到簇挂上即证明生产路径；评测对象 app 未开
+		// 开关时回退按 AttachCluster SQL 语义直写（兼容旧形态，note 显式
+		// 标注"回退桥接"，报告 §5 据此判定生产路径未被验证）。
+		ownerID, attached := pollClusterOwner(ctx, pool, tenant, key, 30*time.Second)
+		switch {
+		case attached && ownerID == incID:
+			u.Notes = append(u.Notes, "挂簇走生产自动路径（OPS_AUTOATTACH new-incident 联动，W10-6）")
+		case attached:
+			// 一簇一事件：簇挂在首单（簇创建者的事件）而非代表指纹选中的
+			// 事件——按生产口径给持域事件判分（多指纹共簇仅首单有域）。
+			t0o, oerr := incidentT0(ctx, pool, tenant, ownerID)
+			if oerr != nil {
+				u.Status = "ATTACH_FAIL"
+				u.Notes = append(u.Notes, fmt.Sprintf("簇持有者 %s 回查失败: %v", ownerID, oerr))
+				units = append(units, u)
+				continue
+			}
+			u.Notes = append(u.Notes, fmt.Sprintf(
+				"簇由首单 %s 持有（代表指纹选中 %s；一簇一事件，评分跟随持域事件）", ownerID, incID))
+			incID, t0 = ownerID, t0o
+			u.IncidentID, u.T0, u.DetectLagMS = incID, t0, t0.Sub(abs.Start).Milliseconds()
+		default:
+			if err := attachCluster(ctx, pool, rowID, key); err != nil {
+				u.Status = "ATTACH_FAIL"
+				u.Notes = append(u.Notes, err.Error())
+				units = append(units, u)
+				continue
+			}
+			u.Notes = append(u.Notes, "回退桥接挂簇：被测 app 未开 OPS_AUTOATTACH（生产挂簇路径未被验证）")
 		}
 		// 非代表指纹的事件同簇存在但无法再挂（一簇一事件约束）——如实注记。
 		if len(cl.Members) > 1 {
@@ -851,8 +878,46 @@ ORDER BY created_at DESC LIMIT 1`, tenant, sourceRef).Scan(&rowID, &incID, &t0)
 	}
 }
 
-// attachCluster 与 internal/incident PGStore.AttachCluster 同语义的评测桥接
-// （生产无自动挂簇路径——audit.go:37 注释为证；这里直写关联表）。
+// pollClusterOwner 轮询 incident_cluster：簇是否已被**生产自动挂簇路径**
+// （W10-6 OPS_AUTOATTACH）挂上——挂上则返回现主 incident_id。超时未挂返回
+// ("", false)，由调用方回退桥接直写。租户过滤经 incident 表 join
+// （incident_cluster 本身无 tenant 列，簇键全局唯一）。
+func pollClusterOwner(ctx context.Context, pool *pgxpool.Pool, tenant, clusterKey string,
+	timeout time.Duration) (string, bool) {
+	deadline := time.Now().Add(timeout)
+	for {
+		cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		var owner string
+		err := pool.QueryRow(cctx, `SELECT i.incident_id FROM incident_cluster ic
+JOIN incident i ON i.id = ic.incident_row_id
+WHERE ic.cluster_key=$1 AND i.tenant_id=$2`, clusterKey, tenant).Scan(&owner)
+		cancel()
+		if err == nil {
+			return owner, true
+		}
+		if err != pgx.ErrNoRows {
+			fatal(2, "incident_cluster 查询失败: %v", err)
+		}
+		if time.Now().After(deadline) {
+			return "", false
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
+// incidentT0 按 incident_id 回查创建时刻（簇持有者改判时重算 detect_lag 用）。
+func incidentT0(ctx context.Context, pool *pgxpool.Pool, tenant, incID string) (time.Time, error) {
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	var t0 time.Time
+	err := pool.QueryRow(cctx, `SELECT created_at FROM incident
+WHERE tenant_id=$1 AND incident_id=$2`, tenant, incID).Scan(&t0)
+	return t0, err
+}
+
+// attachCluster 与 internal/incident PGStore.AttachCluster 同语义的**回退**
+// 桥接（W10-6 起生产自动挂簇已有产品化挂点 OPS_AUTOATTACH；被测 app 未开
+// 开关的旧形态评测才走到这里——note 显式标注，报告 §5 据此判定生产路径未验证）。
 func attachCluster(ctx context.Context, pool *pgxpool.Pool, rowID int64, clusterKey string) error {
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()

@@ -34,9 +34,11 @@ type AuditAction string
 const (
 	AuditCreate     AuditAction = "create"
 	AuditTransition AuditAction = "transition"
-	// AuditAttachCluster 预留：生产代码尚无调用 AttachCluster 的路径
-	// （簇→事件关联是 F-02 的预留读侧/写侧），故本动作当前不会被写入。
-	// 保留它与 incident_audit.action 的 CHECK 约束对齐，接线时无需迁移。
+	// AuditAttachCluster W10-6 起是活代码：OPS_AUTOATTACH 的 enforce 判决
+	// new-incident 联动挂簇成功时落一条（actor=system:autoattach，detail 带
+	// cluster_key/fingerprint/source_ref，见 noise_process.go
+	// autoAttachClusters）。共簇冲突（一簇一事件）只计指标不落本动作——
+	// 挂簇动作没发生就不写审计。与 incident_audit.action 的 CHECK 对齐。
 	AuditAttachCluster           AuditAction = "attach_cluster"
 	AuditMerge                   AuditAction = "merge"
 	AuditExternalRecoveryIgnored AuditAction = "external_recovery_ignored"

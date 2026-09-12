@@ -4,6 +4,7 @@ package incident
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -108,8 +109,9 @@ func TestPGStoreClusterOwnership(t *testing.T) {
 		t.Fatalf("attach a: %v", err)
 	}
 	err := s.AttachCluster(idB, ck)
-	if err == nil || err.Error() != "incident: cluster \""+ck+"\" already attached to \""+idA+"\"" {
-		t.Fatalf("ownership: err = %v, want already-attached", err)
+	if err == nil || err.Error() != "incident: cluster \""+ck+"\" already attached to \""+idA+"\"" ||
+		!errors.Is(err, ErrClusterTaken) {
+		t.Fatalf("ownership: err = %v, want already-attached + errors.Is(ErrClusterTaken)", err)
 	}
 }
 

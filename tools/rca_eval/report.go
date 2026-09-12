@@ -92,7 +92,7 @@ func renderReport(s summary, units []unit, g *goldenDoc, ab *answerbook, noLLM b
 		"  → faultinjector 剧本告警被 app 拉取：ProcessAlerts 成簇(影子判决落 alert_event)\n" +
 		"  → 拉取链路入队建单(ingest_queue → UpsertExternal, origin=prometheus)\n" +
 		"  → 评测器轮询 PG 等簇/单成（alert_event.cluster_key + incident.source_ref=promFingerprint(labels)）\n" +
-		"  → 按 AttachCluster 语义直写 incident_cluster 挂簇（生产缺自动挂簇路径——§5 暴露项）\n" +
+		"  → 生产自动挂簇 OPS_AUTOATTACH（W10-6，评测接线 enforce+on）验证挂上；未开开关回退按 AttachCluster 语义直写桥接（见 §5）\n" +
 		"  → GET /api/v1/incidents/{id}/rca → root_causes[].ref 对照 golden 根因变更\n" +
 		"  → 直读 incident_audit(action='rca') 校验 #4 审计落库形态\n```\n\n")
 	b.WriteString("- **top-1**：`root_causes[0].ref == 期望根因变更 id`；**top-3**：期望 id 出现在 `root_causes` 前 3 位。\n" +
@@ -154,10 +154,13 @@ func renderReport(s summary, units []unit, g *goldenDoc, ab *answerbook, noLLM b
 	for _, f := range s.Findings {
 		b.WriteString("- " + f + "\n")
 	}
-	b.WriteString("\n**结构性缺口（评测桥接暴露，非本轮数据）**：\n\n")
-	b.WriteString("- 簇→事件无生产自动关联路径（`audit.go:37` 注释自证），评测器按 `AttachCluster` SQL 语义直写\n")
-	b.WriteString("  `incident_cluster` 桥接——转正前该链路必须有产品化挂点（如影子判决 new-incident 时联动建单挂簇）。\n")
-	b.WriteString("- 一簇一事件（`idx_incident_cluster_unique`）：多指纹共簇时其余事件无域，RCA 只能逐簇一单。\n")
+	b.WriteString("\n**结构性口径（W10-6 起）**：\n\n")
+	b.WriteString("- 簇→事件生产自动挂簇已落地：`OPS_AUTOATTACH=on` + `OPS_NOISE_MODE=enforce` 时 new-incident\n")
+	b.WriteString("  判决联动建单+挂簇+`attach_cluster` 审计（评测接线默认如此）。本评测**优先验证生产路径**；\n")
+	b.WriteString("  桥接直写仅作未开开关 app 的回退——单元 note 出现\"回退桥接\"即本轮生产挂簇路径未被验证。\n")
+	b.WriteString("- 一簇一事件（`idx_incident_cluster_unique`）：多指纹共簇仅**首单**持故障域；其余指纹判决走\n")
+	b.WriteString("  cluster-merge 不再触发挂簇，其自建事件无域——处置口径 = 人工 `MergeInto` 归并到首单\n")
+	b.WriteString("  （L2 只提示不自动级联，见 `docs/M2执行排期-W9到W11.md` W10-6 注记）；RCA 只能逐簇一单。\n")
 	b.WriteString("- 变更证据链已按装配租户隔离：`PGChangeStore.LoadSince` 回放恒带 `tenant_id` 过滤\n")
 	b.WriteString("  （评测 0129078 的跨 run 泄漏实锤后收口，#4 遗留的\"M3 补\"提前兑现）——`foreign_refs`\n")
 	b.WriteString("  探测保留为回归防线：本轮 findings 再出现跨 run 泄漏即过滤失守/回滚，转正前必须查。\n\n")

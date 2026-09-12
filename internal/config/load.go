@@ -41,6 +41,9 @@ const (
 	EnvNoiseShadow = "OPS_NOISE_SHADOW"
 	EnvNoiseWindow = "OPS_NOISE_WINDOW"
 	EnvNoiseMode   = "OPS_NOISE_MODE"
+	// EnvAutoAttach W10-6 簇→事件生产自动挂簇（默认 off；on 须降噪 enforce，
+	// Validate 强制）。挂点与语义见 config.NoiseSection.AutoAttach 注释。
+	EnvAutoAttach  = "OPS_AUTOATTACH"
 	EnvDedupWindow = "OPS_DEDUP_WINDOW"
 
 	EnvNoiseSinkQueue = "OPS_NOISE_SINK_QUEUE"
@@ -143,6 +146,7 @@ func LoadFrom(lookup LookupFunc) (*Config, error) {
 	c.Noise.Enabled = !p.isOff(EnvNoiseShadow) // 默认开；off 关闭
 	c.Noise.Window = p.posDur(EnvNoiseWindow, DefaultNoiseWindow)
 	c.Noise.Mode = p.enum(EnvNoiseMode, NoiseModeShadow, NoiseModeShadow, NoiseModeEnforce)
+	c.Noise.AutoAttach = p.onOff(EnvAutoAttach, DefaultAutoAttach)
 	c.Noise.DedupWindow = p.posDur(EnvDedupWindow, DefaultDedupWindow)
 	c.Noise.SinkQueue = p.posInt(EnvNoiseSinkQueue, DefaultNoiseSinkQueue)
 	c.Noise.SinkBatch = p.posInt(EnvNoiseSinkBatch, DefaultNoiseSinkBatch)

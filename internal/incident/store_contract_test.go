@@ -455,9 +455,10 @@ func TestContractAttachCluster(t *testing.T) {
 		if err := s.AttachCluster(a.ID, px+"-ck1"); err != nil {
 			t.Fatalf("re-attach same incident must be idempotent: %v", err)
 		}
-		// 一簇最多一事件：他单占用 → 拒绝。
-		if err := s.AttachCluster(b.ID, px+"-ck1"); err == nil {
-			t.Fatal("cluster double-ownership accepted")
+		// 一簇最多一事件：他单占用 → 拒绝，且必须是可 errors.Is 的
+		// ErrClusterTaken（W10-6 自动挂簇据此区分"冲突跳过"与真故障）。
+		if err := s.AttachCluster(b.ID, px+"-ck1"); !errors.Is(err, ErrClusterTaken) {
+			t.Fatalf("cluster double-ownership: err=%v, want errors.Is(ErrClusterTaken)", err)
 		}
 		// 多簇 + 稳定排序输出。
 		if err := s.AttachCluster(a.ID, px+"-ck2"); err != nil {

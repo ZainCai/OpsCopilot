@@ -16,7 +16,7 @@
 >   （v1.2 C2 / G1"缺一拒绝启动"）不因收敛放松；两地址归一化后相同
 >   （`localhost` ≡ `127.0.0.1`、大小写/空白不敏感）同样拒绝启动。
 
-统计：**63 个运行时 env 键**（`OPS_*` 61 + `REDIS_*` 2），17 组。
+统计：**64 个运行时 env 键**（`OPS_*` 62 + `REDIS_*` 2），17 组。
 （优化方案 #8 判决异步落库队列 `OPS_NOISE_SINK_*` 4 键，**队满丢弃取向**：
 慢 DB/极端洪峰下丢持久化保采集节拍，宁漏库存不丢通知——**PG 判决流可缺
 条目，Redis/PG 镜像与内存态非强一致**，丢弃面看
@@ -122,6 +122,7 @@ assistant 轮经 llmgw 产出；LLM 未配/失败 fail-open pending 不假答）
 | 61 | `OPS_LLM_TIMEOUT` | LLM 网关 | 正 duration | `8s` | 非正 duration → 启动失败；**超时预算**：`LLM + 2s ≤ OPS_RCA_TIMEOUT` 不满足 → 启动失败（2s 硬预留给取证 IO + 前四步规则计算，默认 8s+2s=10s 恰好压线） | `transport.NewHTTPClient(timeout)`（llmgw 不持 http.Client，发送器构造期锁定；超时 REST 侧不 5xx——conclude fail-open 回 pending） |
 | 62 | `OPS_LLM_MAX_TOKENS` | LLM 网关 | 正整数 | `1024` | 非正整数 → **启动失败** | `llmgw` 请求体 `max_tokens` 字段（结论千字级顶天；响应侧另有 1MiB 业务上限） |
 | 63 | `OPS_SESSION` | RCA 复盘会话 | on/off | `off`（**二期池 #7 新增**：sessionstore 接线总开关，默认 off 全链路零行为变化；会话端点显式 503） | 非 on/off → **启动失败**；`on` 而 `OPS_RCA=off` → **启动失败**（`config.Validate`：复盘会话 prompt 必携带 RCA findings，编排器 off 时不存在——同款 `OPS_RCA_AUTO` 约束） | `config.Session.Enabled` → `NewAssembly`（S1 骨架：构造告警实例 Redis 客户端 + `sessionstore.New(rdb, RedisAlert)` 热态袋，role 误绑启动期 panic 守卫继承 P1-1；S2：构造 `SessionOrchestrator`（PG 真相 000018 + 懒恢复 + llmgw assistant 轮）并 `RESTGateway.SetSession` 注册 GET/POST `/api/v1/incidents/{id}/rca/session`；无 DB 时真相退化内存并响亮 WARNING——升级台账同款纪律） |
+| 64 | `OPS_AUTOATTACH` | 降噪 | on/off | `off`（**W10-6 新增**：簇→事件生产自动挂簇，默认 off 零行为变化） | 非 on/off → **启动失败**；`on` 而（降噪 off 或 `OPS_NOISE_MODE≠enforce`）→ **启动失败**（`config.Validate`：挂点在 enforce 判决 new-incident 出口，shadow 永不触发——同款 `OPS_RCA_AUTO`/`OPS_SESSION` fail-fast 纪律） | `config.Noise.AutoAttach` → `NewNoiseEngine.autoAttach` + `NewAssembly` `SetAutoAttach(装饰后 Incidents, audit)` → `ProcessAlerts`/`autoAttachClusters`（建单 `UpsertExternal(origin=prometheus, source_ref=promFingerprint(labels))` 与链路 A 同幂等键收敛一单；`AttachCluster` 挂簇 + `attach_cluster` 审计 actor=`system:autoattach`；共簇冲突 `errors.Is(ErrClusterTaken)` 跳过计 `opscopilot_autoattach_total{outcome=attached\|conflict\|skipped}` 不级联） |
 
 > #6 指标（非 env，登记于此便于对照）：每个有界结构两项——
 > `opscopilot_mem_entries{store="builder|builder_edges|incidents|escalation_ledger|noise_dedup|noise_clusters|noise_sigcache|audit"}`（gauge）

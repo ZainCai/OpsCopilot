@@ -87,8 +87,8 @@ func TestAttachClusterAndLookup(t *testing.T) {
 	if _, err := s.Create("INC-2", "other", "warning", "ops"); err != nil {
 		t.Fatalf("create2: %v", err)
 	}
-	if err := s.AttachCluster("INC-2", "c:fp-a@1"); err == nil {
-		t.Fatal("cluster double-attach accepted")
+	if err := s.AttachCluster("INC-2", "c:fp-a@1"); !errors.Is(err, ErrClusterTaken) {
+		t.Fatalf("cluster double-attach: err=%v, want errors.Is(ErrClusterTaken)", err)
 	}
 	// 反查。
 	inc, ok := s.IncidentForCluster("c:fp-a@1")

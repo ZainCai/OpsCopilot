@@ -22,6 +22,8 @@
   "app_expectations": {
     "OPS_PULL_ALERTS": "on（拉取链路 → ingest_queue → UpsertExternal 建单）",
     "OPS_INCIDENT_AUTOCREATE": "on（ingest worker 消费建单）",
+    "OPS_NOISE_MODE": "enforce（W10-6 自动挂簇挂点在 enforce 判决 new-incident 出口；Validate 强制 AUTOATTACH=on 须 enforce）",
+    "OPS_AUTOATTACH": "on（new-incident 判决 → UpsertExternal 建单 + AttachCluster 挂簇 + attach_cluster 审计——评测器 ③ 步优先验证该生产路径，未开开关才回退桥接直写并在 note 标注）",
     "OPS_CONNECTOR_INTERVAL": "10s（ProcessAlerts 成簇节拍）",
     "OPS_PULL_INTERVAL": "10s（告警入队节拍）",
     "OPS_NOISE_WINDOW": "25s（< 静默段 30s@scale0.1——evaluate.py L16-21 同款纪律：否则上一段簇未过期、下一段并入旧簇会污染单元判定）",

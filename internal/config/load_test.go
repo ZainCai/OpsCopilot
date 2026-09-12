@@ -136,6 +136,48 @@ func TestValidateSessionRequiresRCAEnabled(t *testing.T) {
 	}
 }
 
+// TestLoadFromDefaultsAutoAttach W10-6：OPS_AUTOATTACH 默认 off（零行为），
+// enforce+on 合法。
+func TestLoadFromDefaultsAutoAttach(t *testing.T) {
+	c, err := LoadFrom(envMap(redisEnv("127.0.0.1:6380", "127.0.0.1:6381")))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if c.Noise.AutoAttach {
+		t.Fatal("OPS_AUTOATTACH default must be off")
+	}
+	env := redisEnv("127.0.0.1:6380", "127.0.0.1:6381")
+	env[EnvNoiseMode] = "enforce"
+	env[EnvAutoAttach] = "on"
+	c2, err := LoadFrom(envMap(env))
+	if err != nil || !c2.Noise.AutoAttach {
+		t.Fatalf("autoattach=on with enforce must load: %v (%+v)", err, c2.Noise)
+	}
+}
+
+func TestValidateAutoAttachRequiresEnforce(t *testing.T) {
+	// W10-6：挂点在 enforce 判决 new-incident 联动路径——shadow 或降噪关闭
+	// 时永不触发，同款 RCA_AUTO/SESSION 的 fail-fast。
+	_, err := LoadFrom(envMap(func() map[string]string {
+		e := redisEnv("127.0.0.1:6380", "127.0.0.1:6381") // Mode 默认 shadow
+		e[EnvAutoAttach] = "on"
+		return e
+	}()))
+	if err == nil || !strings.Contains(err.Error(), EnvAutoAttach) {
+		t.Fatalf("AUTOATTACH=on with shadow must be rejected mentioning %s, got %v", EnvAutoAttach, err)
+	}
+	_, err = LoadFrom(envMap(func() map[string]string {
+		e := redisEnv("127.0.0.1:6380", "127.0.0.1:6381")
+		e[EnvNoiseMode] = "enforce"
+		e[EnvNoiseShadow] = "off" // 降噪整体关闭：同样无挂点可触发
+		e[EnvAutoAttach] = "on"
+		return e
+	}()))
+	if err == nil || !strings.Contains(err.Error(), EnvAutoAttach) {
+		t.Fatalf("AUTOATTACH=on with noise disabled must be rejected, got %v", err)
+	}
+}
+
 func TestLoadFromDefaults(t *testing.T) {
 	got, err := LoadFrom(envMap(redisEnv("127.0.0.1:6380", "127.0.0.1:6381")))
 	if err != nil {
@@ -194,14 +236,15 @@ func TestLoadFromAggregatesAllErrors(t *testing.T) {
 	env[EnvRCADepth] = "0"             // #12：跳数须为正整数
 	env[EnvRCAMaxFindings] = "-7"      // #6 二期：findings 上限须为正整数
 	env[EnvSessionEnabled] = "true"    // #7 二期：复盘会话开关同样只认 on|off
+	env[EnvAutoAttach] = "yes"         // W10-6：自动挂簇开关同样只认 on|off
 
 	_, err := LoadFrom(envMap(env))
 	var agg *Error
 	if !errors.As(err, &agg) {
 		t.Fatalf("want *Error, got %T: %v", err, err)
 	}
-	if len(agg.Errs) != 19 {
-		t.Fatalf("want 19 aggregated errors, got %d: %v", len(agg.Errs), err)
+	if len(agg.Errs) != 20 {
+		t.Fatalf("want 20 aggregated errors, got %d: %v", len(agg.Errs), err)
 	}
 	for _, key := range []string{
 		EnvDBMaxConns, EnvPullInterval, EnvEscalationAfter, EnvNoiseWindow,
@@ -209,7 +252,7 @@ func TestLoadFromAggregatesAllErrors(t *testing.T) {
 		EnvChangePruneInterval, EnvCORSOrigin, EnvIngestBatch,
 		EnvLeaderElection, EnvLeaderRetryInterval,
 		EnvRCAEnabled, EnvRCAAuto, EnvRCASTimeout, EnvRCAWindow, EnvRCADepth,
-		EnvRCAMaxFindings, EnvSessionEnabled,
+		EnvRCAMaxFindings, EnvSessionEnabled, EnvAutoAttach,
 	} {
 		if !strings.Contains(err.Error(), key) {
 			t.Errorf("aggregated error must mention %s, got:\n%v", key, err)

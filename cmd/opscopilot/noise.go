@@ -30,6 +30,7 @@ import (
 
 	"opscopilot/internal/config"
 	"opscopilot/internal/connector"
+	"opscopilot/internal/incident"
 	"opscopilot/internal/noise"
 	"opscopilot/internal/notify"
 	"opscopilot/pkg/memguard"
@@ -100,6 +101,18 @@ type NoiseEngine struct {
 	// vqSpec 队列参数快照（构造注入，StartVerdictWriter 消费；#2 通道：
 	// 唯一装载点在 internal/config，这里只存解析好的值）。
 	vqSpec config.NoiseSection
+	// ---- W10-6 簇→事件生产自动挂簇（OPS_AUTOATTACH，仅 enforce 生效）----
+	// autoAttach 开关快照（构造注入）；incStore/auditLog 由装配层
+	// SetAutoAttach 挂载（与 SetGate 同款"配置意图 ↔ 运行时行为"装配纪律：
+	// 装配层只在 cfg.Noise.AutoAttach 时挂）。ProcessAlerts 的挂点条件恒为
+	// n.enforce && n.autoAttach && incStore != nil——shadow 引擎即使误挂
+	// 也零行为（防御在判决出口，不信任配置）。
+	autoAttach bool
+	incStore   incident.Store
+	auditLog   AuditLog
+	// attachFailures 自动挂簇"skipped"分支（建单/挂簇 IO 异常）累计——
+	// 锁外自增，与 saveFailures 同款 atomic 纪律（W9-5/第八轮建议 11）。
+	attachFailures atomic.Uint64
 }
 
 // NewNoiseEngine 按显式参数构造（#2：env 读取与非法值 fail-fast 已在
@@ -116,12 +129,13 @@ func NewNoiseEngine(sink *TopologySink, logger connector.Logger, tenant string, 
 		return nil
 	}
 	n := &NoiseEngine{
-		sink:     sink,
-		logger:   logger,
-		tenant:   tenant,
-		enforce:  spec.Mode == ModeEnforce,
-		sigGuard: memguard.New("noise_sigcache", mem.NoiseSigCache, mem.WarnRatio),
-		vqSpec:   spec,
+		sink:       sink,
+		logger:     logger,
+		tenant:     tenant,
+		enforce:    spec.Mode == ModeEnforce,
+		autoAttach: spec.AutoAttach,
+		sigGuard:   memguard.New("noise_sigcache", mem.NoiseSigCache, mem.WarnRatio),
+		vqSpec:     spec,
 	}
 	n.shadow = noise.NewShadowWithLimits(spec.Window, nil, // 域函数按批经 SetDomain 注入
 		memguard.New("noise_dedup", mem.NoiseDedup, mem.WarnRatio),
@@ -204,6 +218,21 @@ func (n *NoiseEngine) SetGate(g *notify.Gate, s GateStatsSink) {
 			n.logf("gate stats restored: suppressed=%d dispatched=%d", st.Suppressed, st.Dispatched)
 		}
 	}
+}
+
+// SetAutoAttach 挂载 W10-6 自动挂簇的出口（事件 Store + 审计）。传 nil
+// 卸载。与 SetGate 同款纪律：装配层只在 cfg.Noise.AutoAttach（on 已被
+// Validate 强制 enforce）时挂载，"配置意图"与"运行时行为"从装配代码直接
+// 对读。store 应传**装饰后**的事件 Store（PublishStore）——自动建单/挂簇
+// 同样要推 SSE 给控制台。必须在首条告警处理前挂好（同 SetRecordSink）。
+func (n *NoiseEngine) SetAutoAttach(store incident.Store, audit AuditLog) {
+	if n == nil {
+		return
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.incStore = store
+	n.auditLog = audit
 }
 
 // SetMetrics 挂载打点集（W9-4）。传 nil 卸载。只允许启动期调用一次
