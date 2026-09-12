@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -224,6 +225,24 @@ type RCASection struct {
 	Depth   int           // OPS_RCA_DEPTH 故障域邻域取证跳数，默认 2（1..10，与 GetTopology 上限同源）
 }
 
+// LLMSection llm-gateway（二期池波二 #3 / ADR-015）：通用 OpenAI-compatible
+// chat 出口，唯一消费方是 RCA conclude 步（cmd 装配 Summarizer 注入）。
+// Endpoint 空 = 整体禁用——conclude 维持 ADR-014 现状（pending、
+// conclusion=null），行为与未接线逐字节一致；llm-gateway 是全系统唯一
+// 出站 LLM 调用点（ADR-003 单出口纪律）。
+type LLMSection struct {
+	Endpoint string // OPS_LLM_ENDPOINT；空=禁用；LLM 网关 base URL（补全端点路径由 llmgw 拼接）
+	// APIKey Bearer 密钥（Secret：绝不打日志/不入库，.env 已被 .gitignore
+	// 保护）。装载时仅 TrimRight 行尾空白（.env 编辑常见的尾部空格/回车），
+	// 其余原样承接（含首空白的密钥是合法值，不能被 TrimSpace 吃掉）。
+	APIKey string // OPS_LLM_API_KEY
+	// Model 模型名（OPS_LLM_MODEL）：Endpoint 非空时必填——**无默认值**，
+	// 不预设任何厂商的模型名（厂商中立是 ADR-015 选型纪律）。
+	Model     string        // OPS_LLM_MODEL
+	Timeout   time.Duration // OPS_LLM_TIMEOUT 单次 chat 请求超时，默认 8s；须 ≤ RCA 超时 − 2s 预算（validateLLM）
+	MaxTokens int           // OPS_LLM_MAX_TOKENS 补全 token 上限，默认 1024
+}
+
 // MemLimitSection 内存有界化（优化方案 #6）：各无界/准无界进程内结构的
 // 容量上限与告警水位。上限按"开发/演示规模不可能触发"保守设定——
 // 正常规模行为与不设限完全一致；只有逼近病态增长才淘汰并计 WARN/指标。
@@ -276,6 +295,7 @@ type Config struct {
 	Retention RetentionSection
 	Topology  TopologySection
 	RCA       RCASection
+	LLM       LLMSection
 	MemLimit  MemLimitSection
 	Metrics   MetricsSection
 }
@@ -298,7 +318,52 @@ func (c *Config) Validate() error {
 	if r := c.MemLimit.WarnRatio; r <= 0 || r > 1 {
 		return fmt.Errorf("memlimit warn ratio must be in (0, 1], got %g", r)
 	}
+	if err := c.validateLLM(); err != nil {
+		return err
+	}
 	return c.Redis.Cache.Validate()
+}
+
+// validateLLM llm-gateway 结构性校验（ADR-015）——只在 Endpoint 非空
+// （= 已启用）时生效；Endpoint 空维持 ADR-014 禁用现状，不新增任何约束。
+// 三条纪律：
+//  1. Endpoint 必须是 http(s) 绝对 URL（不含 userinfo 凭证）；
+//  2. Model 必填——不给厂商默认模型名，"配了出口却没指定模型"是配置事故
+//     不是可猜的默认；
+//  3. **超时预算**：LLM 超时 + LLMBudgetReserve ≤ RCA 总超时——前四步
+//     （取证 IO + 规则计算）必须留有硬余量，否则慢 LLM 会把整次分析拖到
+//     504，违背"LLM 挂掉绝不 5xx"的 fail-open 承诺。默认 8s + 2s = RCA
+//     10s 恰好压线通过；收紧 OPS_RCA_TIMEOUT 或放大 OPS_LLM_TIMEOUT 到
+//     破坏预算的组合启动即拒（聚合报错路径）。
+func (c *Config) validateLLM() error {
+	if c.LLM.Endpoint == "" {
+		return nil
+	}
+	if err := ValidateLLMEndpoint(c.LLM.Endpoint); err != nil {
+		return err
+	}
+	if c.LLM.Model == "" {
+		return errors.New(EnvLLMModel + " is required when " + EnvLLMEndpoint + " is set (no vendor default model)")
+	}
+	if c.LLM.Timeout+LLMBudgetReserve > c.RCA.Timeout {
+		return fmt.Errorf("%s (%s) plus %s budget reserve must fit within %s (%s): the four rule steps and evidence IO need guaranteed time",
+			EnvLLMTimeout, c.LLM.Timeout, LLMBudgetReserve, EnvRCASTimeout, c.RCA.Timeout)
+	}
+	return nil
+}
+
+// ValidateLLMEndpoint llm-gateway base URL 合法性（装载期 Validate 汇入；
+// llmgw.New 为守住"不 import config"的边界纪律内联同款规则）：http/https
+// 绝对 URL、带 host、不含 userinfo 凭证。
+func ValidateLLMEndpoint(raw string) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("%s must be an absolute http(s) URL, got %q", EnvLLMEndpoint, raw)
+	}
+	if u.User != nil {
+		return fmt.Errorf("%s must not embed credentials (userinfo) in the URL", EnvLLMEndpoint)
+	}
+	return nil
 }
 
 // ---------- 默认值（单一定义，#10） ----------
@@ -376,6 +441,21 @@ const (
 	DefaultRCAWindow  = 30 * time.Minute
 	DefaultRCADepth   = 2
 
+	// llm-gateway 默认值（二期池波二 #3 / ADR-015）。**Endpoint/Model 无默认**
+	// ——默认禁用（Endpoint 空 = conclude 维持 pending 现状，行为与 ADR-014
+	// 逐字节一致）且不做厂商中立性倒退的模型名预设。超时 8s 是预算纪律
+	// （LLM ≤ RCA − LLMBudgetReserve）在默认 RCA=10s 下的最大合法取值：
+	// 留 2s 硬预算给取证 IO 与前四步规则计算，LLM 再慢也只拖垮 conclude
+	// 一步（fail-open 回 pending）。
+	DefaultLLMTimeout   = 8 * time.Second
+	DefaultLLMMaxTokens = 1024
+
+	// LLMBudgetReserve RCA 超时里给"取证 IO + 前四步规则计算"预留的硬
+	// 预算（ADR-015）：约束 OPS_LLM_TIMEOUT ≤ OPS_RCA_TIMEOUT − 2s。
+	// 前四步实测毫秒级（内存邻域 + 进程内取证直调），2s 覆盖慢 DB 下
+	// GetTopology/GetRecentChanges 的最坏路径仍富余。
+	LLMBudgetReserve = 2 * time.Second
+
 	// 内存有界化默认上限（优化方案 #6）。取值依据：开发/演示环境规模
 	// （百台节点、每批数百告警、7 天影子期）距这些数字还差 2~3 个数量级
 	// ——**正常规模行为与不设限完全一致**；触限即淘汰最久未活跃并计
@@ -438,6 +518,8 @@ func Defaults() *Config {
 	c.RCA.Timeout = DefaultRCATimeout
 	c.RCA.Window = DefaultRCAWindow
 	c.RCA.Depth = DefaultRCADepth
+	c.LLM.Timeout = DefaultLLMTimeout
+	c.LLM.MaxTokens = DefaultLLMMaxTokens
 	c.MemLimit.WarnRatio = DefaultMemWarnRatio
 	c.MemLimit.TopologyNodes = DefaultMemTopologyNodes
 	c.MemLimit.TopologyEdges = DefaultMemTopologyEdges

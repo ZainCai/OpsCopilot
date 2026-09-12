@@ -9,15 +9,14 @@
 //	→ 变更窗口取证（SemanticModel.GetRecentChanges [T0-Window, T0]）
 //	→ rca.NewDefaultPipeline 六步 → 审计留痕（append-only AuditLog）→ 报告。
 //
-// LLM 单出口（ADR-003）：conclude 步的 Summarizer 由装配注入——本期
-// llm-gateway 未落地，恒传 nil，conclude 记 pending，报告以结构化证据链
-// 交付（禁止伪 RCA）。
+// LLM 单出口（ADR-003）：conclude 步的 Summarizer 由装配注入——#3/ADR-015
+// 起 llm-gateway 已接线（OPS_LLM_ENDPOINT 非空时经 internal/llmgw 唯一
+// 出站调用点注入，见 assembly.go 与 llm_summarizer.go）；未配置时恒传
+// nil，conclude 记 pending，报告以结构化证据链交付（禁止伪 RCA）。
 //
 // TODO(#12 二期挂点说明)：
-//   - llm-gateway 接线时在 assembly.go 构造 Summarizer 实现注入
-//     NewRCAOrchestrator（经 transport 单出口调 gateway，绝不在 internal 直连模型）；
 //   - sessionstore（internal/sessionstore，P1-1 预留件）尚无运行时消费方——
-//     若二期做"分析会话/延迟重跑队列"（ADR-003 二档降级：gateway 全不可用
+//     若二期做"分析会话/网关不可用时延迟重跑队列"（ADR-003 二档降级：gateway 全不可用
 //     时请求入延迟队列），挂点即在 cmd 构造 redis alert client 处
 //     （main.go 的 Redis 出口）→ sessionstore.New(client, config.RedisAlert)；
 //   - 自动触发（Escalation 超时未 ack 的工单自动跑 RCA 再通知）留 ADR-014

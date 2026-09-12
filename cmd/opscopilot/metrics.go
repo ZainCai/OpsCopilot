@@ -89,6 +89,14 @@ type AppMetrics struct {
 	// RCADuration 单次分析（取证 + 六步）端到端耗时。桶上界 20s 覆盖
 	// OPS_RCA_TIMEOUT 默认 10s 的超时红线（超出归 +Inf，即"该报警了"）。
 	RCADuration *metrics.Histogram
+	// LLMRequests llm-gateway 出站请求数（二期池波二 #3 / ADR-015），按结果
+	// （outcome = ok | timeout | error）分桶。timeout/error 都对应 conclude
+	// 步 fail-open 回 pending——降级面必须可计数（"静默没结论"是最难查的）。
+	LLMRequests map[string]*metrics.Counter
+	// LLMDuration 单次 chat 请求耗时。桶上界 30s 覆盖 OPS_LLM_TIMEOUT
+	// 默认 8s 之外的慢网关形态；标签与 outcome 正交，不带 model/endpoint
+	// （维度爆炸 + 内网地址泄露面）。
+	LLMDuration *metrics.Histogram
 }
 
 // latencyStages 延迟观测的两种阶段（跳过计数器的固定维度集合）。
@@ -96,6 +104,14 @@ var latencyStages = []string{"verdict", "notify"}
 
 // rcaOutcomes RCA 请求计数固定维度（编译期确定，对齐 sinkStores 范式）。
 var rcaOutcomes = []string{"ok", "error"}
+
+// llmOutcomes llm-gateway 请求计数固定维度：timeout 单列（超时预算的
+// 直接观测面），其余失败（非 200/坏 JSON/空结论/传输错）归 error。
+var llmOutcomes = []string{"ok", "timeout", "error"}
+
+// llmBuckets LLM 请求耗时桶（秒）。8s（OPS_LLM_TIMEOUT 默认）两侧都留
+// 观测精度，30s +Inf 兜住病态慢网关。
+var llmBuckets = []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 8, 10, 15, 30}
 
 // rcaBuckets RCA 分析耗时桶（秒）。上界 20s 覆盖默认超时 10s 之外一档。
 var rcaBuckets = []float64{0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20}
@@ -129,12 +145,19 @@ func NewAppMetrics() *AppMetrics {
 		Verdicts:       make(map[string]*metrics.Counter, len(verdictReasons)),
 		LatencySkipped: make(map[string]*metrics.Counter, len(latencyStages)),
 		RCARequests:    make(map[string]*metrics.Counter, len(rcaOutcomes)),
+		LLMRequests:    make(map[string]*metrics.Counter, len(llmOutcomes)),
 		RCADuration: reg.Histogram("opscopilot_rca_duration_seconds",
 			"On-demand RCA analysis latency (evidence collection + six-step pipeline), outcome-agnostic", nil, rcaBuckets, latencyWindow),
+		LLMDuration: reg.Histogram("opscopilot_llm_duration_seconds",
+			"llm-gateway chat request latency (RCA conclude egress, ADR-015); degradation surface = outcome!=ok", nil, llmBuckets, latencyWindow),
 	}
 	for _, s := range rcaOutcomes {
 		m.RCARequests[s] = reg.Counter("opscopilot_rca_requests_total",
 			"On-demand RCA analyses by outcome (ok = report produced; error = not-found/timeout/store failure)", metrics.LabelSet{"outcome": s})
+	}
+	for _, s := range llmOutcomes {
+		m.LLMRequests[s] = reg.Counter("opscopilot_llm_requests_total",
+			"llm-gateway chat requests by outcome (ok = conclusion produced; timeout/error = conclude fail-open to pending, ADR-015)", metrics.LabelSet{"outcome": s})
 	}
 	for _, s := range sinkStores {
 		m.SinkDrops[s] = reg.Counter("opscopilot_noise_sink_drops_total",
@@ -215,6 +238,27 @@ func (m *AppMetrics) ObserveRCALatency(d time.Duration) {
 		return
 	}
 	m.RCADuration.Observe(d.Seconds())
+}
+
+// CountLLM 记一次 llm-gateway 出站请求（outcome = ok | timeout | error；
+// 未知归 error——忘了归类时宁可高估降级面，对齐 CountRCA 纪律）。
+func (m *AppMetrics) CountLLM(outcome string) {
+	if m == nil {
+		return
+	}
+	c, ok := m.LLMRequests[outcome]
+	if !ok {
+		c = m.LLMRequests["error"]
+	}
+	c.Inc()
+}
+
+// ObserveLLMLatency 记录单次 chat 请求耗时。
+func (m *AppMetrics) ObserveLLMLatency(d time.Duration) {
+	if m == nil {
+		return
+	}
+	m.LLMDuration.Observe(d.Seconds())
 }
 
 // ObserveVerdictLatency 记录"发射 → 判决生成"延迟（口径见文件头 #8 注记）。

@@ -5,22 +5,28 @@
 //   - feishu  —— 飞书自定义机器人（{"msg_type":"text","content":{"text":...}}）
 //   - wecom   —— 企业微信群机器人（{"msgtype":"text","text":{"content":...}}）
 //
-// 纪律（继承 Notifier 契约，R6 审核固化）：
-//  1. 并发安全（http.Client 本身并发安全，字段只读）；
+// 纪律（继承 Notifier 契约，R6 审核固化 + ADR-015 出口修订）：
+//  1. 并发安全（transport.HTTPClient 本身并发安全，字段只读）；
 //  2. **自带超时**（默认 5s）——Gate.Admit 同步调用 Send，渠道卡住会拖垮
-//     告警处理路径；
+//     告警处理路径；超时在 transport.NewHTTPClient 构造期锁定，每次
+//     Post 派生 ctx 兑现；
 //  3. 失败返回 error（不 panic）；非 2xx 一律算失败——IM 机器人常以
-//     HTTP 200 + body errcode 报错，故再解析一次 errcode/code 字段。
+//     HTTP 200 + body errcode 报错，故再解析一次 errcode/code 字段
+//     （只解析响应体前 bodySnippetLimit 字节：IM 报错信息在前几百字节内，
+//     全量解析会把渠道错误变成内存风险）；
+//  4. 出口纪律（ADR-003/015）：本包**不持有 http.Client**——物理发送
+//     统一经 internal/transport（白名单放行的出口依赖），notify 只做
+//     载荷模板与错误语义。
 package notify
 
 import (
-	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 	"time"
+
+	"opscopilot/internal/transport"
 )
 
 // 渠道类型常量（与 DB notify_channel.kind 取值一致）。
@@ -52,7 +58,7 @@ type WebhookChannel struct {
 	kind        string
 	url         string
 	minSeverity string // 接收的最低严重级（W9-3 路由；空 = info 全收）
-	client      *http.Client
+	sender      *transport.HTTPClient
 	timeout     time.Duration
 }
 
@@ -94,7 +100,7 @@ func NewWebhookChannel(o WebhookOptions) (*WebhookChannel, error) {
 		kind:        o.Kind,
 		url:         u,
 		minSeverity: sev,
-		client:      &http.Client{Timeout: to},
+		sender:      transport.NewHTTPClient(to),
 		timeout:     to,
 	}, nil
 }
@@ -118,24 +124,22 @@ func (c *WebhookChannel) Name() string { return c.name }
 func (c *WebhookChannel) Kind() string { return c.kind }
 
 // Send 按 kind 模板投递。非 2xx 或平台 errcode 非 0 都算失败。
+// 物理发送经 transport.HTTPClient（出口纪律）；本函数只做载荷与错误语义。
 func (c *WebhookChannel) Send(m Message) error {
 	payload, err := c.payload(m)
 	if err != nil {
 		return fmt.Errorf("notify[%s]: build payload: %w", c.name, err)
 	}
-	req, err := http.NewRequest(http.MethodPost, c.url, bytes.NewReader(payload))
-	if err != nil {
-		return fmt.Errorf("notify[%s]: build request: %w", c.name, err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.client.Do(req)
+	status, body, err := c.sender.Post(context.Background(), c.url,
+		map[string]string{"Content-Type": "application/json"}, payload)
 	if err != nil {
 		return fmt.Errorf("notify[%s]: send: %w", c.name, err)
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, bodySnippetLimit))
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("notify[%s]: http %d: %s", c.name, resp.StatusCode, truncate(string(body), 200))
+	if len(body) > bodySnippetLimit {
+		body = body[:bodySnippetLimit] // 错误上下文与平台探测只看前几百字节（内存纪律）
+	}
+	if status < 200 || status >= 300 {
+		return fmt.Errorf("notify[%s]: http %d: %s", c.name, status, truncate(string(body), 200))
 	}
 	// IM 平台常见"HTTP 200 + body errcode!=0"：再解析一次，避免假成功。
 	if code, msg, ok := platformError(body); ok && code != 0 {

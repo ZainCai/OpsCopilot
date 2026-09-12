@@ -390,14 +390,23 @@ func NewAssembly(logger connector.Logger, cfg *config.Config) (*Assembly, error)
 
 	// #12/ADR-014 按需 RCA 最小链路：编排器是"incident × 拓扑/变更取证 ×
 	// 六步流水线 × 审计"的唯一跨模块汇合点（internal/rca 只见纯 DTO）。
-	// 取证走 SemanticModelServer 直调（REST 网关同款复用，一套语义）；
-	// LLM 结论出口（Summarizer）本期不注入——conclude 步 pending，
-	// 二期在 llm-gateway 落地处接线（见 rca_orchestrator.go TODO）。
+	// 取证走 SemanticModelServer 直调（REST 网关同款复用，一套语义）。
 	// OPS_RCA=off → 不构造，端点 503（降级不阻塞启动纪律不变）。
 	if cfg.RCA.Enabled {
 		asm.RCA = NewRCAOrchestrator(cfg.RCA, asm.Incidents, semantic, noiseEngine, audit,
 			cfg.Tenant, appMetrics, logf)
 		rest.SetRCA(asm.RCA)
+		// #3/ADR-015 llm-gateway 接线（ADR-014 conclude 挂点转正）：
+		// OPS_LLM_ENDPOINT 空 = 不注入 Summarizer，conclude 维持 pending
+		// 现状（行为与 ADR-014 逐字节一致）；已配置但构造失败只降级不拖垮
+		// 启动——RCA 可用性不绑定 LLM，fail-open 纪律从装配点开始。
+		if gw, gwErr := newLLMGateway(cfg.LLM); gwErr != nil {
+			logf("WARNING: llm gateway rejected by config, rca conclude stays pending: %v", gwErr)
+		} else if gw != nil {
+			asm.RCA.SetSummarizer(newLLMSummarizer(gw, appMetrics, logf))
+			logf("rca conclude wired to llm gateway: endpoint=%s model=%s timeout=%s (api key masked)",
+				cfg.LLM.Endpoint, cfg.LLM.Model, cfg.LLM.Timeout)
+		}
 	} else {
 		logf("rca on-demand analysis disabled (OPS_RCA=off)")
 	}

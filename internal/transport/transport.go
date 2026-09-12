@@ -5,6 +5,12 @@
 //  2. all-in-one 形态用本包的 bufconn 直连承载进程内调用——
 //     零网络开销、同一序列化语义，未来拆分为独立进程时仅换 Dial 实现；
 //  3. 共享契约代码只允许放在 internal/contracts（生成代码）与 pkg/（通用库）。
+//
+// 出口承载层角色（二期池波二 #3 / ADR-015 扩展）：本包同时是全仓**唯一的
+// 出站 IO 承载层**（HTTPClient，见 httpclient.go）——边界脚本为此放行
+// internal 模块 import transport（白名单），llmgw/notify 等业务层禁止直接
+// 持有 net/http。依赖方向单向：业务模块 → transport，transport 不 import
+// 任何业务模块。
 package transport
 
 import (

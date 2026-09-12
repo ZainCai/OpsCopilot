@@ -78,6 +78,14 @@ const (
 	EnvRCAWindow   = "OPS_RCA_WINDOW"
 	EnvRCADepth    = "OPS_RCA_DEPTH"
 
+	// llm-gateway（二期池二 #3 / ADR-015）。APIKey 是 Secret：raw 承接、
+	// 绝不进任何日志/审计/指标标签。
+	EnvLLMEndpoint  = "OPS_LLM_ENDPOINT"
+	EnvLLMAPIKey    = "OPS_LLM_API_KEY"
+	EnvLLMModel     = "OPS_LLM_MODEL"
+	EnvLLMTimeout   = "OPS_LLM_TIMEOUT"
+	EnvLLMMaxTokens = "OPS_LLM_MAX_TOKENS"
+
 	EnvMemLimitWarnRatio        = "OPS_MEMLIMIT_WARN_RATIO"
 	EnvMemLimitTopologyNodes    = "OPS_MEMLIMIT_TOPOLOGY_NODES"
 	EnvMemLimitTopologyEdges    = "OPS_MEMLIMIT_TOPOLOGY_EDGES"
@@ -172,6 +180,17 @@ func LoadFrom(lookup LookupFunc) (*Config, error) {
 	c.RCA.Timeout = p.posDur(EnvRCASTimeout, DefaultRCATimeout)
 	c.RCA.Window = p.posDur(EnvRCAWindow, DefaultRCAWindow)
 	c.RCA.Depth = p.posInt(EnvRCADepth, DefaultRCADepth)
+
+	// llm-gateway：Endpoint 空 = 禁用（conclude 维持 pending 现状）。
+	// 结构性约束（Model 必填 / 超时预算 / URL 形态）在 Validate 汇入。
+	c.LLM.Endpoint = p.str(EnvLLMEndpoint)
+	// 密钥只容忍**尾部**空白：.env 手工编辑最常犯的是行尾多敲空格/回车，
+	// 直接导致 401 且极难排查；首尾 TrimSpace 则会误伤"含前导空白的合法
+	// 密钥"（WebhookToken 同款教训）。凭证本身仍原样承接、绝不入日志。
+	c.LLM.APIKey = strings.TrimRight(p.raw(EnvLLMAPIKey), " \t\r\n")
+	c.LLM.Model = p.str(EnvLLMModel)
+	c.LLM.Timeout = p.posDur(EnvLLMTimeout, DefaultLLMTimeout)
+	c.LLM.MaxTokens = p.posInt(EnvLLMMaxTokens, DefaultLLMMaxTokens)
 
 	c.MemLimit.WarnRatio = p.posRatio(EnvMemLimitWarnRatio, DefaultMemWarnRatio)
 	c.MemLimit.TopologyNodes = p.posInt(EnvMemLimitTopologyNodes, DefaultMemTopologyNodes)

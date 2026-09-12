@@ -9,7 +9,14 @@
      - 共享契约：internal/contracts（gRPC 生成代码）
      - 通用库：pkg/...（不依赖任何 internal 模块）
      - 跨模块调用必须走 gRPC client（通过 transport 包拨号）
+     - **出口白名单例外（ADR-015）**：internal 模块允许 import
+       internal/transport（出站 IO 统一承载层：gRPC 拨号 + HTTPClient
+       发送器）；transport 自身不得反向依赖任何业务模块。
   3. internal/contracts 与 pkg/ 不得 import 任何 internal/<module>。
+  4. （ADR-015 出口纪律）llmgw 与 notify 为纯逻辑层：生产代码禁止 import
+     net/http——物理发送唯一归 internal/transport（llmgw 经装配注入的
+     Sender=transport.NewHTTPClient；notify 直接以 transport.HTTPClient
+     为发送器）。业务模块直持 http.Client = 第二个不受控出口。
 
 用法：python scripts/check_module_boundaries.py [项目根目录]
 退出码：0=通过；1=存在违例。
@@ -19,6 +26,9 @@ import sys
 from pathlib import Path
 
 IMPORT_RE = re.compile(r'^\s*(?:import\s+)?(?:[_\w]+(?:\.[_\w]+)*\s+)?"(opscopilot/[^"]+)"')
+STDLIB_NETHTTP_RE = re.compile(r'^\s*(?:import\s+)?(?:[_\w]+(?:\.[_\w]+)*\s+)?"net/http"')
+# 出口模块（生产码禁 net/http）：LLM 协议层与通知投递层。
+NO_SOCKET_MODULES = ("llmgw", "notify")
 ALLOWED_SHARED = ("opscopilot/internal/contracts", "opscopilot/pkg")
 
 
@@ -44,7 +54,15 @@ def check(root: Path) -> list[str]:
             continue
 
         mod = module_name(go_file, internal_root)
-        for line in go_file.read_text(encoding="utf-8").splitlines():
+        text = go_file.read_text(encoding="utf-8")
+        # 规则 4（ADR-015）：出口模块（llmgw/notify）生产码禁 import net/http，
+        # 物理发送唯一归 internal/transport。
+        if mod in NO_SOCKET_MODULES and not go_file.name.endswith("_test.go"):
+            for line in text.splitlines():
+                if STDLIB_NETHTTP_RE.match(line):
+                    violations.append(f"{rel}: 【ADR-015 出口纪律】internal/{mod} 生产代码禁止 import net/http"
+                                      f"（出站 IO 唯一经 internal/transport；llmgw 用装配注入的 Sender）")
+        for line in text.splitlines():
             m = IMPORT_RE.match(line)
             if not m:
                 continue
@@ -54,7 +72,8 @@ def check(root: Path) -> list[str]:
                     continue
                 continue
             target = imp.split("/")[2]
-            if target == mod or target == "contracts":
+            # 白名单：自身模块、共享契约 contracts、出口承载层 transport（ADR-015）。
+            if target == mod or target in ("contracts", "transport"):
                 continue
             violations.append(f"{rel}: 模块 {mod} 不得 import 模块 {target} 的内部包（跨模块调用须走 gRPC/transport）: {imp}")
 
@@ -80,6 +99,8 @@ def selftest() -> int:
         ("引用 contracts 应放行", "package a\n\nimport pb \"opscopilot/internal/contracts/pb\"\n\nvar _ = pb.X\n", 0),
         ("引用 pkg 应放行", "package a\n\nimport \"opscopilot/pkg/x\"\n", 0),
         ("自身模块应放行", "package a\n\nimport \"opscopilot/internal/a/sub\"\n", 0),
+        ("引用 transport 出口层应放行（ADR-015 白名单）",
+         "package a\n\nimport \"opscopilot/internal/transport\"\n\nvar _ = transport.DefaultHTTPMaxResponseBytes\n", 0),
     ]
     failed = 0
     with tempfile.TemporaryDirectory() as tmp:
@@ -94,6 +115,28 @@ def selftest() -> int:
             if actual != expected:
                 failed += 1
             print(f"  [{status}] {name}")
+        # 规则 4（ADR-015 出口纪律）：出口模块（llmgw/notify）生产码 import
+        # net/http 必须被抓到；测试文件与"不 import net/http"的生产码放行。
+        rule4 = []
+        for m in ("llmgw", "notify"):
+            rule4 += [
+                (f"{m} 生产码 import net/http 应被抓到", m, "sample.go",
+                 f'package {m}\n\nimport (\n\t"net/http"\n\t"strings"\n)\n\nvar _ = strings.TrimSpace\nvar _ = http.MethodPost\n', 1),
+                (f"{m} 生产码不触网应放行", m, "sample.go",
+                 f'package {m}\n\nimport "strings"\n\nvar _ = strings.TrimSpace\n', 0),
+                (f"{m} 测试文件不受规则 4 约束", m, "sample_test.go",
+                 f'package {m}\n\nimport (\n\t"net/http"\n\t"testing"\n)\n\nfunc TestX(*testing.T) {{ _ = http.MethodPost }}\n', 0),
+            ]
+        for name, m, fname, content, expected in rule4:
+            mod_dir = root / "internal" / m
+            mod_dir.mkdir(exist_ok=True)
+            (mod_dir / fname).write_text(content, encoding="utf-8")
+            actual = 1 if check(root) else 0
+            status = "PASS" if actual == expected else "FAIL"
+            if actual != expected:
+                failed += 1
+            print(f"  [{status}] {name}")
+            (mod_dir / fname).unlink()
     print("自测通过：规则有效。" if failed == 0 else f"自测失败：{failed} 个用例不符预期。")
     return 1 if failed else 0
 
