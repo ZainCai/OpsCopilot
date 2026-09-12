@@ -74,6 +74,7 @@ const (
 	EnvChangePruneInterval = "OPS_CHANGE_PRUNE_INTERVAL"
 
 	EnvRCAEnabled  = "OPS_RCA"
+	EnvRCAAuto     = "OPS_RCA_AUTO" // 二期池波二 #4：critical 升级成功后自动跑 RCA（默认 off）
 	EnvRCASTimeout = "OPS_RCA_TIMEOUT"
 	EnvRCAWindow   = "OPS_RCA_WINDOW"
 	EnvRCADepth    = "OPS_RCA_DEPTH"
@@ -177,6 +178,7 @@ func LoadFrom(lookup LookupFunc) (*Config, error) {
 	c.Topology.ChangePruneInterval = p.posDur(EnvChangePruneInterval, DefaultChangePruneInterval)
 
 	c.RCA.Enabled = p.onOff(EnvRCAEnabled, DefaultRCAEnabled)
+	c.RCA.Auto = p.onOff(EnvRCAAuto, DefaultRCAAuto)
 	c.RCA.Timeout = p.posDur(EnvRCASTimeout, DefaultRCATimeout)
 	c.RCA.Window = p.posDur(EnvRCAWindow, DefaultRCAWindow)
 	c.RCA.Depth = p.posInt(EnvRCADepth, DefaultRCADepth)

@@ -16,7 +16,7 @@
 >   （v1.2 C2 / G1"缺一拒绝启动"）不因收敛放松；两地址归一化后相同
 >   （`localhost` ≡ `127.0.0.1`、大小写/空白不敏感）同样拒绝启动。
 
-统计：**60 个运行时 env 键**（`OPS_*` 58 + `REDIS_*` 2），16 组。
+统计：**61 个运行时 env 键**（`OPS_*` 59 + `REDIS_*` 2），16 组。
 （优化方案 #8 判决异步落库队列 `OPS_NOISE_SINK_*` 4 键，**队满丢弃取向**：
 慢 DB/极端洪峰下丢持久化保采集节拍，宁漏库存不丢通知——**PG 判决流可缺
 条目，Redis/PG 镜像与内存态非强一致**，丢弃面看
@@ -28,6 +28,12 @@
 （键 0x4F43504C），拓扑判决链路单 owner；无 DB 或 off → 恒 leader 降级。）
 （优化方案 #12/ADR-014 新增 `OPS_RCA_*` 组 4 键：按需根因分析开关/超时/
 证据窗/邻域跳数；只读链路，off 时端点显式 503。）
+（二期池波二 #4 新增 `OPS_RCA_AUTO`（RCA 组第 5 键）：critical 升级成功→异步
+自动跑一次 RCA 落审计（actor=auto），默认 off；on 须 RCA=on（Validate 强制），
+防风暴=内存 + 审计回读双保险、有界队列满丢弃计
+`opscopilot_rca_autotrigger_dropped_total`，绝不阻塞升级扫描。同波 #5：启动
+簇恢复改走 Redis→PG alert_cluster 兜底（`clusterRestoreOnPromote` 与 leader
+开闸钩子同函数），补上"跨重启故障域回读"缺口——纯启动路径行为，无新增键。）
 （二期池波二 #3/ADR-015 新增 `OPS_LLM_*` 组 5 键：llm-gateway（通用
 OpenAI-compatible，不绑厂商）**默认禁用**（Endpoint 空 = conclude 维持
 pending）；密钥 Secret 绝不入库/入日志；超时预算 LLM ≤ RCA − 2s 硬预留；
@@ -91,14 +97,15 @@ notify 渠道投递同步迁至 transport 路径，业务模块禁持 http.Clien
 | 50 | `OPS_LEADER_ELECTION` | leader 选举 | on/off | `on`（**优化方案 #11/ADR-012 新增**：有 DB 即竞选） | 非 on/off → **启动失败** | `config.Leader.Election` → `NewLeaderElector`（cmd/leader.go，PG advisory lock 0x4F43504C）：leader 才跑 Host 采集/判决链路/告警拉取/Retention；无 DB 或 off 恒 leader（单实例语义不变）；本实例态看 `/metrics` gauge `opscopilot_is_leader`（ADR 观测章原名 `opscopilot_leader` 作等价别名同时暴露） |
 | 51 | `OPS_LEADER_RETRY_INTERVAL` | leader 选举 | 正 duration | `5s`（同上） | **启动失败** | 竞选节拍 = 持锁复检（连接探针）节拍 = failover 接管上界（ADR 验收标准 3 的 15s 限时 ≈ 3 个节拍余量） |
 | 52 | `OPS_RCA` | RCA 按需分析 | on/off | `on`（**优化方案 #12/ADR-014 新增**：只读按需链路无副作用面） | 非 on/off → **启动失败** | `config.RCA.Enabled` → `NewAssembly`（有值才构造 `RCAOrchestrator` 并 `RESTGateway.SetRCA`；off → `GET /api/v1/incidents/{id}/rca` 显式 503） |
-| 53 | `OPS_RCA_TIMEOUT` | RCA 按需分析 | 正 duration | `10s` | **启动失败** | 单次分析端到端预算（取证 + 六步；`context.WithTimeout` 阶段边界检查，超时 REST 504） |
-| 54 | `OPS_RCA_WINDOW` | RCA 按需分析 | 正 duration | `30m` | **启动失败** | 证据窗 [T0−window, T0]（"告警前 30 分钟"取证口径，进 `rca.Input.Window` 与 GetRecentChanges 窗口参数） |
-| 55 | `OPS_RCA_DEPTH` | RCA 按需分析 | 正整数（≤10 截断） | `2` | 非正整数 → **启动失败** | 故障域邻域取证跳数（`neighborhoodFacts` BFS 裁剪；上限与 `maxTopologyDepth` 同源，越界钳制不报错——取证参数非契约输入） |
-| 56 | `OPS_LLM_ENDPOINT` | LLM 网关 | http(s) 绝对 URL（可空） | **空 = 禁用**（**二期池波二 #3/ADR-015 新增**：默认不接线，conclude 维持 pending、`conclusion=null`，与 ADR-014 逐字节一致） | 非 http(s)/含 userinfo → **启动失败** | `assembly.go` → `newLLMGateway`（非空才构造 `llmgw.Client` 并 `SetSummarizer` 注入 `RCAOrchestrator`；物理发送经 `transport.NewHTTPClient`） |
-| 57 | `OPS_LLM_API_KEY` | LLM 网关 | **Secret** | 空 = 不发 Authorization（本地无鉴权网关） | 无非法值概念；**绝不入库、绝不进日志/指标/审计**（`.env` 已在 `.gitignore`）；仅容忍行尾空白（`TrimRight`），其余原样 | `llmgw.Client` 构造参数（Bearer 头；错误值/日志均不携带） |
-| 58 | `OPS_LLM_MODEL` | LLM 网关 | 字符串 | 无默认（**不给厂商预设模型名**） | Endpoint 非空而本键缺失 → **启动失败**（`config.Validate`） | `llmgw` 请求体 `model` 字段 |
-| 59 | `OPS_LLM_TIMEOUT` | LLM 网关 | 正 duration | `8s` | 非正 duration → 启动失败；**超时预算**：`LLM + 2s ≤ OPS_RCA_TIMEOUT` 不满足 → 启动失败（2s 硬预留给取证 IO + 前四步规则计算，默认 8s+2s=10s 恰好压线） | `transport.NewHTTPClient(timeout)`（llmgw 不持 http.Client，发送器构造期锁定；超时 REST 侧不 5xx——conclude fail-open 回 pending） |
-| 60 | `OPS_LLM_MAX_TOKENS` | LLM 网关 | 正整数 | `1024` | 非正整数 → **启动失败** | `llmgw` 请求体 `max_tokens` 字段（结论千字级顶天；响应侧另有 1MiB 业务上限） |
+| 53 | `OPS_RCA_AUTO` | RCA 按需分析 | on/off | `off`（**二期池波二 #4 新增**：默认关，保持"只做按需"现状） | 非 on/off → **启动失败**；`on` 而 `OPS_RCA=off` → **启动失败**（`config.Validate`：自动触发复用按需链路，编排器 off 时不存在） | `config.RCA.Auto` → `NewAssembly`（on 且有 escalation 挂点时构造 `RCATrigger`、挂 `EscalationPoller.OnEscalate`；critical 升级成功→异步复用同一 `RCAOrchestrator.Analyze(actor="auto")`，落审计 `action='rca' actor='auto'`；防风暴=内存 seen + 审计回读双保险；分析走独立 goroutine + 有界队列，队满丢弃计 `opscopilot_rca_autotrigger_dropped_total`，绝不阻塞 escalation。无 `OPS_ESCALATION=on` 则打 WARNING 不生效） |
+| 54 | `OPS_RCA_TIMEOUT` | RCA 按需分析 | 正 duration | `10s` | **启动失败** | 单次分析端到端预算（取证 + 六步；`context.WithTimeout` 阶段边界检查，超时 REST 504） |
+| 55 | `OPS_RCA_WINDOW` | RCA 按需分析 | 正 duration | `30m` | **启动失败** | 证据窗 [T0−window, T0]（"告警前 30 分钟"取证口径，进 `rca.Input.Window` 与 GetRecentChanges 窗口参数） |
+| 56 | `OPS_RCA_DEPTH` | RCA 按需分析 | 正整数（≤10 截断） | `2` | 非正整数 → **启动失败** | 故障域邻域取证跳数（`neighborhoodFacts` BFS 裁剪；上限与 `maxTopologyDepth` 同源，越界钳制不报错——取证参数非契约输入） |
+| 57 | `OPS_LLM_ENDPOINT` | LLM 网关 | http(s) 绝对 URL（可空） | **空 = 禁用**（**二期池波二 #3/ADR-015 新增**：默认不接线，conclude 维持 pending、`conclusion=null`，与 ADR-014 逐字节一致） | 非 http(s)/含 userinfo → **启动失败** | `assembly.go` → `newLLMGateway`（非空才构造 `llmgw.Client` 并 `SetSummarizer` 注入 `RCAOrchestrator`；物理发送经 `transport.NewHTTPClient`） |
+| 58 | `OPS_LLM_API_KEY` | LLM 网关 | **Secret** | 空 = 不发 Authorization（本地无鉴权网关） | 无非法值概念；**绝不入库、绝不进日志/指标/审计**（`.env` 已在 `.gitignore`）；仅容忍行尾空白（`TrimRight`），其余原样 | `llmgw.Client` 构造参数（Bearer 头；错误值/日志均不携带） |
+| 59 | `OPS_LLM_MODEL` | LLM 网关 | 字符串 | 无默认（**不给厂商预设模型名**） | Endpoint 非空而本键缺失 → **启动失败**（`config.Validate`） | `llmgw` 请求体 `model` 字段 |
+| 60 | `OPS_LLM_TIMEOUT` | LLM 网关 | 正 duration | `8s` | 非正 duration → 启动失败；**超时预算**：`LLM + 2s ≤ OPS_RCA_TIMEOUT` 不满足 → 启动失败（2s 硬预留给取证 IO + 前四步规则计算，默认 8s+2s=10s 恰好压线） | `transport.NewHTTPClient(timeout)`（llmgw 不持 http.Client，发送器构造期锁定；超时 REST 侧不 5xx——conclude fail-open 回 pending） |
+| 61 | `OPS_LLM_MAX_TOKENS` | LLM 网关 | 正整数 | `1024` | 非正整数 → **启动失败** | `llmgw` 请求体 `max_tokens` 字段（结论千字级顶天；响应侧另有 1MiB 业务上限） |
 
 > #6 指标（非 env，登记于此便于对照）：每个有界结构两项——
 > `opscopilot_mem_entries{store="builder|builder_edges|incidents|escalation_ledger|noise_dedup|noise_clusters|noise_sigcache|audit"}`（gauge）

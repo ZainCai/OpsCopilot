@@ -36,6 +36,40 @@ func TestLoadFromDefaultsRCA(t *testing.T) {
 	}
 }
 
+func TestLoadFromDefaultsRCAAuto(t *testing.T) {
+	// 默认 off：保持 ADR-014"只做按需"现状。
+	c, err := LoadFrom(envMap(redisEnv("127.0.0.1:6380", "127.0.0.1:6381")))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if c.RCA.Auto {
+		t.Fatalf("OPS_RCA_AUTO default must be off, got on")
+	}
+	// 显式 on（在 Enabled 默认 on 之下）合法解析。
+	env := redisEnv("127.0.0.1:6380", "127.0.0.1:6381")
+	env[EnvRCAAuto] = "on"
+	c2, err := LoadFrom(envMap(env))
+	if err != nil {
+		t.Fatalf("load auto=on: %v", err)
+	}
+	if !c2.RCA.Auto || !c2.RCA.Enabled {
+		t.Fatalf("auto=on parse = %+v, want Auto on / Enabled on", c2.RCA)
+	}
+}
+
+func TestValidateRCAAutoRequiresEnabled(t *testing.T) {
+	// OPS_RCA_AUTO=on 而 OPS_RCA=off：配置矛盾必须 fail-fast 拒绝启动。
+	_, err := LoadFrom(envMap(func() map[string]string {
+		e := redisEnv("127.0.0.1:6380", "127.0.0.1:6381")
+		e[EnvRCAEnabled] = "off"
+		e[EnvRCAAuto] = "on"
+		return e
+	}()))
+	if err == nil || !strings.Contains(err.Error(), EnvRCAAuto) {
+		t.Fatalf("RCA_AUTO=on with RCA=off must be rejected mentioning %s, got %v", EnvRCAAuto, err)
+	}
+}
+
 func TestLoadFromDefaults(t *testing.T) {
 	got, err := LoadFrom(envMap(redisEnv("127.0.0.1:6380", "127.0.0.1:6381")))
 	if err != nil {
@@ -88,6 +122,7 @@ func TestLoadFromAggregatesAllErrors(t *testing.T) {
 	env[EnvLeaderElection] = "yes"     // #11：on/off 开关只认 on|off
 	env[EnvLeaderRetryInterval] = "0s" // 非正 duration 同样拒绝
 	env[EnvRCAEnabled] = "true"        // #12：开关只认 on|off
+	env[EnvRCAAuto] = "yes"            // #4 二期：自动触发开关同样只认 on|off
 	env[EnvRCASTimeout] = "-1s"        // #12：非正 duration 拒绝
 	env[EnvRCAWindow] = "soon"         // #12：非法 duration 拒绝
 	env[EnvRCADepth] = "0"             // #12：跳数须为正整数
@@ -97,15 +132,15 @@ func TestLoadFromAggregatesAllErrors(t *testing.T) {
 	if !errors.As(err, &agg) {
 		t.Fatalf("want *Error, got %T: %v", err, err)
 	}
-	if len(agg.Errs) != 16 {
-		t.Fatalf("want 16 aggregated errors, got %d: %v", len(agg.Errs), err)
+	if len(agg.Errs) != 17 {
+		t.Fatalf("want 17 aggregated errors, got %d: %v", len(agg.Errs), err)
 	}
 	for _, key := range []string{
 		EnvDBMaxConns, EnvPullInterval, EnvEscalationAfter, EnvNoiseWindow,
 		EnvNoiseMode, EnvAllowUnauthenticated, EnvIncidentRetention,
 		EnvChangePruneInterval, EnvCORSOrigin, EnvIngestBatch,
 		EnvLeaderElection, EnvLeaderRetryInterval,
-		EnvRCAEnabled, EnvRCASTimeout, EnvRCAWindow, EnvRCADepth,
+		EnvRCAEnabled, EnvRCAAuto, EnvRCASTimeout, EnvRCAWindow, EnvRCADepth,
 	} {
 		if !strings.Contains(err.Error(), key) {
 			t.Errorf("aggregated error must mention %s, got:\n%v", key, err)

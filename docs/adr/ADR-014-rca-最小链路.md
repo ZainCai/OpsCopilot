@@ -99,6 +99,12 @@ llm_used）。`incident_audit.action` 封闭 CHECK 由 **migration 000017**
   处（`rca_orchestrator.go` 文件头 TODO 注明）；
 - **自动触发 RCA**（Escalation 超时未 ack 自动分析并随通知附证据链）：
   触发时机/频率门禁是独立决策，留 ADR 二期，本期只做按需；
+  **（已兑现：二期池波二 #4。触发点=critical 事件升级成功后（非"随通知附
+  证据链"，通知形态不动），实现在 cmd/opscopilot/rca_auto.go——复用本 ADR
+  编排器零改动；`OPS_RCA_AUTO` 默认 off 保持本 ADR 现状；防风暴=内存 seen +
+  incident_audit 回读（action='rca' actor='auto'）双保险 + 有界队列满丢弃计
+  `opscopilot_rca_autotrigger_dropped_total`，分析走独立 goroutine 绝不阻塞
+  escalation。）**
 - **SSE `rca` 事件**：现有 SSEMessage 契约绑定 incident 快照；RCA 是
   请求-响应型分析（结果当场返回，无"等待推送"场景），加事件反而诱导
   轮询式滥用——判定不做，二期若有"长任务完成通知"需求随任务化一起设计；
@@ -149,7 +155,11 @@ Report{Steps, Findings, RootCauses(high only)}
 - 正面：rca 从死骨架变运行时链路；结论出口物理上只有一处（Summarizer
   接口），gateway 接线是纯装配动作；审计/指标/配置/文档四件套同步；
 - 负面：故障域依赖内存聚类器视图（重启后未 Restore 的簇 → 证据不足），
-  二期接 alert_cluster 表回读；分析同步执行占用请求 goroutine（邻域规模
+  二期接 alert_cluster 表回读；**（已兑现：二期池波二 #5——main.go 启动簇恢复
+  改与 leader OnPromote 钩子同走 `clusterRestoreOnPromote`（Redis 镜像 → PG
+  alert_cluster 兜底），election-off/非 leader 实例重启后故障域取证不再依赖
+  Redis 镜像独活；内存簇被容量护栏淘汰的极端场景仍按"证据不足"报告，属可
+  接受残余）**；分析同步执行占用请求 goroutine（邻域规模
   有 depth 上限与超时兜底，当前评估规模下毫秒级）；
 - 撤销条件：若 llm-gateway 设计要求 RCA 步骤内多次调模型（假设排序逐步
   交互式），本 DTO 注入形态需重构为 provider 回调——届时另立 ADR。

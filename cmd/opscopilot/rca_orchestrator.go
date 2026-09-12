@@ -19,8 +19,8 @@
 //     若二期做"分析会话/网关不可用时延迟重跑队列"（ADR-003 二档降级：gateway 全不可用
 //     时请求入延迟队列），挂点即在 cmd 构造 redis alert client 处
 //     （main.go 的 Redis 出口）→ sessionstore.New(client, config.RedisAlert)；
-//   - 自动触发（Escalation 超时未 ack 的工单自动跑 RCA 再通知）留 ADR-014
-//     二期决策，本文件不做。
+//   - 自动触发（Escalation 联动）已随二期池波二 #4 落地：cmd/opscopilot/rca_auto.go
+//     在 critical 升级成功后复用本编排器 Analyze(actor="auto")，本文件零改动。
 package main
 
 import (

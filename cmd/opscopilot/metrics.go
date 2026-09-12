@@ -97,6 +97,10 @@ type AppMetrics struct {
 	// 默认 8s 之外的慢网关形态；标签与 outcome 正交，不带 model/endpoint
 	// （维度爆炸 + 内网地址泄露面）。
 	LLMDuration *metrics.Histogram
+	// RCATriggerDropped 自动 RCA 触发队列（二期池波二 #4，OPS_RCA_AUTO）满时
+	// 丢弃的触发请求数。升级风暴/慢分析积压下"绝不阻塞 escalation"的代价面：
+	// 丢的是自动分析（可事后按需 GET /rca 补），绝不丢升级通知本身。
+	RCATriggerDropped *metrics.Counter
 }
 
 // latencyStages 延迟观测的两种阶段（跳过计数器的固定维度集合）。
@@ -150,6 +154,8 @@ func NewAppMetrics() *AppMetrics {
 			"On-demand RCA analysis latency (evidence collection + six-step pipeline), outcome-agnostic", nil, rcaBuckets, latencyWindow),
 		LLMDuration: reg.Histogram("opscopilot_llm_duration_seconds",
 			"llm-gateway chat request latency (RCA conclude egress, ADR-015); degradation surface = outcome!=ok", nil, llmBuckets, latencyWindow),
+		RCATriggerDropped: reg.Counter("opscopilot_rca_autotrigger_dropped_total",
+			"Auto RCA trigger requests dropped because the bounded async queue was full (OPS_RCA_AUTO, #4) — escalation notification itself is never blocked or lost", nil),
 	}
 	for _, s := range rcaOutcomes {
 		m.RCARequests[s] = reg.Counter("opscopilot_rca_requests_total",
@@ -259,6 +265,14 @@ func (m *AppMetrics) ObserveLLMLatency(d time.Duration) {
 		return
 	}
 	m.LLMDuration.Observe(d.Seconds())
+}
+
+// CountRCATriggerDrop 记一次自动 RCA 触发被有界队列丢弃（OPS_RCA_AUTO 队满，#4）。
+func (m *AppMetrics) CountRCATriggerDrop() {
+	if m == nil {
+		return
+	}
+	m.RCATriggerDropped.Inc()
 }
 
 // ObserveVerdictLatency 记录"发射 → 判决生成"延迟（口径见文件头 #8 注记）。

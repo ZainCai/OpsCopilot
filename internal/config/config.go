@@ -219,7 +219,12 @@ type TopologySection struct {
 // 消费方唯一在 cmd/opscopilot/rca_orchestrator.go（装配显式注入，
 // internal/rca 不 import 本包——边界纪律）。
 type RCASection struct {
-	Enabled bool          // OPS_RCA on/off，默认 on（只读按需分析，无副作用面）
+	Enabled bool // OPS_RCA on/off，默认 on（只读按需分析，无副作用面）
+	// Auto 升级联动自动触发（OPS_RCA_AUTO，二期池波二 #4）。默认 off 保持
+	// "只做按需"现状；on 时 critical 事件被值班升级成功催办后，异步跑一次
+	// 该事件的 RCA 并落审计（实现见 cmd/opscopilot/rca_autotrigger.go）。
+	// 依赖 Enabled——Validate 强制（自动触发复用按需链路，off 时无处借力）。
+	Auto    bool
 	Timeout time.Duration // OPS_RCA_TIMEOUT 单次分析超时（含取证），默认 10s
 	Window  time.Duration // OPS_RCA_WINDOW 证据窗（T0 前多久内的变更算嫌疑），默认 30m
 	Depth   int           // OPS_RCA_DEPTH 故障域邻域取证跳数，默认 2（1..10，与 GetTopology 上限同源）
@@ -317,6 +322,12 @@ func (c *Config) Validate() error {
 	}
 	if r := c.MemLimit.WarnRatio; r <= 0 || r > 1 {
 		return fmt.Errorf("memlimit warn ratio must be in (0, 1], got %g", r)
+	}
+	// 二期池波二 #4：自动触发复用按需链路（RCAOrchestrator 只在 Enabled 时
+	// 装配），AUTO=on 而 RCA=off 是必然而然的配置矛盾——fail-fast 拒绝启动，
+	// 不让"配了自动却永远不触发"静默生效。
+	if c.RCA.Auto && !c.RCA.Enabled {
+		return fmt.Errorf("%s=on requires %s=on (auto trigger reuses the on-demand RCA chain; orchestrator is not wired when it is off)", EnvRCAAuto, EnvRCAEnabled)
 	}
 	if err := c.validateLLM(); err != nil {
 		return err
@@ -441,6 +452,11 @@ const (
 	DefaultRCAWindow  = 30 * time.Minute
 	DefaultRCADepth   = 2
 
+	// DefaultRCAAuto 自动触发（二期池波二 #4）默认 off——保持 ADR-014"本期只
+	// 做按需"的现状，升级联动跑 RCA 是新增副作用面（异步分析 + 写审计），
+	// 显式 OPS_RCA_AUTO=on 才开启。
+	DefaultRCAAuto = false
+
 	// llm-gateway 默认值（二期池波二 #3 / ADR-015）。**Endpoint/Model 无默认**
 	// ——默认禁用（Endpoint 空 = conclude 维持 pending 现状，行为与 ADR-014
 	// 逐字节一致）且不做厂商中立性倒退的模型名预设。超时 8s 是预算纪律
@@ -515,6 +531,7 @@ func Defaults() *Config {
 	c.Topology.ChangeEnabled = true
 	c.Topology.ChangePruneInterval = DefaultChangePruneInterval
 	c.RCA.Enabled = DefaultRCAEnabled
+	c.RCA.Auto = DefaultRCAAuto
 	c.RCA.Timeout = DefaultRCATimeout
 	c.RCA.Window = DefaultRCAWindow
 	c.RCA.Depth = DefaultRCADepth

@@ -124,14 +124,15 @@ func main() {
 		}
 		// W9-1 闸门接线在装配层（attachNoiseGate）：enforce 挂闸门 + 计数
 		// 真相源（共享池），shadow 只打日志。此处只负责簇恢复。
-		if recs, err := noiseRedisSink.LoadClusters(context.Background()); err != nil {
-			logger.Printf("noise cluster restore skipped (redis unreachable): %v", err)
-		} else if len(recs) > 0 {
-			if err := asm.Noise.RestoreFrom(recs); err != nil {
-				logger.Printf("WARNING: noise cluster restore failed (starting empty): %v", err)
-			} else {
-				logger.Printf("noise clusters restored from redis mirror: %d", len(recs))
-			}
+		//
+		// 二期池波二 #5：启动簇恢复改走 clusterRestoreOnPromote（Redis 镜像 →
+		// PG alert_cluster 兜底），与 leader 开闸钩子**同一函数、同一顺序**——
+		// 补上 ADR-014 后果章留的"alert_cluster 跨重启回读"缺口：选举 off /
+		// 非 leader 实例的启动路径此前只读 Redis，Redis 丢/空时簇态清零 →
+		// RCA 故障域取证为空。启动恢复失败不致命（继续起，判决链路 OnPromote
+		// 仍会再兜一次），只响亮告警。
+		if err := clusterRestoreOnPromote(context.Background(), asm.Noise, noiseRedisSink, asm.pool, cfg.Tenant, logger.Printf); err != nil {
+			logger.Printf("WARNING: noise cluster startup restore failed (starting empty): %v", err)
 		}
 	}
 
@@ -205,6 +206,13 @@ func main() {
 	// 成功，杜绝双发重通知；无库降级内存台账维持"仅单实例正确"）。未启用则 nil。
 	if asm.Escalation != nil {
 		go asm.Escalation.Run(runCtx)
+	}
+
+	// 二期池波二 #4：自动 RCA worker（OPS_RCA_AUTO=on 且已挂 escalation 时非
+	// nil）。独立 goroutine 串行消费有界队列——升级扫描循环只投递不等待，
+	// 分析再慢也不回压 escalation。ctx 取消（停机）即退出。
+	if asm.RCATrigger != nil {
+		go asm.RCATrigger.Run(runCtx)
 	}
 
 	// W9-5（第八轮审核 C7）：变更事件库的保留窗清理。ChangeStore 是进程内
@@ -299,6 +307,13 @@ func main() {
 			asm.Escalation.After, asm.Escalation.Interval)
 	} else {
 		logger.Printf("  escalation: OFF (set OPS_ESCALATION=on to enable unacked-timeout re-notify)")
+	}
+	if asm.RCATrigger != nil {
+		logger.Printf("  rca auto: ON (critical escalation triggers async RCA, audit actor=auto; storm-guard once/incident; dropped metric opscopilot_rca_autotrigger_dropped_total)")
+	} else if cfg.RCA.Auto {
+		logger.Printf("  rca auto: configured ON but not wired (needs OPS_ESCALATION=on and a trigger point)")
+	} else {
+		logger.Printf("  rca auto: OFF (set OPS_RCA_AUTO=on with OPS_RCA=on + OPS_ESCALATION=on to auto-analyze critical escalations)")
 	}
 	// #11/ADR-012：leader 模式启动可见性——多副本部署时运维第一眼看这条。
 	if !cfg.Leader.Election || asm.pool == nil {

@@ -8,9 +8,13 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"sync"
 	"testing"
 	"time"
+
+	"opscopilot/internal/noise"
 )
 
 // ---------- 假 leader 状态源（驱动 runLeaderGated，不碰 PG） ----------
@@ -250,5 +254,62 @@ func TestClusterRestoreOnPromoteBothSourcesFailed(t *testing.T) {
 	err = clusterRestoreOnPromote(context.Background(), asm.Noise, nil, nil, cfg.Tenant, func(string, ...any) {})
 	if err == nil {
 		t.Fatal("both sources unwired must fail the restore gate, got nil")
+	}
+}
+
+// TestClusterRestoreOnPromotePGFallbackAlertCluster 二期池波二 #5：Redis 镜像
+// 未接线/不可读时，恢复走 PG alert_cluster 兜底重建内存簇（这正是 #5 补上的
+// 启动路径缺口——main.go 启动恢复现改调本函数，非 leader / election-off
+// 实例重启后不再因 Redis 空而丢故障域取证）。DSN 门控，真写一条簇再回读。
+func TestClusterRestoreOnPromotePGFallbackAlertCluster(t *testing.T) {
+	if os.Getenv("OPS_TEST_PG_DSN") == "" {
+		t.Skip("OPS_TEST_PG_DSN not set — alert_cluster fallback restore skipped")
+	}
+	sink := pgSinkForTest(t) // 自持连接池，tenant=default
+	clusterKey := fmt.Sprintf("c:startup-fallback@%d", time.Now().UnixNano())
+	rec := noise.ClusterRecord{
+		TenantID:     "default",
+		ClusterKey:   clusterKey,
+		State:        noise.StateOpen,
+		FirstSeen:    time.Now().Add(-time.Hour),
+		LastSeen:     time.Now(),
+		Severity:     "critical",
+		Summary:      "StartupFallback",
+		AlertCount:   1,
+		Fingerprints: []string{"fp-startup"},
+		NodeKeys:     []string{"prometheus://nodes/startup-n1"},
+	}
+	if err := sink.SaveCluster(rec); err != nil {
+		t.Fatalf("SaveCluster: %v", err)
+	}
+	t.Cleanup(func() {
+		pgExec(t, sink, `DELETE FROM alert_cluster WHERE tenant_id='default' AND cluster_key=$1`, clusterKey)
+	})
+
+	cfg := testAssemblyConfig("tk")
+	cfg.DB.DSN = os.Getenv("OPS_TEST_PG_DSN")
+	asm, err := NewAssembly(newQuietLogger(), cfg)
+	if err != nil {
+		t.Fatalf("assembly: %v", err)
+	}
+	defer asm.Close()
+	if asm.Noise == nil {
+		t.Skip("noise engine not enabled")
+	}
+	// 先断言内存视图此刻无此簇（模拟重启后空态）。
+	if asm.Noise.shadow.Clusterer().Get(clusterKey) != nil {
+		t.Fatal("cluster unexpectedly present before restore")
+	}
+	// redisSink=nil → 强制 PG 兜底路径；成功恢复且不报错。
+	if err := clusterRestoreOnPromote(context.Background(), asm.Noise, nil, asm.pool, cfg.Tenant,
+		func(string, ...any) {}); err != nil {
+		t.Fatalf("pg fallback restore failed: %v", err)
+	}
+	cl := asm.Noise.shadow.Clusterer().Get(clusterKey)
+	if cl == nil {
+		t.Fatalf("cluster %s not rebuilt from alert_cluster fallback", clusterKey)
+	}
+	if _, ok := cl.NodeKeys["prometheus://nodes/startup-n1"]; !ok {
+		t.Fatalf("rebuilt cluster missing node keys: %+v", cl.NodeKeys)
 	}
 }

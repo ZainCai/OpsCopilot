@@ -173,6 +173,13 @@ type EscalationPoller struct {
 	Interval time.Duration // 扫描周期（<=0 = 未启用）
 	logf     func(string, ...any)
 	now      func() time.Time // 可注入时钟（测试用）
+	// OnEscalate 成功升级一条事件后的回调（二期池波二 #4：critical 事件
+	// 自动 RCA 触发挂点）。nil = 无联动（保持现状）。
+	//
+	// **纪律**：本回调在 escalation 扫描循环内联调用，实现方**必须非阻塞**
+	// （只做内存去重 + 有界队列投递，投递满即丢弃计数）——绝不允许在这里
+	// 同步跑 RCA/查库/发通知，否则一次慢分析会拖垮整个升级节律。
+	OnEscalate func(inc incident.Incident)
 }
 
 // NewEscalationPoller 构造。任何依赖缺失或周期 <=0 → Run 立即返回（不 panic）。
@@ -251,6 +258,11 @@ func (p *EscalationPoller) pollOnce(ctx context.Context) {
 			continue
 		}
 		escalated++
+		if p.OnEscalate != nil {
+			// 升级成功联动（#4 自动 RCA 触发点）：回调约定非阻塞（见字段注释），
+			// 内联调用不引入新串行成本；critical 过滤由实现方负责。
+			p.OnEscalate(inc)
+		}
 	}
 	if escalated > 0 {
 		p.logf("escalation: scanned=%d escalated=%d", len(open), escalated)

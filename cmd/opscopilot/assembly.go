@@ -65,6 +65,9 @@ type Assembly struct {
 	Escalation *EscalationPoller
 	// RCA 按需根因分析编排器（#12/ADR-014；nil = OPS_RCA=off，端点 503）。
 	RCA *RCAOrchestrator
+	// RCATrigger 升级联动自动 RCA 触发器（二期池波二 #4；nil = OPS_RCA_AUTO=off
+	// 或无 escalation 挂点）。Run 由 main 以 runCtx 驱动独立 worker goroutine。
+	RCATrigger *RCATrigger
 	// Events 实时广播器（W11：控制台事件页 SSE 订阅源）。
 	Events *EventHub
 	// NotifyReg 通知渠道注册表（W9-2）：渠道 CRUD 后由 reloadNotifyChannels
@@ -409,6 +412,23 @@ func NewAssembly(logger connector.Logger, cfg *config.Config) (*Assembly, error)
 		}
 	} else {
 		logf("rca on-demand analysis disabled (OPS_RCA=off)")
+	}
+
+	// 二期池波二 #4：升级联动自动 RCA（OPS_RCA_AUTO，默认 off）。复用上面
+	// 按需链路的同一个 orchestrator——不复制分析逻辑，只是多接一个触发入口。
+	// 触发点：escalation 成功催办一条 **critical** 事件之后（异步、非阻塞）。
+	// 前置 config.Validate 已保证 Auto=on ⇒ Enabled=on（orchestrator 必在）。
+	if cfg.RCA.Auto && asm.RCA != nil {
+		if asm.Escalation == nil {
+			logf("WARNING: OPS_RCA_AUTO=on but OPS_ESCALATION=off — no escalation hook to attach; auto RCA will NOT trigger")
+		} else {
+			trig := NewRCATrigger(asm.RCA, audit, appMetrics, defaultRCATriggerQueue, logf)
+			asm.RCATrigger = trig
+			// OnEscalate 契约要求非阻塞（见 escalation.go 字段注释）：Trigger
+			// 只做内存去重 + 有界队列投递，critical 过滤也在其中完成。
+			asm.Escalation.OnEscalate = trig.Trigger
+			logf("rca auto-trigger: ON (critical escalation -> async RCA, actor=auto, queue %d)", defaultRCATriggerQueue)
+		}
 	}
 
 	// W9 双链路链路 A（外部导入）：入队通道需要 DB 队列（持久化/可积压/可重放）。
