@@ -19,6 +19,8 @@ export const ENDPOINTS = {
   incidentDuplicates: (id: string) =>
     `${V1}/incidents/${encodeURIComponent(id)}/duplicates`, // GET
   incidentAudit: (id: string) => `${V1}/incidents/${encodeURIComponent(id)}/audit`, // GET
+  incidentTimeline: (id: string) =>
+    `${V1}/incidents/${encodeURIComponent(id)}/timeline`, // GET（W10-1 混合时间线 ?limit=&cursor=）
   incidentMerge: (id: string) => `${V1}/incidents/${encodeURIComponent(id)}/merge`, // POST
   incidentTransition: (id: string) =>
     `${V1}/incidents/${encodeURIComponent(id)}/transition`, // POST

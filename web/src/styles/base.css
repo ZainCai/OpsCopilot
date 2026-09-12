@@ -160,6 +160,15 @@ label.toggle { display: inline-flex; gap: 6px; align-items: center; font-size: 1
                  border-radius: 50%; background: var(--brand); }
 .tl .tl-meta { font-family: var(--font-mono); font-size: 11px; color: var(--text-3); margin-left: 6px; }
 
+/* 混合时间线（W10-1 F-03）来源徽标 */
+.tl .tl-kind { display: inline-flex; align-items: center; height: 20px; padding: 0 8px;
+               border-radius: 6px; font-size: 11px; font-weight: 600; border: 1px solid transparent; }
+.tl .tl-kind + .sev { margin-left: 6px; }
+.tl-kind.k-alert_in  { color: var(--crit); border-color: color-mix(in srgb, var(--crit) 40%, transparent); background: color-mix(in srgb, var(--crit) 10%, transparent); }
+.tl-kind.k-alert_out { color: var(--text-2); border-color: var(--line); background: color-mix(in srgb, var(--text-3) 12%, transparent); }
+.tl-kind.k-change    { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent); background: color-mix(in srgb, var(--warn) 10%, transparent); }
+.tl-kind.k-action    { color: var(--brand); border-color: color-mix(in srgb, var(--brand) 40%, transparent); background: color-mix(in srgb, var(--brand) 10%, transparent); }
+
 /* 骨架占位 */
 .todo-box { border: 1px dashed var(--line); border-radius: var(--radius); padding: 22px;
             color: var(--text-2); font-size: 12.5px; line-height: 1.8; }

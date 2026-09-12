@@ -5,13 +5,14 @@ import { openIncidentStream, type StreamStatus } from "../api/sse";
 import { getToken, setActor, setToken } from "../api/token";
 import type {
   AuditResponse, DuplicatesResponse, Incident, IncidentStats, IncidentsResponse,
+  TimelineResponse,
 } from "../api/types";
 import { Panel, Banner, Loading } from "../components/Panel";
 import { DataTable, type Column } from "../components/DataTable";
 import { OriginBadge, SevBadge, StateChip } from "../components/Badges";
 import { PageHead } from "../components/Layout";
 import { Seg, StatCard } from "../components/Stat";
-import { AuditTimeline } from "../components/Timeline";
+import { AuditTimeline, MixedTimeline } from "../components/Timeline";
 import { fmtTime, timeAgoText } from "../lib/format";
 
 /** 事件状态机（后端 rest_incidents.go 保证合法性，前端只展示允许转移）。 */
@@ -37,8 +38,9 @@ const STREAM_STATES: Record<StreamStatus | "off", StreamChip> = {
 /**
  * 视图二 · 事件（实装，W9 双链路）。
  * 端点：GET /incidents（服务端过滤 + 游标分页 + stats）、GET /incidents/{id}、
- * GET /{id}/duplicates、GET /{id}/audit、POST /incidents（人工建单）、
- * POST /{id}/transition、POST /{id}/merge、GET /auth/status、SSE /events/stream。
+ * GET /{id}/duplicates、GET /{id}/audit、GET /{id}/timeline（W10-1 混合时间线）、
+ * POST /incidents（人工建单）、POST /{id}/transition、POST /{id}/merge、
+ * GET /auth/status、SSE /events/stream。
  */
 export function IncidentsView({ onConn }: { onConn: (ok: boolean) => void }): React.ReactElement {
   const [state, setState] = useState<StateFilter>("active");
@@ -256,6 +258,7 @@ function IncidentDetail({ id, onChanged }: { id: string; onChanged: () => void }
   const [cands, setCands] = useState<DuplicatesResponse["candidates"]>([]);
   const [audit, setAudit] = useState<AuditResponse["entries"]>([]);
   const [err, setErr] = useState("");
+  const [tlRefresh, setTlRefresh] = useState(0); // 写操作成功后强制重拉混合时间线
 
   const reload = useCallback(async () => {
     setErr("");
@@ -282,6 +285,7 @@ function IncidentDetail({ id, onChanged }: { id: string; onChanged: () => void }
     try {
       await postJSON(ENDPOINTS.incidentTransition(id), { to, actor });
       await reload();
+      setTlRefresh((n) => n + 1);
       onChanged();
     } catch (e) {
       window.alert("流转失败：" + (e instanceof ApiError ? e.message + (e.needsToken ? "（写操作需填 Token）" : "") : String(e)));
@@ -296,6 +300,7 @@ function IncidentDetail({ id, onChanged }: { id: string; onChanged: () => void }
     try {
       await postJSON(ENDPOINTS.incidentMerge(srcId), { target_id: targetId, actor });
       await reload();
+      setTlRefresh((n) => n + 1);
       onChanged();
     } catch (e) {
       window.alert("合并失败：" + (e instanceof ApiError ? e.message + (e.needsToken ? "（写操作需填 Token）" : "") : String(e)));
@@ -333,6 +338,7 @@ function IncidentDetail({ id, onChanged }: { id: string; onChanged: () => void }
           ))
           : <span className="panel-sub">已解决，无可用操作</span>}
       </div>
+      <TimelineSection id={id} refresh={tlRefresh} />
       <div className="sec">
         <div className="sec-h">疑似重复（L2 · 只提示不自动合并）</div>
         {cands.length === 0
@@ -354,6 +360,65 @@ function IncidentDetail({ id, onChanged }: { id: string; onChanged: () => void }
         <div className="sec-h">审计轨迹（{audit.length}）</div>
         <AuditTimeline entries={audit} />
       </div>
+    </div>
+  );
+}
+
+// ---------- 混合时间线（GET /{id}/timeline，W10-1/F-03） ----------
+// 后端把 alert_event ∥ change_record ∥ incident_audit 三源按时间归并并
+// 分页（升序 + 同刻稳定序）；partial=true 表示有依赖源缺席（如无 DSN），
+// 已拉到的照常展示——降级口径见 cmd/opscopilot/rest_timeline.go 文件头。
+
+const TL_PAGE_SIZE = 50;
+
+function TimelineSection({ id, refresh }: { id: string; refresh: number }): React.ReactElement {
+  const [tl, setTl] = useState<TimelineResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState("");
+
+  const load = useCallback(async (cursor: string) => {
+    setLoading(true);
+    setErr("");
+    try {
+      const data = await getJSON<TimelineResponse>(
+        ENDPOINTS.incidentTimeline(id),
+        { limit: TL_PAGE_SIZE, cursor: cursor || undefined },
+      );
+      // 翻页追加：升序契约下新条目只会出现在尾部，直接 concat 即保持单调。
+      setTl((prev) => (cursor && prev ? { ...data, items: prev.items.concat(data.items ?? []) } : data));
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [id]);
+
+  useEffect(() => {
+    setTl(null);
+    void load("");
+  }, [load, refresh]);
+
+  const missing = tl?.missing ?? {};
+  return (
+    <div className="sec">
+      <div className="sec-h">混合时间线{tl ? `（告警进出 ∥ 变更 ∥ 处置 · ${tl.total}）` : ""}</div>
+      {tl?.partial
+        ? (
+          <div className="banner warn" style={{ marginBottom: 6 }}>
+            部分源降级：{Object.entries(missing).map(([k, v]) => `${k} — ${v}`).join("；") || "未知原因"}
+          </div>
+        )
+        : null}
+      {!tl && loading ? <span className="panel-sub"><span className="spin" />加载时间线…</span> : null}
+      {err ? <div className="banner err">时间线加载失败：{err}</div> : null}
+      {tl ? <MixedTimeline items={tl.items} /> : null}
+      {tl?.next_cursor
+        ? (
+          <button type="button" className="btn btn--sm" disabled={loading} onClick={() => void load(tl.next_cursor)}>
+            {loading ? "加载中…" : "加载更多"}
+          </button>
+        )
+        : null}
     </div>
   );
 }

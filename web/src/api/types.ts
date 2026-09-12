@@ -141,6 +141,27 @@ export interface AuditResponse {
   count: number;
 }
 
+// ---------- 事件混合时间线（GET /api/v1/incidents/{id}/timeline，W10-1/F-03） ----------
+/** kind 封闭集合（rest_timeline.go TimelineKind*，同刻稳定序 change<action<alert）。 */
+export type TimelineKind = "alert_in" | "alert_out" | "change" | "action";
+export interface TimelineItem {
+  ts: string; // RFC3339
+  kind: TimelineKind;
+  source_id: string; // 源前缀唯一引用（alert:/change:/action:）
+  summary?: string;
+  severity?: string; // 仅告警源
+  confidence?: string; // 仅变更源（ADR-007）
+}
+export interface TimelineResponse {
+  incident_id: string;
+  items: TimelineItem[];
+  count: number;
+  total: number; // 三源归并后的全量条数（不受分页影响）
+  next_cursor: string; // 空 = 已到末尾
+  partial: boolean; // true ⇒ 有依赖源缺席/不完整（见 missing）
+  missing: Record<string, string>; // 源名 → 缺席/不完整原因
+}
+
 // ---------- 鉴权探测（GET /api/v1/auth/status） ----------
 export interface AuthStatus {
   write_authorized: boolean;
