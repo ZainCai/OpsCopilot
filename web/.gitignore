@@ -1,0 +1,9 @@
+# 依赖与构建产物不入库
+node_modules/
+dist/
+*.tsbuildinfo
+.vite/
+# 本地环境覆盖（代理目标/调试 Token 等），不入库
+.env
+.env.local
+.env.*.local

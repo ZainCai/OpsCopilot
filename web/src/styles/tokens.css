@@ -1,0 +1,38 @@
+/* ===== 设计令牌 —— 从 cmd/opscopilot/console.html 现网 CSS 抽出 =====
+   与内嵌页保持同一皮肤口径（EagleOps 原型规范适配版）：
+   暗色默认 + 浅色跟随系统；改令牌只改这一处。 */
+:root {
+  --font-sans: "IBM Plex Sans", "Noto Sans SC", -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", "SF Mono", Consolas, "Courier New", monospace;
+
+  /* 暗色（默认） */
+  --bg: #0f172a;
+  --bg-soft: #131b30;
+  --panel: #1e293b;
+  --panel-2: #233046;
+  --raised: #2a3a52;
+  --line: #334155;
+  --line-soft: #2b3a4f;
+  --text: #f1f5f9;
+  --text-2: #94a3b8;
+  --text-3: #64748b;
+  --brand: #6366f1;
+  --brand-ink: #ffffff;
+  --ok: #22c55e;
+  --warn: #f59e0b;
+  --crit: #ef4444;
+  --info: #3b82f6;
+  --radius: 10px;
+  --row-h: 44px;
+  --pad: 18px;
+  --shadow: 0 12px 34px rgba(2, 6, 18, 0.5);
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #eef2f7; --bg-soft: #f4f7fb; --panel: #ffffff; --panel-2: #f6f8fc;
+    --raised: #ffffff; --line: #dbe3ee; --line-soft: #e6ecf4;
+    --text: #0f172a; --text-2: #475569; --text-3: #94a3b8;
+    --brand: #4f46e5; --ok: #16a34a; --warn: #d97706; --crit: #dc2626; --info: #2563eb;
+    --shadow: 0 8px 26px rgba(30, 42, 60, 0.14);
+  }
+}

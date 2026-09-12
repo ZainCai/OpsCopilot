@@ -23,3 +23,6 @@ Thumbs.db
 evaluation-report.md
 verdicts.json
 csmoke.log
+# 独立前端工程（ADR-013）：依赖与构建产物不入库，web/ 源码照常跟踪
+web/node_modules/
+web/dist/
