@@ -16,7 +16,7 @@
 >   （v1.2 C2 / G1"缺一拒绝启动"）不因收敛放松；两地址归一化后相同
 >   （`localhost` ≡ `127.0.0.1`、大小写/空白不敏感）同样拒绝启动。
 
-统计：**49 个运行时 env 键**（`OPS_*` 47 + `REDIS_*` 2），13 组。
+统计：**51 个运行时 env 键**（`OPS_*` 49 + `REDIS_*` 2），14 组。
 （优化方案 #8 判决异步落库队列 `OPS_NOISE_SINK_*` 4 键，**队满丢弃取向**：
 慢 DB/极端洪峰下丢持久化保采集节拍，宁漏库存不丢通知——**PG 判决流可缺
 条目，Redis/PG 镜像与内存态非强一致**，丢弃面看
@@ -24,6 +24,8 @@
 口径改为"判决生成"，见 docs/W9-4 §9。）
 （优化方案 #6 新增 `OPS_MEMLIMIT_*` 组 9 键：无界内存结构的容量上限 + 告警水位。）
 （优化方案 #11 新增 `OPS_INGEST_LEASE_DURATION`：ingest 认领租约，多实例并发消费互斥。）
+（优化方案 #11/ADR-012 新增 `OPS_LEADER_*` 组 2 键：PG advisory lock 选主
+（键 0x4F43504C），拓扑判决链路单 owner；无 DB 或 off → 恒 leader 降级。）
 另有 1 个测试门控键与 2 个独立 CLI 工具的键，见文末附录 B/C。
 
 ## 清单表
@@ -79,6 +81,8 @@
 | 47 | `OPS_MEMLIMIT_NOISE_CLUSTERS` | 内存有界化 | 正整数 | `50000` | **启动失败** | `noise.NewClustererWithLimits`（活跃+历史总量；resolved 最先出局——真相源在 alert_cluster/Redis 镜像，可 Restore 重建） |
 | 48 | `OPS_MEMLIMIT_NOISE_SIGCACHE` | 内存有界化 | 正整数 | `50000` | **启动失败** | `NoiseEngine.persistedSig` 孤儿键超限 GC（簇消失后的签名条目永久无用） |
 | 49 | `OPS_MEMLIMIT_AUDIT` | 内存有界化 | 正整数 | `50000` | **启动失败** | `NewMemAuditLogWithLimits`（无 DB 时审计尾部截断丢最旧） |
+| 50 | `OPS_LEADER_ELECTION` | leader 选举 | on/off | `on`（**优化方案 #11/ADR-012 新增**：有 DB 即竞选） | 非 on/off → **启动失败** | `config.Leader.Election` → `NewLeaderElector`（cmd/leader.go，PG advisory lock 0x4F43504C）：leader 才跑 Host 采集/判决链路/告警拉取/Retention；无 DB 或 off 恒 leader（单实例语义不变）；本实例态看 `/metrics` gauge `opscopilot_is_leader`（ADR 观测章原名 `opscopilot_leader` 作等价别名同时暴露） |
+| 51 | `OPS_LEADER_RETRY_INTERVAL` | leader 选举 | 正 duration | `5s`（同上） | **启动失败** | 竞选节拍 = 持锁复检（连接探针）节拍 = failover 接管上界（ADR 验收标准 3 的 15s 限时 ≈ 3 个节拍余量） |
 
 > #6 指标（非 env，登记于此便于对照）：每个有界结构两项——
 > `opscopilot_mem_entries{store="builder|builder_edges|incidents|escalation_ledger|noise_dedup|noise_clusters|noise_sigcache|audit"}`（gauge）

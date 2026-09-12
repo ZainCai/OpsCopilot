@@ -60,6 +60,9 @@ const (
 	EnvIngestAlertBodyLimit = "OPS_INGEST_ALERT_BODY_LIMIT"
 	EnvIngestLeaseDuration  = "OPS_INGEST_LEASE_DURATION"
 
+	EnvLeaderElection      = "OPS_LEADER_ELECTION"
+	EnvLeaderRetryInterval = "OPS_LEADER_RETRY_INTERVAL"
+
 	EnvEscalation         = "OPS_ESCALATION"
 	EnvEscalationAfter    = "OPS_ESCALATION_AFTER"
 	EnvEscalationInterval = "OPS_ESCALATION_INTERVAL"
@@ -136,6 +139,11 @@ func LoadFrom(lookup LookupFunc) (*Config, error) {
 	c.Ingest.BatchTimeoutPerItem = p.posDur(EnvIngestBatchPerItem, DefaultIngestBatchPerItem)
 	c.Ingest.AlertBodyLimit = p.posInt64(EnvIngestAlertBodyLimit, DefaultAlertBodyLimit)
 	c.Ingest.LeaseDuration = p.posDur(EnvIngestLeaseDuration, DefaultIngestLeaseDuration)
+
+	// #11/ADR-012：默认开——有 DB 即竞选（多副本安全）；无 DSN/pool 时
+	// 装配层自动恒为 leader（降级路径），off = 显式退回单实例语义。
+	c.Leader.Election = p.onOff(EnvLeaderElection, DefaultLeaderElection)
+	c.Leader.RetryInterval = p.posDur(EnvLeaderRetryInterval, DefaultLeaderRetryInterval)
 
 	c.Notify.EscalationEnabled = p.onOff(EnvEscalation, false)
 	c.Notify.EscalationAfter = p.posDur(EnvEscalationAfter, DefaultEscalationAfter)

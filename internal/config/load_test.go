@@ -46,6 +46,7 @@ func TestLoadFromDefaults(t *testing.T) {
 		{"noise", got.Noise, want.Noise},
 		{"pull", got.Pull, want.Pull},
 		{"ingest", got.Ingest, want.Ingest},
+		{"leader", got.Leader, want.Leader},
 		{"notify", got.Notify, want.Notify},
 		{"retention", got.Retention, want.Retention},
 		{"topology", got.Topology, want.Topology},
@@ -73,19 +74,22 @@ func TestLoadFromAggregatesAllErrors(t *testing.T) {
 	env[EnvChangePruneInterval] = "0s"
 	env[EnvCORSOrigin] = "*"
 	env[EnvIngestBatch] = "-3"
+	env[EnvLeaderElection] = "yes"     // #11：on/off 开关只认 on|off
+	env[EnvLeaderRetryInterval] = "0s" // 非正 duration 同样拒绝
 
 	_, err := LoadFrom(envMap(env))
 	var agg *Error
 	if !errors.As(err, &agg) {
 		t.Fatalf("want *Error, got %T: %v", err, err)
 	}
-	if len(agg.Errs) != 10 {
-		t.Fatalf("want 10 aggregated errors, got %d: %v", len(agg.Errs), err)
+	if len(agg.Errs) != 12 {
+		t.Fatalf("want 12 aggregated errors, got %d: %v", len(agg.Errs), err)
 	}
 	for _, key := range []string{
 		EnvDBMaxConns, EnvPullInterval, EnvEscalationAfter, EnvNoiseWindow,
 		EnvNoiseMode, EnvAllowUnauthenticated, EnvIncidentRetention,
 		EnvChangePruneInterval, EnvCORSOrigin, EnvIngestBatch,
+		EnvLeaderElection, EnvLeaderRetryInterval,
 	} {
 		if !strings.Contains(err.Error(), key) {
 			t.Errorf("aggregated error must mention %s, got:\n%v", key, err)

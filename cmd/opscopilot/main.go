@@ -88,6 +88,9 @@ func main() {
 	// 逐告警 Verdict），与 Redis 镜像双写。DB 不可达不阻塞启动——
 	// 运维通过日志与失败计数观察；ADR-001 语义下库缺席只影响重建能力。
 	var noiseRDB *redis.Client
+	// noiseRedisSink 提到函数作用域：#11 leader OnPromote 钩子（开闸前簇态
+	// 恢复）要按 Redis → PG 顺序读镜像，钩子在下方门禁段才登记。
+	var noiseRedisSink *RedisClusterSink
 	if asm.Noise != nil {
 		// W9-5：显式给超时（默认值不动声色的后果见 noise_store_redis.go 文件头）。
 		// 客户端超时只管单次 round-trip，整体上界由 sink 的 ctx deadline 兜底。
@@ -102,7 +105,7 @@ func main() {
 			WriteTimeout:          redisIOTimeout,
 			ContextTimeoutEnabled: true,
 		})
-		redisSink := NewRedisClusterSink(noiseRDB, cfg.Tenant)
+		noiseRedisSink = NewRedisClusterSink(noiseRDB, cfg.Tenant)
 		var pgSink *PGClusterSink
 		if cfg.DB.DSN != "" {
 			sink, err := NewPGClusterSink(context.Background(), cfg.DB.DSN, cfg.Tenant)
@@ -111,17 +114,17 @@ func main() {
 			} else {
 				pgSink = sink
 				defer pgSink.Close()
-				asm.Noise.SetRecordSink(&multiRecordSink{a: redisSink, b: pgSink})
+				asm.Noise.SetRecordSink(&multiRecordSink{a: noiseRedisSink, b: pgSink})
 				asm.Noise.SetVerdictSink(pgSink)
 				logger.Printf("noise persistence: redis mirror + timescaledb truth source")
 			}
 		} else {
-			asm.Noise.SetRecordSink(redisSink)
+			asm.Noise.SetRecordSink(noiseRedisSink)
 			logger.Printf("noise persistence: redis mirror only (set OPS_DB_DSN for truth source)")
 		}
 		// W9-1 闸门接线在装配层（attachNoiseGate）：enforce 挂闸门 + 计数
 		// 真相源（共享池），shadow 只打日志。此处只负责簇恢复。
-		if recs, err := redisSink.LoadClusters(context.Background()); err != nil {
+		if recs, err := noiseRedisSink.LoadClusters(context.Background()); err != nil {
 			logger.Printf("noise cluster restore skipped (redis unreachable): %v", err)
 		} else if len(recs) > 0 {
 			if err := asm.Noise.RestoreFrom(recs); err != nil {
@@ -148,29 +151,30 @@ func main() {
 	// 优雅停机信号先 cancel 再 drain HTTP，采集循环在在途请求落地前先退出。
 	runCtx, runCancel := context.WithCancel(context.Background())
 
-	// Host.Run：周期"健康→采集→发现→投递"，结果进 TopologySink（拓扑 + 告警计数）。
-	go func() {
-		if err := host.Run(runCtx, asm.Sink); err != nil && !errors.Is(err, context.Canceled) {
-			logger.Printf("connector host stopped: %v", err)
-		}
-	}()
+	// #11/ADR-012 leader 门禁接线（矩阵见 leader.go 文件头）。OnPromote 钩子
+	// 必须晚于 Redis/PG 出口构造（上方 noise persistence 段）：开闸前按
+	// Redis 镜像 → PG alert_cluster 顺序重建内存簇，恢复失败不翻转 leader、
+	// 不启动任何 gated 循环（宁漏勿杀）。降级路径（无 DB / election off）下
+	// 选举环不跑任何 PG 语句，本实例恒 leader——与选举引入前逐字节一致。
+	asm.Leader.SetOnPromote(func(ctx context.Context) error {
+		return clusterRestoreOnPromote(ctx, asm.Noise, noiseRedisSink, asm.pool, cfg.Tenant, logger.Printf)
+	})
+	go asm.Leader.Run(runCtx)
 
-	// W9 链路 A：外部导入队列消费者。autoCreate off（影子期默认）时 Run 立即
-	// 返回——消息只堆积不建单，转正后开启即可回放历史消息。
-	if asm.Worker != nil {
-		go asm.Worker.Run(runCtx)
+	// leader 才跑（切换窗口内暂停、恢复后继续；循环在安全点停下）：
+	//   - Host 采集：拓扑图唯一归属，降噪判决链路由此驱动、随 Host 走；
+	//   - AlertPoller 拉取入队：seen 去重是每实例内存态（矩阵）；
+	//   - Retention 归档清扫：全局单写者语义，省掉无谓锁竞争。
+	gated := []func(context.Context){
+		func(c context.Context) {
+			if err := host.Run(c, asm.Sink); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Printf("connector host stopped: %v", err)
+			}
+		},
 	}
-
-	// W11 链路 A 拉取侧：定时从数据源拉告警入队（未启用则 nil）。
 	if asm.Poller != nil {
-		go asm.Poller.Run(runCtx)
+		gated = append(gated, func(c context.Context) { asm.Poller.Run(c) })
 	}
-
-	// W9-3 值班升级：周期扫描未 ack 超时事件并升级一次（未启用则 nil）。
-	if asm.Escalation != nil {
-		go asm.Escalation.Run(runCtx)
-	}
-
 	// D8 决策 C：事件保留策略 —— resolved 满 N 天归档到 incident_archive
 	// （事件本体 + 簇 + 审计 打包成 JSONB，不丢任何上下文）。默认 90d，
 	// OPS_INCIDENT_RETENTION=off 可关闭；配置非法在 config.Load 即启动失败。
@@ -179,10 +183,28 @@ func main() {
 			logger.Printf("  retention: configured but no DB (set OPS_DB_DSN) — disabled")
 		} else {
 			logger.Printf("  retention: ON (archive resolved incidents older than %s)", cfg.Retention.IncidentWindow)
-			go NewRetentionSweeper(asm.pool, cfg.Tenant, cfg.Retention.IncidentWindow, logger.Printf).Run(runCtx)
+			gated = append(gated, func(c context.Context) {
+				NewRetentionSweeper(asm.pool, cfg.Tenant, cfg.Retention.IncidentWindow, logger.Printf).Run(c)
+			})
 		}
 	} else {
 		logger.Printf("  retention: OFF (set OPS_INCIDENT_RETENTION, e.g. 90d, to enable)")
+	}
+	go runLeaderGated(runCtx, asm.Leader, gated...)
+
+	// W9 链路 A：外部导入队列消费者。**所有实例常驻**（矩阵：migration
+	// 000016 认领租约互斥 + UpsertExternal 幂等，多副本水平扩展的就是这条
+	// 事件链路）。autoCreate off（影子期默认）时 Run 立即返回——消息只堆积
+	// 不建单，转正后开启即可回放历史消息。
+	if asm.Worker != nil {
+		go asm.Worker.Run(runCtx)
+	}
+
+	// W9-3 值班升级：**所有实例常驻**（矩阵：认领是 PG 台账
+	// (tenant_id, incident_id) 主键幂等——两副本同扫同一逾期单恰一 Claim
+	// 成功，杜绝双发重通知；无库降级内存台账维持"仅单实例正确"）。未启用则 nil。
+	if asm.Escalation != nil {
+		go asm.Escalation.Run(runCtx)
 	}
 
 	// W9-5（第八轮审核 C7）：变更事件库的保留窗清理。ChangeStore 是进程内
@@ -277,6 +299,13 @@ func main() {
 			asm.Escalation.After, asm.Escalation.Interval)
 	} else {
 		logger.Printf("  escalation: OFF (set OPS_ESCALATION=on to enable unacked-timeout re-notify)")
+	}
+	// #11/ADR-012：leader 模式启动可见性——多副本部署时运维第一眼看这条。
+	if !cfg.Leader.Election || asm.pool == nil {
+		logger.Printf("  leader: election OFF (OPS_LEADER_ELECTION=off or no DB) — permanently leader, topology loops run as before (single-instance semantics)")
+	} else {
+		logger.Printf("  leader: election ON (pg advisory lock 0x4F43504C, retry %s) — host-collect/verdict/alert-pull/retention run on leader only; watch opscopilot_is_leader in /metrics",
+			cfg.Leader.RetryInterval)
 	}
 	logger.Printf("  events: 双链路（人工建单 POST /api/v1/incidents ∥ 外部导入 push/pull）+ SSE 实时推送 + 控制台事件页 /console")
 	logger.Printf("  metrics: GET /metrics (告警 fired→verdict / fired→通知 延迟分位 + 判决/闸门计数 + 内存有界结构规模/淘汰 opscopilot_mem_*)")

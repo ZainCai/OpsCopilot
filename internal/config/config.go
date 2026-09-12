@@ -179,6 +179,19 @@ type IngestSection struct {
 	LeaseDuration time.Duration // OPS_INGEST_LEASE_DURATION，默认 2m
 }
 
+// LeaderSection leader 选举与后台循环门禁（优化方案 #11 / ADR-012）：
+// 拓扑判决链路单 owner——PG advisory lock（键 0x4F43504C "OCPL"）选主，
+// leader 才跑 Host 采集/降噪判决链路/AlertPoller/Retention；事件链路
+// （webhook 入队、IngestWorker、REST、通知、escalation、ChangePruner）全实例常驻。
+// **降级路径（ADR 原文）**：无 DSN/pool 或 OPS_LEADER_ELECTION=off → 恒为
+// leader，与单实例现状逐字节一致。
+type LeaderSection struct {
+	Election bool // OPS_LEADER_ELECTION=on/off，默认 on（有 DB 即竞选；off 或无 DB 恒 leader）
+	// RetryInterval 竞选节拍 = 持锁期同连接复检（兼连接探针）节拍 =
+	// failover 接管上界（ADR-012"新 leader 在下一次竞选节拍内拿到锁"）。
+	RetryInterval time.Duration // OPS_LEADER_RETRY_INTERVAL，默认 5s；非法值启动失败
+}
+
 // NotifySection 通知与值班升级（W9-2/W9-3）。渠道配置在 DB（notify_channel），
 // 这里只有升级调度。
 type NotifySection struct {
@@ -248,6 +261,7 @@ type Config struct {
 	Noise     NoiseSection
 	Pull      PullSection
 	Ingest    IngestSection
+	Leader    LeaderSection
 	Notify    NotifySection
 	Retention RetentionSection
 	Topology  TopologySection
@@ -328,6 +342,11 @@ const (
 	DefaultAlertBodyLimit      int64 = 4 << 20          // 4MiB：入站 webhook 与拉取响应共用的单一定义
 	DefaultIngestLeaseDuration       = 2 * time.Minute  // 认领租约（#11/ADR-012）：过期可被重领
 
+	// leader 选举（#11/ADR-012）：默认开（有 DB 即竞选）；竞选/复检节拍 5s
+	// ——failover 接管上界就锁在"一个节拍"内（验收标准 3 的 15s 限时余量充足）。
+	DefaultLeaderElection      = true
+	DefaultLeaderRetryInterval = 5 * time.Second
+
 	DefaultEscalationAfter    = 15 * time.Minute
 	DefaultEscalationInterval = 60 * time.Second
 
@@ -385,6 +404,8 @@ func Defaults() *Config {
 	c.Ingest.BatchTimeoutPerItem = DefaultIngestBatchPerItem
 	c.Ingest.AlertBodyLimit = DefaultAlertBodyLimit
 	c.Ingest.LeaseDuration = DefaultIngestLeaseDuration
+	c.Leader.Election = DefaultLeaderElection
+	c.Leader.RetryInterval = DefaultLeaderRetryInterval
 	c.Notify.EscalationAfter = DefaultEscalationAfter
 	c.Notify.EscalationInterval = DefaultEscalationInterval
 	c.Retention.IncidentWindow = DefaultIncidentRetention

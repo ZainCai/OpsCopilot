@@ -72,6 +72,10 @@ type Assembly struct {
 	Channels *ChannelStore
 	// Metrics 指标集与 /metrics 暴露（W9-4：告警链路延迟打点）。
 	Metrics *AppMetrics
+	// Leader 选主与 leader 状态源（#11/ADR-012，实现见 leader.go）。装配只
+	// 构造不运行——Run/OnPromote 由 main 驱动（钩子要等 Redis/PG 出口就绪）。
+	// 降级路径：无 DB 或 OPS_LEADER_ELECTION=off → 恒 leader。
+	Leader *LeaderElector
 	// audit 审计日志（人工操作与外部自动动作统一留痕）。
 	audit AuditLog
 	// logf 装配期日志函数（渠道重载等运行期回调需要，nil 安全）。
@@ -105,11 +109,16 @@ func (a *Assembly) reloadNotifyChannels() (int, error) {
 // 至多等 OPS_NOISE_SINK_DRAIN，默认 5s；超时残量计 sink_drops 后返回，
 // 宁漏库存不死等——但 writer 还在往 sink 写，排空动作必须早于共享池关闭；
 // main 停机序列已提前调用一次，这里幂等兜底所有直接走 Assembly.Close 的
-// 消费者），再停实时推送（关闭 SSE 连接），最后关 DB 池（共享池的唯一
+// 消费者），再停 leader 选举环（#11：释放 pinned 连接并显式解锁——
+// pgxpool.Close 会等所有 Acquire 出去的连接归还，选举环不先退池就关不掉），
+// 再停实时推送（关闭 SSE 连接），最后关 DB 池（共享池的唯一
 // 所有者是装配，见 NewAssembly）。
 func (a *Assembly) Close() {
 	if a.Noise != nil {
 		a.Noise.StopVerdictWriter()
+	}
+	if a.Leader != nil {
+		a.Leader.Stop()
 	}
 	if a.Events != nil {
 		a.Events.Close() // 让已连接的 SSE 订阅者立即结束，不悬挂
@@ -232,6 +241,26 @@ func NewAssembly(logger connector.Logger, cfg *config.Config) (*Assembly, error)
 			g.RegisterTo(reg)
 		}
 	}
+	// #11/ADR-012 leader 选举器：只构造不运行（Run/OnPromote 归 main）。
+	// 降级路径与单实例现状逐字节一致：无共享池或 OPS_LEADER_ELECTION=off →
+	// 恒 leader（构造即置位，gauge 从装配完成就是 1）。gauge 在**所有实例**
+	// 的 /metrics 暴露本实例 leader 态 0/1（非 leader 恒 0——"当前谁是
+	// owner"的唯一运行时口径）。opscopilot_is_leader 为主名（任务口径），
+	// opscopilot_leader 为 ADR-012 观测章原名的等价别名，同一状态源。
+	leader := NewLeaderElector(pgPool, cfg.Leader.Election, cfg.Leader.RetryInterval, logf)
+	if cfg.Leader.Election && pgPool == nil {
+		logf("WARNING: OPS_LEADER_ELECTION=on but no shared pool (no/unreachable DB) — permanently leader (single-instance semantics)")
+	}
+	leaderGauge := func() float64 {
+		if leader.IsLeader() {
+			return 1
+		}
+		return 0
+	}
+	reg.GaugeFunc("opscopilot_is_leader",
+		"1 = this instance is the cluster leader running topology-gated loops (ADR-012 advisory-lock election; constant 1 when election off or no DB)", nil, leaderGauge)
+	reg.GaugeFunc("opscopilot_leader",
+		"Alias of opscopilot_is_leader (name used in ADR-012 observability section)", nil, leaderGauge)
 	// 变更库后端选型（优化方案 #4）：恒先建内存实现——严格节点校验钩子经
 	// Sink.HasNode 锁内查图，"先发现、后变更"的关联语义在此闭环。有共享池
 	// 则包一层 PGChangeStore（PG=真相源、内存=读缓存）并**启动回放**保留窗
@@ -344,6 +373,7 @@ func NewAssembly(logger connector.Logger, cfg *config.Config) (*Assembly, error)
 		NotifyReg: notifyReg,
 		Channels:  chStore,
 		Metrics:   appMetrics,
+		Leader:    leader,
 		audit:     audit,
 		logf:      logf,
 		pool:      pgPool,

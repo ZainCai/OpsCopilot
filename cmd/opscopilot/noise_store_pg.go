@@ -15,6 +15,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -140,6 +141,58 @@ VALUES ($1, NULLIF($2,''), $3, 'shadow', $4, $5::jsonb)`,
 		return fmt.Errorf("pg sink: insert verdict %s: %w", rec.Fingerprint, err)
 	}
 	return nil
+}
+
+// LoadClusters 从 PG 真相源拉取全部簇记录（ADR-012 failover 时序 3 的兜底
+// 重建入口：Redis 镜像不可用时按本表拉平内存簇，对齐 ADR-001"库才是重建
+// 依据"）。列映射是 SaveCluster 的逆运算：evidence JSONB →
+// Fingerprints/NodeKeys/AlertCount。单条 evidence 损坏跳过不拖垮整体（与
+// RedisClusterSink.LoadClusters 同款口径）。按 cluster_key 排序（决定性）。
+func (s *PGClusterSink) LoadClusters(ctx context.Context) ([]noise.ClusterRecord, error) {
+	return loadAlertClustersFromPG(ctx, s.pool, s.tenantID)
+}
+
+// loadAlertClustersFromPG 独立成函数（不依赖 sink 构造）：leader OnPromote
+// 钩子直接拿共享池读——PGClusterSink 建立失败（DSN 坏了）不该把选举也拖死，
+// 选举本身只用同池的 advisory lock，池活着就够。
+func loadAlertClustersFromPG(ctx context.Context, pool *pgxpool.Pool, tenantID string) ([]noise.ClusterRecord, error) {
+	if pool == nil {
+		return nil, errors.New("load clusters: no pool (DB not configured)")
+	}
+	rows, err := pool.Query(ctx, `
+SELECT cluster_key, state, first_seen_at, last_seen_at,
+       COALESCE(severity, ''), COALESCE(summary, ''), evidence
+FROM alert_cluster WHERE tenant_id = $1 ORDER BY cluster_key`, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("load clusters: query alert_cluster: %w", err)
+	}
+	defer rows.Close()
+	var recs []noise.ClusterRecord
+	for rows.Next() {
+		var rec noise.ClusterRecord
+		var evidence []byte
+		if err := rows.Scan(&rec.ClusterKey, &rec.State, &rec.FirstSeen, &rec.LastSeen,
+			&rec.Severity, &rec.Summary, &evidence); err != nil {
+			return nil, fmt.Errorf("load clusters: scan: %w", err)
+		}
+		rec.TenantID = tenantID
+		var ev struct {
+			Fingerprints []string `json:"fingerprints"`
+			NodeKeys     []string `json:"node_keys"`
+			AlertCount   int      `json:"alert_count"`
+		}
+		if err := json.Unmarshal(evidence, &ev); err != nil {
+			continue // 损坏行跳过：宁可少一簇（该簇按新簇重判）也不半途而废
+		}
+		rec.Fingerprints = ev.Fingerprints
+		rec.NodeKeys = ev.NodeKeys
+		rec.AlertCount = ev.AlertCount
+		recs = append(recs, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("load clusters: rows: %w", err)
+	}
+	return recs, nil
 }
 
 // multiRecordSink 组合多个簇出口（Redis 镜像 + DB 真相源双写）。
