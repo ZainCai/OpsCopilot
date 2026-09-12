@@ -377,6 +377,106 @@ func TestNoiseSinkKeys(t *testing.T) {
 	})
 }
 
+// TestLLMKeys OPS_LLM_* 组（二期池波二 #3 / ADR-015）表驱动：
+// 缺失 = 禁用（Endpoint 空、conclude 维持 pending 现状）+ 保守默认
+// （8s/1024，且默认满足 8s < RCA 10s 的预算纪律）；合法覆盖逐项生效；
+// 类型非法汇入统一聚合报错；结构性约束（URL 形态 / Model 必填 /
+// 超时预算）单独拒启。
+func TestLLMKeys(t *testing.T) {
+	t.Run("defaults-disabled", func(t *testing.T) {
+		c, err := LoadFrom(envMap(redisEnv("127.0.0.1:6380", "127.0.0.1:6381")))
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if c.LLM.Endpoint != "" || c.LLM.APIKey != "" || c.LLM.Model != "" {
+			t.Fatalf("llm must default to disabled: %+v", c.LLM)
+		}
+		if c.LLM.Timeout != DefaultLLMTimeout || c.LLM.MaxTokens != DefaultLLMMaxTokens {
+			t.Fatalf("llm defaults drifted: %+v", c.LLM)
+		}
+		// 超时预算纪律的默认值自证：LLM 8s 必须严格小于 RCA 10s。
+		if c.LLM.Timeout >= c.RCA.Timeout {
+			t.Fatalf("default timeout budget violated: llm=%v rca=%v", c.LLM.Timeout, c.RCA.Timeout)
+		}
+	})
+	t.Run("overrides", func(t *testing.T) {
+		env := redisEnv("127.0.0.1:6380", "127.0.0.1:6381")
+		env[EnvLLMEndpoint] = "http://gw.internal:8000/v1"
+		env[EnvLLMAPIKey] = " sk-secret\t " // 容忍尾部空白/回车；首部空白保留（原样凭证）
+		env[EnvLLMModel] = "some-openai-compatible-model"
+		env[EnvLLMTimeout] = "4s"
+		env[EnvLLMMaxTokens] = "512"
+		c, err := LoadFrom(envMap(env))
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if c.LLM.Endpoint != "http://gw.internal:8000/v1" || c.LLM.APIKey != " sk-secret" ||
+			c.LLM.Model != "some-openai-compatible-model" ||
+			c.LLM.Timeout != 4*time.Second || c.LLM.MaxTokens != 512 {
+			t.Fatalf("llm overrides not applied: %+v", c.LLM)
+		}
+	})
+	t.Run("invalid-type-aggregate", func(t *testing.T) {
+		env := redisEnv("127.0.0.1:6380", "127.0.0.1:6381")
+		env[EnvLLMTimeout] = "-1s" // 非正 duration → 拒绝
+		env[EnvLLMMaxTokens] = "0" // 非正整数 → 拒绝
+		_, err := LoadFrom(envMap(env))
+		var agg *Error
+		if !errors.As(err, &agg) || len(agg.Errs) != 2 {
+			t.Fatalf("want 2 aggregated errors, got %v", err)
+		}
+		for _, key := range []string{EnvLLMTimeout, EnvLLMMaxTokens} {
+			if !strings.Contains(err.Error(), key) {
+				t.Errorf("aggregate must mention %s: %v", key, err)
+			}
+		}
+	})
+	t.Run("structural-reject", func(t *testing.T) {
+		cases := []struct {
+			name string
+			env  map[string]string
+			want string
+		}{
+			{"缺 model", map[string]string{EnvLLMEndpoint: "http://gw:8000/v1", EnvLLMTimeout: "2s"}, EnvLLMModel},
+			// 预算：LLM + 2s 必须塞进 RCA 超时。默认 RCA=10s → LLM 最大 8s。
+			{"预算吃紧-9s", map[string]string{EnvLLMEndpoint: "http://gw:8000/v1", EnvLLMModel: "m", EnvLLMTimeout: "9s"}, EnvLLMTimeout},
+			{"预算超限", map[string]string{EnvLLMEndpoint: "http://gw:8000/v1", EnvLLMModel: "m", EnvLLMTimeout: "30s"}, EnvLLMTimeout},
+			{"rca 收紧挤爆", map[string]string{EnvLLMEndpoint: "http://gw:8000/v1", EnvLLMModel: "m", EnvRCASTimeout: "5s"}, EnvLLMTimeout},
+			{"畸形 endpoint", map[string]string{EnvLLMEndpoint: "gw:8000", EnvLLMModel: "m", EnvLLMTimeout: "2s"}, EnvLLMEndpoint},
+			{"endpoint 无 scheme", map[string]string{EnvLLMEndpoint: "://bad", EnvLLMModel: "m"}, EnvLLMEndpoint},
+		}
+		for _, tc := range cases {
+			env := redisEnv("127.0.0.1:6380", "127.0.0.1:6381")
+			for k, v := range tc.env {
+				env[k] = v
+			}
+			_, err := LoadFrom(envMap(env))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("%s: want error mentioning %s, got %v", tc.name, tc.want, err)
+			}
+		}
+	})
+	t.Run("budget-boundary-passes", func(t *testing.T) {
+		// 默认预算组合恰好通过：LLM 8s + 2s 预留 = RCA 10s。
+		env := redisEnv("127.0.0.1:6380", "127.0.0.1:6381")
+		env[EnvLLMEndpoint] = "http://gw:8000/v1"
+		env[EnvLLMModel] = "m"
+		if _, err := LoadFrom(envMap(env)); err != nil {
+			t.Fatalf("default budget (8s+2s ≤ 10s) must pass: %v", err)
+		}
+	})
+	t.Run("disabled-skips-structure", func(t *testing.T) {
+		// Endpoint 空 = 禁用：即使 timeout ≥ RCA timeout 也不报错——
+		// 未配置组不得新增启动阻力（现状逐字节一致）。
+		env := redisEnv("127.0.0.1:6380", "127.0.0.1:6381")
+		env[EnvRCASTimeout] = "2s"
+		env[EnvLLMTimeout] = "8s"
+		if _, err := LoadFrom(envMap(env)); err != nil {
+			t.Fatalf("disabled llm must not trigger budget check: %v", err)
+		}
+	})
+}
+
 // TestValidateCORSOrigin 跨源白名单规则（原 SetCORSOrigin 校验上移）：
 // 空=同源放行、"null" 与 scheme://host 合法、"*"/畸形值拒绝。
 func TestValidateCORSOrigin(t *testing.T) {
