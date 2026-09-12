@@ -67,7 +67,7 @@ export OPS_TEST_PG_DSN='postgres://opscopilot:opscopilot@localhost:5432/opscopil
 
 ### 环境变量
 
-全量 **64 个运行时 env 键**（`OPS_*` 62 + `REDIS_*` 2）的默认值、非法值行为与消费方逐条见 **`docs/配置清单-OpsEnv.md`**；`.env.example` 是运行时镜像（含每项注释）。常用面摘录：
+全量 **68 个运行时 env 键**（`OPS_*` 66 + `REDIS_*` 2）的默认值、非法值行为与消费方逐条见 **`docs/配置清单-OpsEnv.md`**；`.env.example` 是运行时镜像（含每项注释）。常用面摘录：
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
@@ -81,7 +81,7 @@ export OPS_TEST_PG_DSN='postgres://opscopilot:opscopilot@localhost:5432/opscopil
 | `OPS_LLM_ENDPOINT` 等 `OPS_LLM_*` | 空 = 禁用 | **ADR-015**：llm-gateway（OpenAI-compatible 单出口）接线 RCA conclude 与复盘会话；密钥绝不入库/入日志；超时预算 LLM ≤ RCA − 2s |
 | `OPS_SESSION` | `off` | **二期池 #7**：RCA 复盘会话 `GET/POST /api/v1/incidents/{id}/rca/session`（热态 alert-Redis + PG 真相 000018，懒恢复；LLM 未配 fail-open pending） |
 
-其余：`OPS_INCIDENT_AUTOCREATE`、`OPS_PULL_ALERTS`、`OPS_ESCALATION*`、`OPS_LEADER_*`、`OPS_NOISE_SINK_*`、`OPS_MEMLIMIT_*`、`OPS_TOPOLOGY_EDGES` 等见 `.env.example` 注释与配置清单。
+其余：`OPS_INCIDENT_AUTOCREATE`、`OPS_PULL_ALERTS`、`OPS_ESCALATION*`、`OPS_SLA_*`（事件 SLA 按级默认，W10-2）、`OPS_KPI_WINDOW`（KPI 观察窗，W10-3）、`OPS_LEADER_*`、`OPS_NOISE_SINK_*`、`OPS_MEMLIMIT_*`、`OPS_TOPOLOGY_EDGES` 等见 `.env.example` 注释与配置清单。
 
 **双实例/多副本部署（ADR-012）**：多副本直接部署即可——PG advisory lock 选主，leader 跑拓扑采集/判决链路/拉取/归档，事件链路（webhook 入队、消费 worker、REST/SSE、通知、升级扫描）全实例常驻，认领租约 + 建单幂等保证 at-least-once 不重复；本实例 leader 态看 `/metrics` 的 `opscopilot_is_leader`。
 
@@ -130,6 +130,26 @@ curl -s '.../timeline?limit=50&cursor=<next_cursor>'                        # �
 - 排序固定**时间升序**；同刻稳定序 `change < action < alert_in < alert_out`（因果阅读序，见 `cmd/opscopilot/rest_timeline.go` 文件头）；
 - `partial=true` + `missing` 表达降级：依赖源缺席（无 DSN ⇒ 告警源、降噪关闭 ⇒ 变更无法归因、无审计 ⇒ 处置源）或查询失败/截断时，**可用源照常归并返回 200**，缺席原因逐源透出；单条源故障不拖垮整页；
 - 前端落 `web/` 事件详情区（console.html 已冻结），kind 徽标 + 游标"加载更多"。
+
+### 事件 SLA 时钟（F-04 / W10-2）与运维 KPI（F-07 / W10-3）
+
+**SLA**：目标时长按严重级取默认（`OPS_SLA_CRITICAL_MINUTES=60` / `WARNING=240` / `INFO=1440`），单事件可经 REST 覆盖（建单/流转体 `sla_minutes`，0=按级默认）。`GET /incidents[/{id}]` 返回**只读派生**三字段（不落冗余列）：`sla_deadline = created_at + 有效目标`，`sla_remaining_seconds`（可为负）与 `sla_breached` 未闭环按 now、**终态（resolved，含被合并）冻结在闭环时刻**。M2 只记录与展示，不驱动自动升级。迁移 000019 同时补 `acked_at` 首戳（只落一次，MTTA 数据源）。
+
+```bash
+curl -X POST .../api/v1/incidents -H 'Content-Type: application/json' -H "X-OpsCopilot-Token: <key>" \
+  -d '{"title":"n1 磁盘 96%","severity":"critical","created_by":"zhangsan","sla_minutes":30}'
+curl -s '.../api/v1/incidents/<id>'   # => {...,"sla_minutes":30,"sla_deadline":"…+08:00",
+                                       #     "sla_remaining_seconds":1740,"sla_breached":false, "acked_at":"0001-…"|时间戳}
+```
+
+**KPI**：`GET /api/v1/kpis?window=168h&severity=…`（window 缺省取 `OPS_KPI_WINDOW`）。数据源 = incident 表聚合 SQL：队列 = created_at 入窗；`MTTA=avg(acked−created)`、`MTTR=avg(resolved−created)`（**平均闭环与 MTTR 同口径，一个字段**）、吞吐 `created_count/resolved_count`；空窗回零值 + 样本数。控制台总览页 KPI 行接该端点（与手工按时间线手算一致，`TestKPIEndpointMatchesManualReckoning` 锁死）。
+
+```bash
+curl -s 'http://127.0.0.1:8080/api/v1/kpis?window=168h'
+# => {"window":"168h0m0s","window_start":"…","severity":"",
+#     "stats":{"created_count":12,"resolved_count":9,"acked_samples":10,
+#              "resolved_samples":9,"mtta_seconds":412.5,"mttr_seconds":5310.2}}
+```
 
 ### 通知渠道配置（W9-2）
 
@@ -232,7 +252,7 @@ bash scripts/run_rca_eval.sh（证据版）             → 4/4 top1=100%，静�
 | `功能点清单-M2候选.md` | F-xx 功能点全集与优先级 |
 | `M1出口验收报告-2026-09-11.md` · `M2执行排期-W9到W11.md` | 出口验收与周排期（进度行含提交号） |
 | `OpsCopilot项目优化方案-2026-09-11.md` | 12 项优化 + 二期池三波收口记录 |
-| `配置清单-OpsEnv.md` | **64 个 env 键唯一装载表**（默认值/非法值行为/消费方）+ 测试/CLI 键附录 |
+| `配置清单-OpsEnv.md` | **68 个 env 键唯一装载表**（默认值/非法值行为/消费方）+ 测试/CLI 键附录 |
 | `容量模型-三级估算.md` · `容量基线-2026-09-12.md` | 三级估算与实测基线（部署必查项标注） |
 | `方案-双链路事件来源.md` | 事件双链路（外部导入 ∥ 人工建单）融合与去重方案 |
 | `设计-sessionstore消费方与接线.md` | 复盘会话五个开放问题的拍板记录（#7 S1/S2 蓝图） |
