@@ -43,10 +43,10 @@ const (
 	EnvNoiseMode   = "OPS_NOISE_MODE"
 	EnvDedupWindow = "OPS_DEDUP_WINDOW"
 
-	EnvNoiseWriteQSize           = "OPS_NOISE_WRITEQ_SIZE"
-	EnvNoiseWriteQBatch          = "OPS_NOISE_WRITEQ_BATCH"
-	EnvNoiseWriteQFlush          = "OPS_NOISE_WRITEQ_FLUSH"
-	EnvNoiseWriteQEnqueueTimeout = "OPS_NOISE_WRITEQ_ENQUEUE_TIMEOUT"
+	EnvNoiseSinkQueue = "OPS_NOISE_SINK_QUEUE"
+	EnvNoiseSinkBatch = "OPS_NOISE_SINK_BATCH"
+	EnvNoiseSinkFlush = "OPS_NOISE_SINK_FLUSH"
+	EnvNoiseSinkDrain = "OPS_NOISE_SINK_DRAIN"
 
 	EnvPullAlerts   = "OPS_PULL_ALERTS"
 	EnvPullInterval = "OPS_PULL_INTERVAL"
@@ -120,10 +120,10 @@ func LoadFrom(lookup LookupFunc) (*Config, error) {
 	c.Noise.Window = p.posDur(EnvNoiseWindow, DefaultNoiseWindow)
 	c.Noise.Mode = p.enum(EnvNoiseMode, NoiseModeShadow, NoiseModeShadow, NoiseModeEnforce)
 	c.Noise.DedupWindow = p.posDur(EnvDedupWindow, DefaultDedupWindow)
-	c.Noise.WriteQueueSize = p.posInt(EnvNoiseWriteQSize, DefaultNoiseWriteQSize)
-	c.Noise.WriteQueueBatch = p.posInt(EnvNoiseWriteQBatch, DefaultNoiseWriteQBatch)
-	c.Noise.WriteQueueFlush = p.posDur(EnvNoiseWriteQFlush, DefaultNoiseWriteQFlush)
-	c.Noise.WriteQueueEnqueueTimeout = p.posDur(EnvNoiseWriteQEnqueueTimeout, DefaultNoiseWriteQEnqueueTimeout)
+	c.Noise.SinkQueue = p.posInt(EnvNoiseSinkQueue, DefaultNoiseSinkQueue)
+	c.Noise.SinkBatch = p.posInt(EnvNoiseSinkBatch, DefaultNoiseSinkBatch)
+	c.Noise.SinkFlush = p.posDur(EnvNoiseSinkFlush, DefaultNoiseSinkFlush)
+	c.Noise.SinkDrain = p.posDur(EnvNoiseSinkDrain, DefaultNoiseSinkDrain)
 
 	c.Pull.Enabled = p.onOff(EnvPullAlerts, false)
 	c.Pull.Interval = p.posDur(EnvPullInterval, DefaultPullInterval)

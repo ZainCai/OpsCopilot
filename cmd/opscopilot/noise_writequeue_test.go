@@ -1,7 +1,8 @@
-// noise_writequeue_test.go 判决异步落库队列（优化方案 #8）行为测试：
-// 慢 sink 不占采集 goroutine、攒批/定时刷、队满 backpressure 判决不丢、
-// 停机 drain 不丢、sink 失败按既有降级（计数不中断）。全部用假 sink，
-// 不依赖 DB/Redis（#4 测试纪律：直接构造参数，不碰全局 env）。
+// noise_writequeue_test.go 判决异步落库队列（优化方案 #8，队满丢弃取向）
+// 行为测试：慢 sink 不占采集 goroutine、攒批/定时刷、队满丢弃计数
+// （投递永不阻塞）、停机有限 drain、sink 失败按既有降级（计数不中断）、
+// 队列未启动保持同步。全部用假 sink，不依赖 DB/Redis
+// （#4 测试纪律：直接构造参数，不碰全局 env）。
 package main
 
 import (
@@ -23,7 +24,7 @@ type recVerdictSink struct {
 	got      map[string]int
 	order    []string
 	delay    time.Duration // 每条 SaveVerdict 的模拟耗时（测"不占采集"用）
-	gate     chan struct{} // 非 nil：第一条之前阻塞等放行（测背压用）
+	gate     chan struct{} // 非 nil：第一条之前阻塞等放行（测队满丢弃用）
 	gateOnce sync.Once
 }
 
@@ -33,7 +34,7 @@ func newRecSink() *recVerdictSink {
 
 func (s *recVerdictSink) SaveVerdict(rec noise.VerdictRecord) error {
 	if s.gate != nil {
-		s.gateOnce.Do(func() { <-s.gate }) // 只有第一条经历阻塞（模拟 DB 卡住后恢复）
+		s.gateOnce.Do(func() { <-s.gate }) // 只有第一条经历阻塞（模拟 DB 卡住）
 	}
 	if s.delay > 0 {
 		time.Sleep(s.delay)
@@ -96,7 +97,7 @@ func queueEngine(t *testing.T, sink noise.VerdictSink, mut func(*config.NoiseSec
 		mut(&ne.vqSpec)
 	}
 	ne.StartVerdictWriter()
-	t.Cleanup(ne.StopVerdictWriter) // 幂等；drain 后 writer 退出
+	t.Cleanup(ne.StopVerdictWriter) // 幂等；有限 drain 后 writer 退出
 	return ne, am
 }
 
@@ -115,7 +116,8 @@ func alertsN(prefix string, n int) []connector.Alert {
 
 // TestVerdictQueueSlowSinkNotBlockingCollector 核心收益：慢 DB 不占死采集
 // goroutine。30 条 × 10ms = 300ms 的 sink，ProcessAlerts 投递即返回；
-// StopVerdictWriter drain 后全部落库且 FIFO（单 writer 串行保序）、逐条一次。
+// StopVerdictWriter drain（默认 5s 预算内）后全部落库且 FIFO
+// （单 writer 串行保序）、逐条一次。
 func TestVerdictQueueSlowSinkNotBlockingCollector(t *testing.T) {
 	sink := newRecSink()
 	sink.delay = 10 * time.Millisecond
@@ -128,7 +130,7 @@ func TestVerdictQueueSlowSinkNotBlockingCollector(t *testing.T) {
 		t.Fatalf("ProcessAlerts blocked %v on slow sink; async path expected immediate return", elapsed)
 	}
 
-	ne.StopVerdictWriter() // drain
+	ne.StopVerdictWriter() // drain（预算内正常排空）
 	got, order := sink.snapshot()
 	if len(order) != 30 {
 		t.Fatalf("persisted = %d, want 30 after drain", len(order))
@@ -140,13 +142,13 @@ func TestVerdictQueueSlowSinkNotBlockingCollector(t *testing.T) {
 	}
 	for _, a := range alerts {
 		if got[a.Fingerprint] != 1 {
-			t.Fatalf("fingerprint %s persisted %d times, want exactly 1 (no loss, no dup)", a.Fingerprint, got[a.Fingerprint])
+			t.Fatalf("fingerprint %s persisted %d times, want exactly 1 (no dup)", a.Fingerprint, got[a.Fingerprint])
 		}
 	}
 }
 
-// TestVerdictQueueDrainNoLoss 大批量 + 立即停机：channel 内存量必须全部
-// 落库（drain 红线），且逐条恰好一次。
+// TestVerdictQueueDrainNoLoss 大批量 + 立即停机：sink 快时 drain 预算内
+// 存量必须全部落库，且逐条恰好一次。
 func TestVerdictQueueDrainNoLoss(t *testing.T) {
 	sink := newRecSink()
 	ne, _ := queueEngine(t, sink, nil)
@@ -170,9 +172,9 @@ func TestVerdictQueueBatchedByThreshold(t *testing.T) {
 	sink := newRecSink()
 	sink.gate = make(chan struct{}) // 先卡住 writer，让队列攒批
 	ne, _ := queueEngine(t, sink, func(s *config.NoiseSection) {
-		s.WriteQueueSize = 100
-		s.WriteQueueBatch = 5
-		s.WriteQueueFlush = 24 * time.Hour // 排除定时刷干扰：只测阈值攒批
+		s.SinkQueue = 100
+		s.SinkBatch = 5
+		s.SinkFlush = 24 * time.Hour // 排除定时刷干扰：只测阈值攒批
 	})
 	var gmu sync.Mutex
 	var groups []int
@@ -220,8 +222,8 @@ func TestVerdictQueueBatchedByThreshold(t *testing.T) {
 func TestVerdictQueueTimedFlush(t *testing.T) {
 	sink := newRecSink()
 	ne, _ := queueEngine(t, sink, func(s *config.NoiseSection) {
-		s.WriteQueueBatch = 50
-		s.WriteQueueFlush = 20 * time.Millisecond
+		s.SinkBatch = 50
+		s.SinkFlush = 20 * time.Millisecond
 	})
 	ne.ProcessAlerts(alertsN("fp-tick", 1))
 	deadline := time.Now().Add(2 * time.Second)
@@ -233,51 +235,88 @@ func TestVerdictQueueTimedFlush(t *testing.T) {
 	}
 }
 
-// TestVerdictQueueBackpressureNoLoss 队满降级：小队列 + 卡住的 sink 首条，
-// ProcessAlerts 走阻塞投递（宁慢不丢）/超时同步兜底；恢复后全部判决恰好
-// 落库一次，full 计数非零。
-func TestVerdictQueueBackpressureNoLoss(t *testing.T) {
+// TestVerdictQueueFullDrops 队满取向（#8 修订核心）：小队列 + 卡住的
+// sink 首条 → ProcessAlerts **不阻塞**（不再有 backpressure 等待，更不回退
+// 同步写），溢出条计 opscopilot_noise_sink_drops_total{store}。
+// 定量边界：writer 在途批 ≤ batch(2) + channel 容量 2 ⇒ 入队 ≤ 4，
+// 丢弃 ≥ 6；解除卡滞后入队部分全部落库，账目守恒 persisted + drops == 10。
+func TestVerdictQueueFullDrops(t *testing.T) {
 	sink := newRecSink()
 	sink.gate = make(chan struct{})
 	ne, am := queueEngine(t, sink, func(s *config.NoiseSection) {
-		s.WriteQueueSize = 2
-		s.WriteQueueBatch = 2
-		s.WriteQueueFlush = 5 * time.Millisecond
-		s.WriteQueueEnqueueTimeout = 15 * time.Millisecond
+		s.SinkQueue = 2
+		s.SinkBatch = 2
+		s.SinkFlush = 5 * time.Millisecond
 	})
 
-	done := make(chan struct{})
-	go func() {
-		ne.ProcessAlerts(alertsN("fp-bp", 10))
-		close(done)
-	}()
-
-	// 队列容量 2 + writer 手里 1 条（阻塞在 gate 上）→ 后续条目触发队满。
-	deadline := time.After(3 * time.Second)
-	for am.WriteQueueFull.Value() == 0 {
-		select {
-		case <-deadline:
-			t.Fatal("writequeue_full_total never incremented: backpressure path not exercised")
-		case <-time.After(time.Millisecond):
-		}
+	start := time.Now()
+	ne.ProcessAlerts(alertsN("fp-drop", 10)) // 投递永不阻塞：立即返回
+	elapsed := time.Since(start)
+	if elapsed > 150*time.Millisecond {
+		t.Fatalf("ProcessAlerts blocked %v on full queue; drop policy expects immediate return", elapsed)
 	}
-	close(sink.gate) // 解除 sink 阻塞，writer 恢复消费
-	<-done
+
+	dropped := am.SinkDrops["other"].Value() // 假 sink → store="other"
+	if dropped < 6 || dropped > 9 {
+		t.Fatalf("sink_drops = %d, want in [6,9] (queue 2 + in-flight batch 2 ceiling)", dropped)
+	}
+	close(sink.gate) // 解除 sink 卡滞，writer 恢复消费
 	ne.StopVerdictWriter()
 
-	got, order := sink.snapshot()
-	if len(order) != 10 || len(got) != 10 {
-		t.Fatalf("persisted = %d (unique %d), want 10/10 — queue must never drop verdicts", len(order), len(got))
+	persisted := sink.total()
+	if persisted+int(dropped) != 10 {
+		t.Fatalf("persisted %d + drops %d != 10 — accounting must be conserved", persisted, dropped)
 	}
-	for _, a := range alertsN("fp-bp", 10) {
-		if got[a.Fingerprint] != 1 {
-			t.Fatalf("%s count = %d, want 1", a.Fingerprint, got[a.Fingerprint])
-		}
+	if persisted > 4 {
+		t.Fatalf("persisted %d exceeds queue(2)+batch(2) ceiling — drop accounting raced?", persisted)
+	}
+}
+
+// TestVerdictQueueDrainTimeoutBounded 停机预算：sink 卡死时
+// StopVerdictWriter 必须在 SinkDrain 上限附近返回（不再无限等），未交给
+// sink 的残量计 sink_drops；随后放行 gate，已进入 sink 的批次照常落完
+// （cleanup 的二次 stop 幂等），守恒 persisted + drops == 投递总数。
+// 首批大小 C∈{1,2} 取决于 writer 与投递的调度竞速，断言取区间。
+func TestVerdictQueueDrainTimeoutBounded(t *testing.T) {
+	sink := newRecSink()
+	sink.gate = make(chan struct{})
+	ne, am := queueEngine(t, sink, func(s *config.NoiseSection) {
+		s.SinkQueue = 2
+		s.SinkBatch = 2
+		s.SinkFlush = 5 * time.Millisecond
+		s.SinkDrain = 150 * time.Millisecond
+	})
+	// 首批 ≤2 条卡在 gate；channel 再容 ≤2；其余即时丢弃。
+	ne.ProcessAlerts(alertsN("fp-tmo", 10))
+
+	start := time.Now()
+	ne.StopVerdictWriter() // drain 超时路径：150ms 预算 + 一点余量
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("StopVerdictWriter waited %v, drain bound 150ms ignored", elapsed)
+	}
+	drops := am.SinkDrops["other"].Value()
+	if drops < 6 || drops > 9 {
+		t.Fatalf(`sink_drops = %d, want in [6,9] (queue-full + drain-timeout residue, first batch 1..2 in flight)`, drops)
+	}
+	if p := sink.total(); p != 0 {
+		t.Fatalf("persisted %d while sink gated, want 0", p)
+	}
+	close(sink.gate) // 放行：已交给 sink 的批次照常落库（预算之外的努力不算白做）
+	ne.StopVerdictWriter()
+	persisted := sink.total()
+	// 账目只多不少：每条判决要么落库、要么至少计一次丢弃（drain 超时残量
+	// 是保守上界——sink 恢复后可能既落库又保留丢弃计数，宁双计不漏计）。
+	if persisted+int(drops) < 10 {
+		t.Fatalf("persisted %d + drops %d < 10 — accounting must never under-count", persisted, drops)
+	}
+	if persisted > 4 {
+		t.Fatalf("persisted %d exceeds queue(2)+batch(2) ceiling", persisted)
 	}
 }
 
 // TestVerdictQueueSinkFailureCounted sink 故障（真相源写失败）：判决按既有
-// 语义计数不重试不中断（对齐同步路径的降级口径），告警链路照常返回。
+// 语义计数不重试不中断（对齐同步路径的降级口径），走 write_dropped 账
+// 而非 sink_drops 账（"到达 DB 但失败"≠"队列侧未尝试"），告警链路照常返回。
 func TestVerdictQueueSinkFailureCounted(t *testing.T) {
 	sink := &failVerdictSink{}
 	ne, am := queueEngine(t, sink, nil)
@@ -289,15 +328,18 @@ func TestVerdictQueueSinkFailureCounted(t *testing.T) {
 	if got := ne.verdictFailures.Load(); got != 5 {
 		t.Fatalf("verdictFailures = %d, want 5 (dropped on persistent sink failure)", got)
 	}
+	if got := am.SinkDrops["other"].Value(); got != 0 {
+		t.Fatalf(`sink_drops{store="other"} = %d, want 0 (write failures are a separate ledger)`, got)
+	}
 	// opscopilot_noise_write_dropped_total 镜像 verdictFailures 单一记账；
-	// 深度 gauge drain 后归零。
+	// 水位 gauge drain 后归零。
 	var b bytes.Buffer
 	if err := am.Registry().WritePrometheus(&b); err != nil {
 		t.Fatalf("WritePrometheus: %v", err)
 	}
 	for _, want := range []string{
 		"opscopilot_noise_write_dropped_total 5",
-		"opscopilot_noise_writequeue_depth 0",
+		"opscopilot_noise_sink_queue 0",
 	} {
 		if !strings.Contains(b.String(), want) {
 			t.Fatalf("metrics text missing %q:\n%s", want, b.String())
@@ -305,7 +347,8 @@ func TestVerdictQueueSinkFailureCounted(t *testing.T) {
 	}
 }
 
-// TestVerdictQueueMetricsRegistered 三个新指标按注册范式出现在 /metrics 文本。
+// TestVerdictQueueMetricsRegistered 新指标按注册范式出现在 /metrics 文本：
+// 水位 gauge、按 store 分桶的丢弃 counter（维度集合编译期固定）。
 func TestVerdictQueueMetricsRegistered(t *testing.T) {
 	sink := newRecSink()
 	ne, am := queueEngine(t, sink, nil)
@@ -316,10 +359,12 @@ func TestVerdictQueueMetricsRegistered(t *testing.T) {
 		t.Fatalf("WritePrometheus: %v", err)
 	}
 	for _, want := range []string{
-		"# TYPE opscopilot_noise_writequeue_depth gauge",
-		"# TYPE opscopilot_noise_writequeue_full_total counter",
+		"# TYPE opscopilot_noise_sink_queue gauge",
+		"# TYPE opscopilot_noise_sink_drops_total counter",
+		`opscopilot_noise_sink_drops_total{store="pg"} 0`,
+		`opscopilot_noise_sink_drops_total{store="redis"} 0`,
+		`opscopilot_noise_sink_drops_total{store="other"} 0`,
 		"# TYPE opscopilot_noise_write_dropped_total gauge",
-		"opscopilot_noise_writequeue_full_total 0",
 	} {
 		if !strings.Contains(b.String(), want) {
 			t.Fatalf("metrics text missing %q:\n%s", want, b.String())
@@ -328,7 +373,7 @@ func TestVerdictQueueMetricsRegistered(t *testing.T) {
 }
 
 // TestVerdictQueueNotStartedStaysSync 兼容红线：不 StartVerdictWriter 的
-// 引擎（测试/嵌入式）保持 #8 之前的同步落库——ProcessAlerts 返回即落完。
+// 引擎（测试/嵌入式）保持异步化之前的同步落库——ProcessAlerts 返回即落完。
 func TestVerdictQueueNotStartedStaysSync(t *testing.T) {
 	ne := newTestNoiseEngine(t, noiseTestSink(t))
 	sink := newRecSink()
@@ -336,5 +381,42 @@ func TestVerdictQueueNotStartedStaysSync(t *testing.T) {
 	ne.ProcessAlerts(alertsN("fp-sync", 4))
 	if n := sink.total(); n != 4 {
 		t.Fatalf("sync path persisted %d, want 4 immediately after ProcessAlerts", n)
+	}
+}
+
+// TestVerdictSinkDetachedCountsDrops 出口卸载（SetVerdictSink(nil)）：
+// 已入队判决按"未尝试"计 sink_drops（store 标签沿用最后挂载目标），
+// 不占 write_dropped 账。
+func TestVerdictSinkDetachedCountsDrops(t *testing.T) {
+	sink := newRecSink()
+	ne, am := queueEngine(t, sink, func(s *config.NoiseSection) {
+		s.SinkBatch = 1000 // 排除攒批抢跑：只靠停机/卸载触发路径计数
+		s.SinkFlush = 24 * time.Hour
+	})
+	ne.ProcessAlerts(alertsN("fp-detach", 3))
+	ne.SetVerdictSink(nil)
+	ne.StopVerdictWriter() // drain 把这 3 条刷向已卸载的出口
+	if got := am.SinkDrops["other"].Value(); got != 3 {
+		t.Fatalf(`sink_drops{store="other"} = %d, want 3 (detached sink = queue-side drops)`, got)
+	}
+	if ne.verdictFailures.Load() != 0 {
+		t.Fatal("detach drops must not touch verdictFailures ledger")
+	}
+}
+
+// TestVerdictSinkStoreLabel 落库目标标签对号入座（{store=...} 维度）。
+func TestVerdictSinkStoreLabel(t *testing.T) {
+	if got := verdictSinkStore(&PGClusterSink{}); got != "pg" {
+		t.Fatalf("pg sink label = %q, want \"pg\"", got)
+	}
+	if got := verdictSinkStore(&RedisClusterSink{}); got != "redis" {
+		t.Fatalf("redis sink label = %q, want \"redis\"", got)
+	}
+	if got := verdictSinkStore(newRecSink()); got != "other" {
+		t.Fatalf("unknown sink label = %q, want \"other\"", got)
+	}
+	var nilSink noise.VerdictSink
+	if got := verdictSinkStore(nilSink); got != "" {
+		t.Fatalf("nil sink label = %q, want \"\" (keeps last known store)", got)
 	}
 }

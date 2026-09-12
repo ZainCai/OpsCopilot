@@ -224,12 +224,14 @@ type pendingDecision struct {
 // 锁边界（第四轮扫描 F3）：mu 保护处理段（快照/判决/签名比对），
 // **不持有落库 IO**——慢存储不能拖住 Stats()。
 //
-// 落库路径（优化方案 #8 后）：
+// 落库路径（优化方案 #8，队满丢弃取向）：
 //   - 簇快照仍同步：快照是"最新覆盖"语义，异步会让批 N+1 先写、批 N
 //     后写（旧数据覆盖新数据），必须保持调用方 goroutine 内串行；
-//   - 判决（append-only）投递到带缓冲队列（vq），单 writer 攒批落库——
-//     慢 DB 不再占死采集 goroutine。队列未启动（测试/嵌入式）或投递
-//     退化（队满超时/停机 drain 中）时回落同步写，判决不丢是红线。
+//   - 判决（append-only）投递到带缓冲队列（vq）即返回，单 writer 攒批
+//     落库——慢 DB 不占采集节拍。**队列永不阻塞、永不回退同步写**：
+//     队满/停机即丢持久化任务（计 opscopilot_noise_sink_drops_total +
+//     slog ERROR），判决内存态照常走 Gate——宁漏库存，不丢通知；
+//   - 队列未启动（测试/嵌入式）保持同步落库（#8 之前的原行为）。
 func (n *NoiseEngine) ProcessAlerts(alerts []connector.Alert) {
 	if n == nil || len(alerts) == 0 {
 		return
@@ -352,10 +354,14 @@ func (n *NoiseEngine) admitDecisions(gate *notify.Gate, gs GateStatsSink, decisi
 
 // submitVerdicts 判决落库分发（W6-1，锁外）——优化方案 #8 的入口：
 //  1. 先按**判决生成时刻**观测 fired→verdict 延迟（口径见 metrics.go 与
-//     docs/W9-4 §9：异步化后"落库完成时刻"不再由采集 goroutine 掌握，
-//     分位口径收敛为"判决生成"，落库滞后由队列深度/队满计数观察）；
-//  2. 队列在跑 → 投递即返回；队满超时/停机 drain 中的判决同步兜底；
+//     docs/W9-4 §9：异步后落库完成时刻移交 writer，继续等它会混入队列
+//     积压；分位口径收敛为"判决生成"）；
+//  2. 队列在跑 → 非阻塞投递即返回，队满/停机丢持久化不丢通知
+//     （sink_drops 计数 + slog ERROR，见 enqueueVerdicts）；
 //     队列未启动 → 整批同步落库（#8 之前的原行为）。
+//
+// 先投递后 Admit 的批内顺序保持不变（ProcessAlerts 调用次序）；Gate
+// 不读判决存储（审查结论，docs/W9-4 §9），"入队即完成"不影响放行时序。
 //
 // fired 与 verdicts 平行等长；某条 fired 为零值（上游没给 startsAt）
 // 跳过观测但必须留痕（CountLatencySkipped），否则"processed 多、观测少"
@@ -372,9 +378,7 @@ func (n *NoiseEngine) submitVerdicts(q *verdictWriter, vs noise.VerdictSink,
 		}
 	}
 	if q != nil {
-		if rest := n.enqueueVerdicts(q, verdicts); len(rest) > 0 {
-			n.persistVerdicts(vs, rest) // 退化路径：同步兜底，判决不丢
-		}
+		n.enqueueVerdicts(q, verdicts) // 投递即返回；丢弃自有记账，不回退同步
 		return
 	}
 	n.persistVerdicts(vs, verdicts)

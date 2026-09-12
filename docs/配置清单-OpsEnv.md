@@ -17,8 +17,11 @@
 >   （`localhost` ≡ `127.0.0.1`、大小写/空白不敏感）同样拒绝启动。
 
 统计：**49 个运行时 env 键**（`OPS_*` 47 + `REDIS_*` 2），13 组。
-（优化方案 #8 新增 `OPS_NOISE_WRITEQ_*` 判决异步落库队列 4 键；#8 同时把
-`fired→verdict` 打点口径改为"判决生成"，见 docs/W9-4 §9。）
+（优化方案 #8 判决异步落库队列 `OPS_NOISE_SINK_*` 4 键，**队满丢弃取向**：
+慢 DB/极端洪峰下丢持久化保采集节拍，宁漏库存不丢通知——**PG 判决流可缺
+条目，Redis/PG 镜像与内存态非强一致**，丢弃面看
+`opscopilot_noise_sink_drops_total{store}`；同时把 `fired→verdict` 打点
+口径改为"判决生成"，见 docs/W9-4 §9。）
 （优化方案 #6 新增 `OPS_MEMLIMIT_*` 组 9 键：无界内存结构的容量上限 + 告警水位。）
 （优化方案 #11 新增 `OPS_INGEST_LEASE_DURATION`：ingest 认领租约，多实例并发消费互斥。）
 另有 1 个测试门控键与 2 个独立 CLI 工具的键，见文末附录 B/C。
@@ -46,10 +49,10 @@
 | 17 | `OPS_NOISE_WINDOW` | 降噪 | 正 duration | `10m` | 启动失败（原行为，实现移入 config） | `config.Noise.Window` → `noise.NewShadow` |
 | 18 | `OPS_NOISE_MODE` | 降噪 | 枚举 | `shadow` | 白名单 `shadow|enforce`（大小写不敏感），白名单外 → 启动失败（原行为，实现移入 config） | `config.Noise.Mode` → `NewNoiseEngine.enforce`、`attachNoiseGate` |
 | 19 | `OPS_DEDUP_WINDOW` | 降噪 | 正 duration | `30m`（**原 rest_gateway.go 常量 dedupWindow，#10**） | **启动失败**（新增 env 通道） | `RESTGateway.limits.DedupWindow`（L2 相似度，`rest_incidents.go`） |
-| 20 | `OPS_NOISE_WRITEQ_SIZE` | 降噪 | 正整数 | `10000`（≈50 个满批，**优化方案 #8 新增 env**） | **启动失败** | 判决异步落库队列缓冲条数（`NoiseEngine.StartVerdictWriter` → `verdictWriter.ch`；深度 gauge `opscopilot_noise_writequeue_depth`） |
-| 21 | `OPS_NOISE_WRITEQ_BATCH` | 降噪 | 正整数 | `200`（同上） | **启动失败** | writer 攒批阈值（攒满即刷；单 writer 串行落现有 VerdictSink，不改 sink 语义） |
-| 22 | `OPS_NOISE_WRITEQ_FLUSH` | 降噪 | 正 duration | `2s`（同上） | **启动失败** | writer 定时刷批周期（不满一批的最长滞留） |
-| 23 | `OPS_NOISE_WRITEQ_ENQUEUE_TIMEOUT` | 降噪 | 正 duration | `5s`（同上；对齐 PG 语句超时 pgSinkTimeout） | **启动失败** | 队满阻塞投递超时（宁慢不丢；超时退化同步写 + WARN + `opscopilot_noise_writequeue_full_total`） |
+| 20 | `OPS_NOISE_SINK_QUEUE` | 降噪 | 正整数 | `4096`（≈20 个满批；**优化方案 #8 判决异步落库队列，队满丢弃取向**） | **启动失败** | 判决异步落库队列缓冲条数（`NoiseEngine.StartVerdictWriter` → `verdictWriter.ch`；水位 gauge `opscopilot_noise_sink_queue`；溢出即丢持久化任务，计 `opscopilot_noise_sink_drops_total{store}`，**不阻塞采集、不回退同步写**） |
+| 21 | `OPS_NOISE_SINK_BATCH` | 降噪 | 正整数 | `200`（同上） | **启动失败** | writer 攒批阈值（攒满即刷；单 writer 串行落现有 VerdictSink，不改 sink 语义） |
+| 22 | `OPS_NOISE_SINK_FLUSH` | 降噪 | 正 duration | `2s`（同上） | **启动失败** | writer 定时刷批周期（不满一批的最长滞留） |
+| 23 | `OPS_NOISE_SINK_DRAIN` | 降噪 | 正 duration | `5s`（同上；对齐 PG 语句超时 pgSinkTimeout 与停机预算） | **启动失败** | 停机 drain 上限超时：`StopVerdictWriter` 排空存量至多等本值，超时残量计 `opscopilot_noise_sink_drops_total{store}` 后放行停机（不再无限等） |
 | 24 | `OPS_PULL_ALERTS` | 拉取链路 | on/off | `off` | 非 on/off → **启动失败** | `cfg.Pull.Enabled` → `buildAlertPoller`（on 但缺 `OPS_PROM_URL` 仍是 WARNING+禁用，非配置非法） |
 | 25 | `OPS_PULL_INTERVAL` | 拉取链路 | 正 duration | `30s` | 原"WARNING 后取 30s"→ **启动失败** | `cfg.Pull.Interval` → `AlertPoller` |
 | 26 | `OPS_INCIDENT_AUTOCREATE` | ingest 队列 | on/off | `off`（影子期） | 非 on/off → **启动失败** | `cfg.Ingest.AutoCreate` → `IngestWorker`（off = 只排队不建单） |

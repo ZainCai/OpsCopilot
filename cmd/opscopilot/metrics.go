@@ -10,9 +10,10 @@
 //	    口径 = 判决生成（投递落库队列）时刻 − alert_fired_at
 //	    ⚠️ 优化方案 #8（异步落库）起口径从"落库完成"改为"判决生成"——
 //	    异步化后落库完成时刻移交 writer goroutine，采集侧继续观测"生成"
-//	    才能保证打点不失真（详见 docs/W9-4 §9 口径变更注记）。落库滞后
-//	    改由 opscopilot_noise_writequeue_depth / _writequeue_full_total /
-//	    _write_dropped_total 观察。
+//	    才能保证打点不失真（详见 docs/W9-4 §9 口径变更注记）。落库滞后与
+//	    丢失面改由 opscopilot_noise_sink_queue（水位 gauge）/
+//	    opscopilot_noise_sink_drops_total{store}（队列侧丢弃）/
+//	    opscopilot_noise_write_dropped_total（DB 写失败）观察。
 //	opscopilot_alert_fired_to_notify_seconds  —— 告警发射 → 通知**送达完成**
 //	    只在 enforce 模式、且该判决被放行时观测（影子模式无通知，自然无样本）；
 //	    Admit 返回 = 全渠道 Send 完成，通知路径未异步化，口径不变。
@@ -62,11 +63,13 @@ type AppMetrics struct {
 	AlertsToVerdict *metrics.Histogram
 	// AlertsToNotify 告警发射 → 通知送达完成的延迟（仅 enforce + 放行）。
 	AlertsToNotify *metrics.Histogram
-	// WriteQueueFull 判决落库队列写满触发阻塞投递（backpressure）的次数
-	// （优化方案 #8；阻塞后成功与超时退化同步写都计它——"退化路径被
-	// 触发过"本身就是运维要知道的事实）。队列深度与丢弃数两个 gauge 由
-	// StartVerdictWriter 挂成 GaugeFunc（镜像运行时状态，不重复记账）。
-	WriteQueueFull *metrics.Counter
+	// SinkDrops 判决异步落库队列（#8，队满丢弃取向）丢弃的持久化任务数，
+	// 按落库目标（store = pg / redis / other）分桶——判决未到达 DB 就被
+	// 放弃（队满 / 停机中投递 / drain 超时残量 / 出口卸载）。到达 DB 但
+	// 写失败是另一本账（verdictFailures，镜像为 opscopilot_noise_write_
+	// dropped_total gauge），两账不混计。队列水位 gauge
+	// opscopilot_noise_sink_queue 由 StartVerdictWriter 挂成 GaugeFunc。
+	SinkDrops map[string]*metrics.Counter
 	// Verdicts 按判决原因分桶（标签固定，编译期确定维度集合）。
 	Verdicts map[string]*metrics.Counter
 	// LatencySkipped 因上游未给发射时刻（startsAt/activeAt 皆空）而未参与
@@ -83,6 +86,11 @@ type AppMetrics struct {
 
 // latencyStages 延迟观测的两种阶段（跳过计数器的固定维度集合）。
 var latencyStages = []string{"verdict", "notify"}
+
+// sinkStores 判决落库丢弃计数的固定维度集合（store 标签）：pg=真相源、
+// redis=加速层、other=装配了未知类型出口的兜底（含测试假出口）。
+// 与 memguard 的 {store=...} 同款"编译期确定维度"注册范式。
+var sinkStores = []string{"pg", "redis", "other"}
 
 // verdictReasons 判决原因的全部取值（+ 未参与判定的空串）。
 // 固定集合 → 计数器在构造期建好，观测路径只做 map 查表。
@@ -104,10 +112,13 @@ func NewAppMetrics() *AppMetrics {
 			"Latency from alert fired (startsAt) to verdict generated (queue submit; persistence is async since opt #8, see docs/W9-4)", nil, latencyBuckets, latencyWindow),
 		AlertsToNotify: reg.Histogram("opscopilot_alert_fired_to_notify_seconds",
 			"Latency from alert fired (startsAt) to notification delivered (enforce mode, admitted only)", nil, latencyBuckets, latencyWindow),
-		WriteQueueFull: reg.Counter("opscopilot_noise_writequeue_full_total",
-			"Times the async verdict write queue was full and a blocking (backpressure) enqueue was attempted", nil),
+		SinkDrops:      make(map[string]*metrics.Counter, len(sinkStores)),
 		Verdicts:       make(map[string]*metrics.Counter, len(verdictReasons)),
 		LatencySkipped: make(map[string]*metrics.Counter, len(latencyStages)),
+	}
+	for _, s := range sinkStores {
+		m.SinkDrops[s] = reg.Counter("opscopilot_noise_sink_drops_total",
+			"Verdict persistence tasks dropped by the async sink queue (queue full / writer stopped / drain timeout / sink detached) — notifications unaffected, PG verdict stream may have gaps under flood peaks", metrics.LabelSet{"store": s})
 	}
 	for _, r := range verdictReasons {
 		m.Verdicts[r] = reg.Counter("opscopilot_noise_verdicts_total",
@@ -173,12 +184,18 @@ func (m *AppMetrics) ObserveVerdictLatency(d time.Duration) {
 	m.AlertsToVerdict.Observe(d.Seconds())
 }
 
-// CountWriteQueueFull 记一次"队列满 → 阻塞投递"backpressure 事件。
-func (m *AppMetrics) CountWriteQueueFull() {
-	if m == nil {
+// CountSinkDrop 记 n 条"队列侧未尝试落库即被丢弃"的判决（#8 修订：队满
+// 丢弃取向的主记账点）。未知 store 标签归 "other" 兜底——维度集合编译期
+// 固定，新增落库目标忘了登记时不静默丢计数（对齐 CountVerdict 的纪律）。
+func (m *AppMetrics) CountSinkDrop(store string, n uint64) {
+	if m == nil || n == 0 {
 		return
 	}
-	m.WriteQueueFull.Inc()
+	c, ok := m.SinkDrops[store]
+	if !ok {
+		c = m.SinkDrops["other"]
+	}
+	c.Add(n)
 }
 
 // ObserveNotifyLatency 记录"发射 → 通知送达"延迟。

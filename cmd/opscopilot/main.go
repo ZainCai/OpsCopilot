@@ -216,9 +216,11 @@ func main() {
 		<-sig
 		logger.Printf("shutdown signal received, draining...")
 		runCancel()
-		// 优化方案 #8：判决异步落库队列先 drain（writer 落完存量判决；在途
-		// 新批次自动走同步兜底）。必须在关闭 Redis 镜像与共享池之前——
-		// runCtx 取消后采集循环退出，这里等的只是队列里的尾巴。
+		// 优化方案 #8（有限 drain）：判决异步落库队列排空至多等
+		// OPS_NOISE_SINK_DRAIN（默认 5s），超时残量计 sink_drops 后放行
+		// 停机流程——停机预算优先于库存完整；停机中到达的新判决直接计
+		// 丢弃，不再同步兜底（宁漏库存不丢通知）。位置不变：必须早于
+		// Redis 客户端与共享池关闭（SSE 先关的理由见下一段注释）。
 		if asm.Noise != nil {
 			asm.Noise.StopVerdictWriter()
 		}

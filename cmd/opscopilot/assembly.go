@@ -101,10 +101,12 @@ func (a *Assembly) reloadNotifyChannels() (int, error) {
 	return a.NotifyReg.Len(), nil
 }
 
-// Close 释放装配持有的资源：先 drain 判决异步落库队列（#8——writer 还在
-// 往 sink 写，必须早于共享池关闭；main 停机序列已提前调用一次，这里幂等
-// 兜底所有直接走 Assembly.Close 的消费者），再停实时推送（关闭 SSE 连接），
-// 最后关 DB 池（共享池的唯一所有者是装配，见 NewAssembly）。
+// Close 释放装配持有的资源：先有限排空判决异步落库队列（#8：StopVerdictWriter
+// 至多等 OPS_NOISE_SINK_DRAIN，默认 5s；超时残量计 sink_drops 后返回，
+// 宁漏库存不死等——但 writer 还在往 sink 写，排空动作必须早于共享池关闭；
+// main 停机序列已提前调用一次，这里幂等兜底所有直接走 Assembly.Close 的
+// 消费者），再停实时推送（关闭 SSE 连接），最后关 DB 池（共享池的唯一
+// 所有者是装配，见 NewAssembly）。
 func (a *Assembly) Close() {
 	if a.Noise != nil {
 		a.Noise.StopVerdictWriter()
@@ -164,10 +166,11 @@ func NewAssembly(logger connector.Logger, cfg *config.Config) (*Assembly, error)
 	appMetrics := NewAppMetrics()
 	noiseEngine.SetMetrics(appMetrics) // noiseEngine 为 nil（降噪关闭）时方法自带判空
 
-	// 优化方案 #8：判决异步落库队列 + 单 writer（慢 DB 不再占死采集
-	// goroutine）。必须在 SetMetrics 之后（深度/丢弃 gauge 注册进同一注册表）。
-	// sink 在 main.go 后挂（SetVerdictSink 会同步给 writer）；判决出口仅
-	// 挂 DB 真相源（Redis 镜像承载簇），双写语义由 sink 侧决定，此处不改。
+	// 优化方案 #8（队满丢弃取向）：判决异步落库队列 + 单 writer（慢 DB
+	// 不占采集节拍；队列永不阻塞、队满丢持久化不丢通知）。必须在
+	// SetMetrics 之后（水位/丢弃计数登记进同一注册表）。sink 在 main.go
+	// 后挂（SetVerdictSink 会同步给 writer）；判决出口仅挂 DB 真相源
+	// （Redis 镜像承载簇），双写语义由 sink 侧决定，此处不改。
 	noiseEngine.StartVerdictWriter()
 
 	// W5-2.2：REST 只读查询面（复用 SemanticModelServer 的校验与映射，

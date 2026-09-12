@@ -296,53 +296,55 @@ func TestMemLimitKeys(t *testing.T) {
 	})
 }
 
-// TestNoiseWriteQueueKeys OPS_NOISE_WRITEQ_* 组（优化方案 #8 判决异步落库）：
-// 缺失 = 保守默认（正常规模几乎不触发队满退化路径）、合法覆盖逐项生效、
-// 非法值汇入统一聚合报错（fail-fast，#2 通道）。
-func TestNoiseWriteQueueKeys(t *testing.T) {
+// TestNoiseSinkKeys OPS_NOISE_SINK_* 组（优化方案 #8 判决异步落库，队满
+// 丢弃取向）：缺失 = 保守默认（正常规模几乎不触发队满丢弃路径）、合法
+// 覆盖逐项生效、非法值汇入统一聚合报错（fail-fast，#2 通道）。
+func TestNoiseSinkKeys(t *testing.T) {
 	t.Run("defaults-conservative", func(t *testing.T) {
 		c, err := LoadFrom(envMap(redisEnv("127.0.0.1:6380", "127.0.0.1:6381")))
 		if err != nil {
 			t.Fatalf("load: %v", err)
 		}
 		want := Defaults().Noise
-		if c.Noise.WriteQueueSize != want.WriteQueueSize || c.Noise.WriteQueueBatch != want.WriteQueueBatch ||
-			c.Noise.WriteQueueFlush != want.WriteQueueFlush || c.Noise.WriteQueueEnqueueTimeout != want.WriteQueueEnqueueTimeout {
-			t.Fatalf("writeq defaults drifted: %+v", c.Noise)
+		if c.Noise.SinkQueue != want.SinkQueue || c.Noise.SinkBatch != want.SinkBatch ||
+			c.Noise.SinkFlush != want.SinkFlush || c.Noise.SinkDrain != want.SinkDrain {
+			t.Fatalf("sink defaults drifted: %+v", c.Noise)
 		}
-		// 保守性约束（#8 要求）：队列容量至少能缓冲数十个满批——正常节拍
-		// （百条/30s + 单批毫秒级落库）下 DB 短暂停摆也不触退化路径。
-		if want.WriteQueueSize < 20*want.WriteQueueBatch {
-			t.Fatalf("WriteQueueSize(%d) must buffer >=20 full batches (batch=%d) to keep degradation rare",
-				want.WriteQueueSize, want.WriteQueueBatch)
+		// 保守性约束（#8 修订）：队列容量至少能缓冲 20 个满批——正常节拍
+		// （百条/30s + 单批毫秒级落库）下 DB 短暂停摆也不触"队满丢弃"路径
+		// （丢弃是评估数据链缺行，不是通知丢失，但仍应罕见且有告警面）。
+		if want.SinkQueue < 20*want.SinkBatch {
+			t.Fatalf("SinkQueue(%d) must buffer >=20 full batches (batch=%d) to keep drops rare",
+				want.SinkQueue, want.SinkBatch)
 		}
 	})
 	t.Run("overrides", func(t *testing.T) {
 		env := redisEnv("127.0.0.1:6380", "127.0.0.1:6381")
-		env[EnvNoiseWriteQSize] = "50"
-		env[EnvNoiseWriteQBatch] = "10"
-		env[EnvNoiseWriteQFlush] = "500ms"
-		env[EnvNoiseWriteQEnqueueTimeout] = "2s"
+		env[EnvNoiseSinkQueue] = "50"
+		env[EnvNoiseSinkBatch] = "10"
+		env[EnvNoiseSinkFlush] = "500ms"
+		env[EnvNoiseSinkDrain] = "2s"
 		c, err := LoadFrom(envMap(env))
 		if err != nil {
 			t.Fatalf("load: %v", err)
 		}
-		if c.Noise.WriteQueueSize != 50 || c.Noise.WriteQueueBatch != 10 ||
-			c.Noise.WriteQueueFlush != 500*time.Millisecond || c.Noise.WriteQueueEnqueueTimeout != 2*time.Second {
-			t.Fatalf("writeq overrides not applied: %+v", c.Noise)
+		if c.Noise.SinkQueue != 50 || c.Noise.SinkBatch != 10 ||
+			c.Noise.SinkFlush != 500*time.Millisecond || c.Noise.SinkDrain != 2*time.Second {
+			t.Fatalf("sink overrides not applied: %+v", c.Noise)
 		}
 	})
 	t.Run("invalid-aggregate", func(t *testing.T) {
 		env := redisEnv("127.0.0.1:6380", "127.0.0.1:6381")
-		env[EnvNoiseWriteQSize] = "0"    // 非正 → 拒绝
-		env[EnvNoiseWriteQBatch] = "abc" // 非整数 → 拒绝
-		env[EnvNoiseWriteQFlush] = "-3s" // 非正 duration → 拒绝
+		env[EnvNoiseSinkQueue] = "0"   // 非正 → 拒绝
+		env[EnvNoiseSinkBatch] = "abc" // 非整数 → 拒绝
+		env[EnvNoiseSinkFlush] = "-3s" // 非正 duration → 拒绝
+		env[EnvNoiseSinkDrain] = "0s"  // 非正 duration → 拒绝
 		_, err := LoadFrom(envMap(env))
 		var agg *Error
-		if !errors.As(err, &agg) || len(agg.Errs) != 3 {
-			t.Fatalf("want 3 aggregated errors, got %v", err)
+		if !errors.As(err, &agg) || len(agg.Errs) != 4 {
+			t.Fatalf("want 4 aggregated errors, got %v", err)
 		}
-		for _, key := range []string{EnvNoiseWriteQSize, EnvNoiseWriteQBatch, EnvNoiseWriteQFlush} {
+		for _, key := range []string{EnvNoiseSinkQueue, EnvNoiseSinkBatch, EnvNoiseSinkFlush, EnvNoiseSinkDrain} {
 			if !strings.Contains(err.Error(), key) {
 				t.Errorf("aggregate must mention %s: %v", key, err)
 			}
