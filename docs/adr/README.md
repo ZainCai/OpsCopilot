@@ -18,6 +18,7 @@
 | [ADR-012](ADR-012-single-owner-horizontal-scaling.md) | 水平扩展：拓扑单 owner（PG advisory lock 选主）+ 后台循环门禁 + ingest 认领租约 | 已接受 |
 | [ADR-013](ADR-013-前端独立工程.md) | 前端独立工程 web/：内嵌 console 冻结、后端只留 REST/SSE、开发代理免 CORS 改动 | 已接受 |
 | [ADR-014](ADR-014-rca-最小链路.md) | 按需 RCA 最小链路：cmd 编排 + DTO 注入破禁互 import、六步规则+证据、conclude 留 llm-gateway 单出口挂点 | 已接受 |
+| [ADR-015](ADR-015-llm-gateway-conclude接线.md) | llm-gateway 接线转正 conclude：通用 OpenAI-compatible 出口（llmgw 纯协议 + transport 唯一发送）、默认禁用、LLM≤RCA−2s 预算、fail-open 回 pending、脱敏与出口 CI 锁 | 已接受 |
 
 ## 写新 ADR 时的检查清单
 

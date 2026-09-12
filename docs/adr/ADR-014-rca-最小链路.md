@@ -62,6 +62,8 @@ ValidFrom 的刚观测节点系统性判为"当时不存在"——单测抓出�
 
 llm-gateway 二期接线：装配构造 Summarizer（经 transport 单出口调
 gateway），`SetSummarizer` 注入即 conclude 转正——rca 包代码零改动。
+**（已兑现：二期池波二 #3 / ADR-015 落地，`OPS_LLM_ENDPOINT` 非空即
+注入 llmgw+transport 链路；未配置时维持本 ADR 的 pending 现状。）**
 
 ### 5. 端点契约与状态码取向
 
