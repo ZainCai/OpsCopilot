@@ -11,7 +11,7 @@ import { Panel, Banner, Loading } from "../components/Panel";
 import { DataTable, type Column } from "../components/DataTable";
 import { OriginBadge, SevBadge, StateChip } from "../components/Badges";
 import { PageHead } from "../components/Layout";
-import { Seg, StatCard } from "../components/Stat";
+import { StatCard } from "../components/Stat";
 import { AuditTimeline, MixedTimeline } from "../components/Timeline";
 import { RcaSection } from "../components/RcaPanel";
 import { RunbookSection } from "../components/RunbookPanel";
@@ -131,6 +131,11 @@ export function IncidentsView({ onConn }: { onConn: (ok: boolean) => void }): Re
   ];
 
   const st = stats ?? { active: 0, resolved: 0, manual: 0, external: 0 };
+  const STATE_TABS: { v: StateFilter; label: string; n: number }[] = [
+    { v: "active", label: "活跃", n: st.active },
+    { v: "resolved", label: "已解决", n: st.resolved },
+    { v: "", label: "全部", n: st.active + st.resolved },
+  ];
   return (
     <>
       <PageHead
@@ -151,19 +156,25 @@ export function IncidentsView({ onConn }: { onConn: (ok: boolean) => void }): Re
             <span className={`env-chip ${stream.cls}`} title={stream.title}>
               <span className="dot" /><span>{stream.label}</span>
             </span>
-            <Seg<StateFilter>
-              options={[{ v: "active", label: "活跃" }, { v: "resolved", label: "已解决" }, { v: "", label: "全部" }]}
-              value={state} onChange={(v) => setState(v)}
-            />
           </>
         }
       />
 
+      {/* 状态过滤：Seg → 原型页签口径（styles.css:262-270），计数进 .tab-n */}
+      <div className="tabs">
+        {STATE_TABS.map((t) => (
+          <button key={t.v || "all"} type="button" className={`tab-i${state === t.v ? " on" : ""}`} onClick={() => setState(t.v)}>
+            {t.label}
+            <span className="tab-n">{t.n}</span>
+          </button>
+        ))}
+      </div>
+
       <div className="kpi-grid">
-        <StatCard label="活跃事件" value={st.active} unit="单" sub={`${st.active + st.resolved} 单总量`} color="var(--brand)" />
-        <StatCard label="已解决" value={st.resolved} unit="单" sub="含被合并单" color="var(--ok)" />
-        <StatCard label="人工单" value={st.manual} unit="单" sub="链路 B · 界面建单" color="var(--brand)" />
-        <StatCard label="外部单" value={st.external} unit="单" sub="链路 A · 自动导入" color="var(--crit)" />
+        <StatCard label="活跃事件" value={st.active} unit="单" sub={`${st.active + st.resolved} 单总量`} tone="brand" />
+        <StatCard label="已解决" value={st.resolved} unit="单" sub="含被合并单" tone="ok" />
+        <StatCard label="人工单" value={st.manual} unit="单" sub="链路 B · 界面建单" tone="brand" />
+        <StatCard label="外部单" value={st.external} unit="单" sub="链路 A · 自动导入" tone="crit" />
       </div>
 
       <Panel
@@ -198,7 +209,7 @@ export function IncidentsView({ onConn }: { onConn: (ok: boolean) => void }): Re
           }}
         />
         {nextCursor ? (
-          <div style={{ padding: 10, textAlign: "center" }}>
+          <div className="p-12 text-center">
             <button type="button" className="btn btn--sm" onClick={() => void load(nextCursor)}>加载更多</button>
           </div>
         ) : null}
@@ -236,8 +247,8 @@ function CreateForm({ onDone }: { onDone: () => void }): React.ReactElement {
   }
 
   return (
-    <div className="panel-b" style={{ borderTop: "1px solid var(--line-soft)" }}>
-      <div className="form-row" style={{ maxWidth: 580 }}>
+    <div className="panel-b b-top">
+      <div className="form-row form-narrow">
         <span className="muted">标题</span><input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="如：n1 磁盘使用率 96%" />
         <span className="muted">严重级</span>
         <select value={severity} onChange={(e) => setSeverity(e.target.value)}>
@@ -320,69 +331,92 @@ function IncidentDetail({ id, onChanged }: { id: string; onChanged: () => void }
     }
   }
 
-  if (err) return <div className="detail" style={{ margin: 0 }}>加载失败：{err}</div>;
-  if (!inc) return <div className="detail" style={{ margin: 0 }}><span className="spin" />加载事件 {id}…</div>;
+  if (err) return <div className="detail">加载失败：{err}</div>;
+  if (!inc) return <div className="detail"><span className="spin" />加载事件 {id}…</div>;
 
   const kv: [string, React.ReactNode][] = [
     ["来源", (inc.origin ?? "-") + (inc.source_ref ? ` · ${inc.source_ref}` : "")],
     ["状态", inc.state], ["严重级", inc.severity || "-"], ["建单人", inc.created_by || "—"],
     ["关联簇", (inc.cluster_keys ?? []).join(", ") || "—"], ["去重键", inc.dedup_key || "—"],
-    ["合并到", inc.merged_into || "—"], ["外部关单", inc.auto_close_policy || "auto"],
+    ["合并到", inc.merged_into || "—"],
     ["创建", fmtTime(inc.created_at)], ["确认", isZeroTime(inc.acked_at) ? "未确认" : fmtTime(inc.acked_at)],
     ["更新", fmtTime(inc.updated_at)],
   ];
   const nexts = NEXT_STATES[inc.state] ?? [];
   return (
-    <div className="detail" style={{ margin: 0 }}>
-      <div style={{ fontWeight: 600, marginBottom: 6 }}>事件详情 · {inc.id}</div>
-      <div className="kv" style={{ display: "grid", gridTemplateColumns: "84px 1fr", gap: "4px 10px" }}>
-        {kv.map(([k, v]) => (
-          <span key={k} style={{ display: "contents" }}>
-            <span className="faint">{k}</span>
-            <span className="mono" style={{ fontSize: 11.5 }}>{v}</span>
-          </span>
-        ))}
-      </div>
-      <SLABar inc={inc} />
-      <div className="acts">
-        {nexts.length > 0
-          ? nexts.map((to) => (
-            <button key={to} type="button" className={`btn btn--sm${to === "resolved" ? " btn--acc" : ""}`} onClick={() => void transition(to)}>
-              {STATE_VERB[to]}
-            </button>
-          ))
-          : <span className="panel-sub">已解决，无可用操作</span>}
-        {aiVisible
-          ? (
-            <button type="button" className="btn btn--sm" style={{ marginLeft: "auto" }} title="基于该事件 RCA 证据的复盘问答（只读，无执行入口）" onClick={() => setAiOpen(true)}>
-              AI 复盘问答
-            </button>
-          )
-          : null}
-      </div>
-      <TimelineSection id={id} refresh={tlRefresh} />
-      <RcaSection id={id} />
-      <RunbookSection id={id} />
-      <div className="sec">
-        <div className="sec-h">疑似重复（L2 · 只提示不自动合并）</div>
-        {cands.length === 0
-          ? <div className="faint">无相似候选</div>
-          : cands.map((c) => (
-            <div className="cand" key={c.incident_id}>
-              <span className="score">{c.score}</span>
-              <span className="mono">{c.incident_id}</span>
-              <span>{c.title}</span>
-              <span className="why">{(c.reasons ?? []).join(" / ")}</span>
-              <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
-                <button type="button" className="btn btn--sm" title="把本单并入该候选" onClick={() => void merge(id, c.incident_id)}>并入它</button>
-                <button type="button" className="btn btn--sm" title="把该候选并入本单" onClick={() => void merge(c.incident_id, id)}>并来本单</button>
-              </span>
+    <div className="inc-page">
+      <div className="inc-cols">
+        {/* 主栏：处置操作 + 混合时间线 + RCA + Runbook + 疑似重复 */}
+        <div className="detail">
+          <div className="sub-t">事件详情 · {inc.id}</div>
+          <div className="acts">
+            {nexts.length > 0
+              ? nexts.map((to) => (
+                <button key={to} type="button" className={`btn btn--sm${to === "resolved" ? " btn--acc" : ""}`} onClick={() => void transition(to)}>
+                  {STATE_VERB[to]}
+                </button>
+              ))
+              : <span className="panel-sub">已解决，无可用操作</span>}
+            {aiVisible
+              ? (
+                <button type="button" className="btn btn--sm push-right" title="基于该事件 RCA 证据的复盘问答（只读，无执行入口）" onClick={() => setAiOpen(true)}>
+                  AI 复盘问答
+                </button>
+              )
+              : null}
+          </div>
+          <TimelineSection id={id} refresh={tlRefresh} />
+          <RcaSection id={id} />
+          <RunbookSection id={id} />
+          <div className="sec">
+            <div className="sec-h">疑似重复（L2 · 只提示不自动合并）</div>
+            {cands.length === 0
+              ? <div className="faint">无相似候选</div>
+              : cands.map((c) => (
+                <div className="cand" key={c.incident_id}>
+                  <span className="score">{c.score}</span>
+                  <span className="mono">{c.incident_id}</span>
+                  <span>{c.title}</span>
+                  <span className="why">{(c.reasons ?? []).join(" / ")}</span>
+                  <span className="push-right flex-row gap-6">
+                    <button type="button" className="btn btn--sm" title="把本单并入该候选" onClick={() => void merge(id, c.incident_id)}>并入它</button>
+                    <button type="button" className="btn btn--sm" title="把该候选并入本单" onClick={() => void merge(c.incident_id, id)}>并来本单</button>
+                  </span>
+                </div>
+              ))}
+          </div>
+        </div>
+
+        {/* 右栏 260px（原型 .inc-cols 侧栏口径 styles.css:465-471）：SLA / 字段摘要 /
+            审计摘要；主栏容器 <720px 时自动堆叠（base.css @container 规则） */}
+        <aside className="flex-col gap-14">
+          <div className="panel">
+            <div className="panel-b">
+              <div className="sub-t">SLA 时钟</div>
+              {inc.sla_deadline ? <SLABar inc={inc} /> : <div className="faint">未返回截止时间（该单无 SLA 截止）</div>}
+              <div className="faint">外部关单策略：{inc.auto_close_policy || "auto"}</div>
             </div>
-          ))}
-      </div>
-      <div className="sec">
-        <div className="sec-h">审计轨迹（{audit.length}）</div>
-        <AuditTimeline entries={audit} />
+          </div>
+          <div className="panel">
+            <div className="panel-b">
+              <div className="sub-t">字段摘要</div>
+              <div className="kv-grid">
+                {kv.map(([k, v]) => (
+                  <span key={k} className="d-contents">
+                    <span className="faint">{k}</span>
+                    <span className="kv-v">{v}</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+          <div className="panel">
+            <div className="panel-b">
+              <div className="sub-t">审计轨迹（{audit.length}）</div>
+              <AuditTimeline entries={audit} />
+            </div>
+          </div>
+        </aside>
       </div>
       {aiOpen ? <AiDrawer incidentId={id} onClose={() => setAiOpen(false)} /> : null}
     </div>
@@ -414,6 +448,7 @@ function SLABar({ inc }: { inc: Incident }): React.ReactElement | null {
         </span>
       </div>
       <div className="sla-track">
+        {/* width 为运行时百分比进度（后端派生 remaining/total 计算），无静态类可表达——保留内联 */}
         <div className={`sla-fill${breached ? " bad" : ""}`} style={{ width: `${pct}%` }} />
       </div>
     </div>
@@ -460,7 +495,7 @@ function TimelineSection({ id, refresh }: { id: string; refresh: number }): Reac
       <div className="sec-h">混合时间线{tl ? `（告警进出 ∥ 变更 ∥ 处置 · ${tl.total}）` : ""}</div>
       {tl?.partial
         ? (
-          <div className="banner warn" style={{ marginBottom: 6 }}>
+          <div className="banner warn mb-6">
             部分源降级：{Object.entries(missing).map(([k, v]) => `${k} — ${v}`).join("；") || "未知原因"}
           </div>
         )

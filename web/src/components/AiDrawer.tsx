@@ -105,10 +105,10 @@ export function AiDrawer({ incidentId, onClose }: { incidentId: string; onClose:
       <aside className="drawer" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="AI 复盘问答">
         <header className="drawer-h">
           <div>
-            <div className="drawer-t">AI 复盘问答</div>
+            <div className="drawer-t">AI 复盘问答 <span className="ai-tag">AI</span></div>
             <div className="panel-sub mono">{incidentId}{ses ? ` · ${ses.turns.length} 轮 · 真相层 ${ses.persistence}` : ""}</div>
           </div>
-          <span style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+          <span className="panel-x">
             <button type="button" className="btn btn--sm" onClick={() => void load()} title="重读会话（Redis 热态缺失时后端自动从 PG 懒恢复）">刷新</button>
             <button type="button" className="btn btn--sm" onClick={onClose}>收起 ✕</button>
           </span>
@@ -119,7 +119,7 @@ export function AiDrawer({ incidentId, onClose }: { incidentId: string; onClose:
           {err ? <div className="banner err">会话失败：{err}</div> : null}
           {ses && turns.length === 0 && !pendingLast
             ? (
-              <div className="empty" style={{ padding: "26px 10px" }}>
+              <div className="empty">
                 <div className="e-t">还没有问答轮次</div>
                 <div className="e-d">提问会先落库（user 轮进真相层），助手回答由 LLM 基于该事件的 RCA 证据产出——只问答，不执行。</div>
               </div>

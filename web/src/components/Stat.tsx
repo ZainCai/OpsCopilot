@@ -5,16 +5,17 @@ interface StatCardProps {
   value: ReactNode;
   unit?: string;
   sub?: ReactNode;
-  color?: string; // CSS 变量或色值
+  /** 数字语义着色（base.css .t-brand/.t-ok/.t-crit utility，替代内联 style）。 */
+  tone?: "brand" | "ok" | "warn" | "crit";
 }
 
 /** KPI 卡（原型 stat 形态：label / 25px mono 大数 / 单位 / 副文本）。 */
-export function StatCard({ label, value, unit, sub, color }: StatCardProps): ReactNode {
+export function StatCard({ label, value, unit, sub, tone }: StatCardProps): ReactNode {
   return (
     <div className="stat">
       <div className="stat-l">{label}</div>
       <div className="stat-v">
-        <span className="stat-n" style={color ? { color } : undefined}>{value}</span>
+        <span className={`stat-n${tone ? ` t-${tone}` : ""}`}>{value}</span>
         {unit ? <span className="stat-u">{unit}</span> : null}
       </div>
       {sub ? <div className="stat-s">{sub}</div> : null}

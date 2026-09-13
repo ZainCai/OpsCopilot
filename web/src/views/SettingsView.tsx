@@ -19,7 +19,10 @@ export function SettingsView(): React.ReactElement {
             1. GET /api/v1/notify/channels 列表（name/kind/min_severity/url/enabled/updated_at）；
             2. 新增/覆盖 POST /api/v1/notify/channels（写路径带 Token）；
             3. 启停 POST /api/v1/notify/channels/{name}/enabled；删除 DELETE 同路径；
-            4. 表单校验：名称限字母数字._-，URL 必填。 */}
+               启停控件实装时用 label 包裹隐藏 checkbox + <span className="switch[ on]">
+               （原型 styles.css:179-188 .switch 口径，base.css 已就位，checkbox 语义/逻辑零改）；
+            4. 表单校验：名称限字母数字._-，URL 必填。
+            渠道卡片间距走 token：.panel/.gap-14/var(--pad)，不写内联值。 */}
         <div className="panel-b">
           <div className="todo-box">
             骨架待实装。端点：<code>GET/POST {ENDPOINTS.notifyChannels}</code> ·{" "}

@@ -12,16 +12,29 @@ function detailStr(d?: Record<string, string>): string {
   }
 }
 
-/** 审计轨迹时间线（对应 GET /api/v1/incidents/{id}/audit）。 */
+/** 审计动作 → 圆点语义色（cmd/opscopilot/audit.go AuditAction 封闭集合同口径：
+ *  成功处置=ok · 合并/忽略/限流等需留意=warn · 摄取失败=crit · 其余=idle）。 */
+const AUDIT_DOT: Record<string, string> = {
+  create: "ok", transition: "ok", attach_cluster: "ok", rca: "ok",
+  merge: "warn", external_recovery_ignored: "warn", rate_limited: "warn",
+  ingest_failed: "crit",
+};
+
+/**
+ * 审计轨迹时间线（对应 GET /api/v1/incidents/{id}/audit）。
+ * 第二轮换皮：条目行改原型 .tl-item/.tl-t/.tl-dot（styles.css:351-354），
+ * 时刻列定宽 mono，dot 按动作语义着色。
+ */
 export function AuditTimeline({ entries }: { entries: AuditEntry[] }): ReactNode {
   if (entries.length === 0) return <div className="faint">暂无审计记录</div>;
   return (
     <ul className="tl">
       {entries.map((e, i) => (
-        <li key={`${e.occurred_at ?? ""}-${i}`}>
-          <span className="sev sev--info">{e.action}</span>
-          <span className="tl-meta">{fmtTime(e.occurred_at)}</span>
-          <div>
+        <li className="tl-item" key={`${e.occurred_at ?? ""}-${i}`}>
+          <span className="tl-t">{fmtTime(e.occurred_at)}</span>
+          <span className={`tl-dot dot--${AUDIT_DOT[e.action ?? ""] ?? "idle"}`} title={`action=${e.action}`} />
+          <div className="flex-1">
+            <span className="sev sev--info">{e.action}</span>{" "}
             <b>{e.actor || "-"}</b>
             {detailStr(e.detail) ? <span className="faint"> {detailStr(e.detail)}</span> : null}
           </div>
@@ -38,15 +51,20 @@ const KIND_LABEL: Record<TimelineKind, string> = {
   action: "处置",
 };
 
+/** 时间线 kind → 圆点语义色（告警进=crit · 变更=warn · 处置=ok · 告警出/恢复=idle） */
+const KIND_DOT: Record<TimelineKind, string> = {
+  alert_in: "crit", change: "warn", action: "ok", alert_out: "idle",
+};
+
 /** 时间线来源徽标（kind 封闭集合，后端 rest_timeline.go 保证）。 */
 export function TimelineKindBadge({ k }: { k: TimelineKind }): ReactNode {
   return <span className={`tl-kind k-${k}`}>{KIND_LABEL[k] ?? k}</span>;
 }
 
 /**
- * 事件混合时间线（GET /api/v1/incidents/{id}/timeline，W10-1/F-03）：
+ * 事件混合时间线（GET /{id}/timeline，W10-1/F-03）：
  * 告警进出 ∥ 变更 ∥ 处置动作，后端已按 ts 升序 + 同刻稳定序归并，
- * 前端只渲染——顺序即契约。
+ * 前端只渲染——顺序即契约。行视觉同审计（.tl-item + kind 语义 dot）。
  */
 export function MixedTimeline({ items }: { items: TimelineItem[] }): ReactNode {
   if (items.length === 0) {
@@ -55,13 +73,14 @@ export function MixedTimeline({ items }: { items: TimelineItem[] }): ReactNode {
   return (
     <ul className="tl">
       {items.map((e, i) => (
-        <li key={`${e.source_id}-${i}`}>
-          <TimelineKindBadge k={e.kind} />
-          {e.severity ? <SevBadge s={e.severity} /> : null}
-          <span className="tl-meta">{fmtTime(e.ts)}</span>
-          <div>
-            {e.summary || e.source_id}
-            {e.confidence ? <span className="faint"> · conf={e.confidence}</span> : null}
+        <li className="tl-item" key={`${e.source_id}-${i}`}>
+          <span className="tl-t">{fmtTime(e.ts)}</span>
+          <span className={`tl-dot dot--${KIND_DOT[e.kind] ?? "idle"}`} title={KIND_LABEL[e.kind] ?? e.kind} />
+          <div className="flex-1 flex-row flex-wrap items-center gap-6">
+            <TimelineKindBadge k={e.kind} />
+            {e.severity ? <SevBadge s={e.severity} /> : null}
+            <span>{e.summary || e.source_id}</span>
+            {e.confidence ? <span className="faint mono">conf={e.confidence}</span> : null}
           </div>
         </li>
       ))}

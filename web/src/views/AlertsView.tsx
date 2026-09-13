@@ -4,7 +4,7 @@ import { ENDPOINTS } from "../api/endpoints";
 import type { AlertsResponse, ShadowAlert } from "../api/types";
 import { Panel, Banner, Loading } from "../components/Panel";
 import { DataTable, type Column } from "../components/DataTable";
-import { ReasonBadge, SevBadge, levelToSev } from "../components/Badges";
+import { ReasonBadge, SevBadge, SevDot, levelToSev } from "../components/Badges";
 import { PageHead } from "../components/Layout";
 import { clampText, fmtTime, timeAgoText } from "../lib/format";
 
@@ -42,7 +42,13 @@ export function AlertsView({ onConn }: { onConn: (ok: boolean) => void }): React
   }, [load]);
 
   const columns: Column<ShadowAlert>[] = [
-    { key: "level", label: "级别", render: (a) => <SevBadge s={levelToSev(a.level)} /> },
+    { key: "level", label: "级别",
+      render: (a) => (
+        <span className="flex-row items-center gap-6">
+          <SevDot s={levelToSev(a.level)} />
+          <SevBadge s={levelToSev(a.level)} />
+        </span>
+      ) },
     { key: "title", label: "标题", render: (a) => a.title || "-" },
     { key: "service", label: "服务/模块", render: (a) => <span className="mono">{clampText(a.service, 34)}</span> },
     { key: "error_code", label: "错误码", render: (a) => <span className="mono">{a.error_code || "—"}</span> },
@@ -78,9 +84,9 @@ export function AlertsView({ onConn }: { onConn: (ok: boolean) => void }): React
 
 function KV({ k, children }: { k: string; children: React.ReactNode }): React.ReactElement {
   return (
-    <div className="kv" style={{ display: "grid", gridTemplateColumns: "84px 1fr", gap: "4px 10px" }}>
-      <span className="k faint">{k}</span>
-      <span className="v" style={{ fontFamily: "var(--font-mono)", fontSize: 11.5, overflowWrap: "anywhere" }}>{children}</span>
+    <div className="kv-grid">
+      <span className="faint">{k}</span>
+      <span className="kv-v">{children}</span>
     </div>
   );
 }
@@ -89,9 +95,11 @@ function KV({ k, children }: { k: string; children: React.ReactNode }): React.Re
 function AlertDetail({ a }: { a: ShadowAlert }): React.ReactElement {
   const steps = (a.steps ?? []).map((s, i) => <li key={i}>{s}</li>);
   return (
-    <div className="detail" style={{ margin: 0 }}>
-      <div style={{ fontWeight: 600, marginBottom: 6 }}>
-        {a.level || "一般"} · {a.title || "-"} <span className="faint mono">{a.error_code ?? ""}</span>
+    <div className="detail">
+      <div className="sub-t flex-row items-center gap-6">
+        <SevDot s={levelToSev(a.level)} />
+        <span>{a.level || "一般"} · {a.title || "-"}</span>
+        <span className="faint mono">{a.error_code ?? ""}</span>
       </div>
       <KV k="简要摘要">{a.summary || "—"}</KV>
       <KV k="结论"><ReasonBadge r={a.reason} /></KV>
@@ -99,7 +107,7 @@ function AlertDetail({ a }: { a: ShadowAlert }): React.ReactElement {
       <KV k="影响范围">{a.impact || "—"}</KV>
       <KV k="触发时间"><span className="time">{timeAgoText(a.occurred_at)}</span> <span className="faint mono">{a.occurred_at}</span></KV>
       <KV k="关联簇">{a.cluster_key ? <span className="mono">{a.cluster_key}</span> : <span className="faint">—</span>}</KV>
-      <KV k="建议措施">{steps.length > 0 ? <ol style={{ margin: 0, paddingLeft: 18 }}>{steps}</ol> : "—"}</KV>
+      <KV k="建议措施">{steps.length > 0 ? <ol className="ol-steps">{steps}</ol> : "—"}</KV>
       <KV k="指纹">{a.fingerprint}</KV>
     </div>
   );

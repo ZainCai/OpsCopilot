@@ -24,11 +24,18 @@ export function OriginBadge({ o }: { o?: IncidentOrigin | string }): ReactNode {
   return <span className={`og og--${key}`}>{ORIGIN_LABEL[key] ?? key ?? "-"}</span>;
 }
 
-/** 影子判决结论徽章（告警中心）。 */
+/** 严重级圆点（原型 StatusDot 口径 styles.css:210-214：critical→crit、warning→warn、其余 idle）。 */
+export function SevDot({ s }: { s?: string }): ReactNode {
+  const cls = s === "critical" ? "crit" : s === "warning" ? "warn" : "idle";
+  return <span className={`dot dot--${cls}`} title={s ? `severity=${s}` : "severity=n/a"} />;
+}
+
+/** 影子判决结论徽章（告警中心）：判决语义 → .chip--* 色板
+ *  （新增成单=info 提示 · 并簇=warn 需留意 · 窗口去重=ok 已静默）。 */
 const REASON_BADGE: Record<string, [string, string]> = {
-  "new-incident": ["新增", "chip--open"],
-  "cluster-merge": ["并簇", "chip--acked"],
-  "dedup-window": ["窗口去重", ""],
+  "new-incident": ["新增", "chip--info"],
+  "cluster-merge": ["并簇", "chip--warn"],
+  "dedup-window": ["窗口去重", "chip--ok"],
 };
 export function ReasonBadge({ r }: { r?: string }): ReactNode {
   const m = r ? REASON_BADGE[r] : undefined;

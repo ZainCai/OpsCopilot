@@ -59,7 +59,10 @@ function ringLayout(nodes: TopoNode[]): Map<string, LayoutPos> {
   return pos;
 }
 
-const CONF_COLOR: Record<string, string> = { high: "var(--ok)", medium: "var(--warn)", low: "var(--text-3)" };
+/** 置信度 → 语义色类（ADR-007 同源口径：high=ok、medium=warn、low=灰；
+ *  圆点走 .dot--*，行内文字走 .t-* utility，替代上一轮的内联 color）。 */
+const CONF_DOT: Record<string, string> = { high: "ok", medium: "warn", low: "idle" };
+const CONF_TEXT: Record<string, string> = { high: "t-ok", medium: "t-warn", low: "t-idle" };
 
 export function TopologyView(): React.ReactElement {
   const [topo, setTopo] = useState<TopologyResponse | null>(null);
@@ -142,11 +145,11 @@ export function TopologyView(): React.ReactElement {
       {/* 根因链路高亮横幅（消费 rcaShare 登记；关掉可纯看拓扑） */}
       {rca
         ? (
-          <div className="banner" style={{ background: "color-mix(in srgb, var(--crit) 8%, transparent)", color: "var(--text-2)", border: "1px solid color-mix(in srgb, var(--crit) 30%, transparent)", alignItems: "center" }}>
-            <span style={{ color: "var(--crit)", fontWeight: 600 }}>根因链路</span>
+          <div className="banner rootc">
+            <span className="badge-root">根因链路</span>
             <span className="mono">{rca.incidentId}</span>
             <span className="faint">{rca.title ? clampText(rca.title, 30) : ""} · 根因节点 {rootSet.size} 个（红环）· 一跳邻域虚线 · 登记于 {new Date(rca.at).toLocaleTimeString()}</span>
-            <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+            <span className="push-right flex-row gap-6">
               <button type="button" className="btn btn--sm" onClick={() => setHlEnabled((v) => !v)}>{hlEnabled ? "暂停高亮" : "恢复高亮"}</button>
               <button type="button" className="btn btn--sm" onClick={() => { clearRcaHighlight(); setHlEnabled(true); }}>清除</button>
             </span>
@@ -160,7 +163,7 @@ export function TopologyView(): React.ReactElement {
         {!topo && !loading ? <div className="faint">尚未拉取。</div> : null}
         {topo && nodes.length === 0
           ? (
-            <div className="empty" style={{ padding: "20px 12px 30px" }}>
+            <div className="empty">
               <div className="e-t">拓扑为空</div>
               <div className="e-d">等第一轮发现进图——连接器接入后 30s 内出现。</div>
             </div>
@@ -202,7 +205,8 @@ export function TopologyView(): React.ReactElement {
                           onMouseEnter={() => setSelected(null)}
                           onClick={() => setSelected((k) => (k === n.node_key ? null : n.node_key))}
                         >
-                          <span className="topo-dot" style={{ background: CONF_COLOR[n.confidence ?? "low"] ?? CONF_COLOR.low }} title={`confidence=${n.confidence ?? "low"}`} />
+                          <span className={`topo-dot dot--${CONF_DOT[n.confidence ?? "low"] ?? CONF_DOT.low}`} title={`confidence=${n.confidence ?? "low"}`} />
+                          {isRoot ? <span className="badge-root">根因</span> : null}
                           <span className="topo-k mono" title={n.node_key}>{clampText(n.node_key, 22)}</span>
                           <span className="topo-t faint">{n.node_type || "node"}</span>
                           <span className={`topo-h${(clusterOf?.get(n.node_key) ?? 0) > 0 ? " bad" : ""}`}>
@@ -213,16 +217,29 @@ export function TopologyView(): React.ReactElement {
                     );
                   })}
                 </svg>
+                {/* 图例（原型 TopoCanvas 口径 styles.css:420-424 / topo-canvas.jsx:269-288，按我们的连线语义裁剪） */}
+                <div className="topo-legend mt-10">
+                  <span className="lg-i"><span className="dot dot--ok" />置信 high（观测事实）</span>
+                  <span className="lg-i"><span className="dot dot--warn" />medium（聚合声明）</span>
+                  <span className="lg-i"><span className="dot dot--idle" />low（不进因果推理）</span>
+                  <span className="lg-i"><span className="lg-line" />调用边</span>
+                  <span className="lg-i"><span className="lg-line dash" />根因传播链路</span>
+                  <span className="lg-i"><span className="badge-root">根因</span>根因节点（红环）</span>
+                </div>
                 {hovered
                   ? (
-                    <div className="topo-tip" style={{ left: hovered.x + 14, top: hovered.y + 10 }}>
+                    <div
+                      className="topo-tip"
+                      /* left/top 为跟随鼠标的运行时定位值，无静态类可收敛——保留内联 */
+                      style={{ left: hovered.x + 14, top: hovered.y + 10 }}
+                    >
                       {(() => {
                         const n = nodeByKey.get(hovered.key);
                         if (!n) return null;
                         return (
                           <>
-                            <div className="mono" style={{ fontWeight: 600 }}>{n.node_key}</div>
-                            <div>类型 {n.node_type || "node"} · 置信 <b style={{ color: CONF_COLOR[n.confidence ?? "low"] ?? CONF_COLOR.low }}>{n.confidence ?? "low"}</b> · 邻居 {(adj.get(n.node_key) ?? []).length}</div>
+                            <div className="tt-t mono">{n.node_key}</div>
+                            <div>类型 {n.node_type || "node"} · 置信 <b className={CONF_TEXT[n.confidence ?? "low"] ?? CONF_TEXT.low}>{n.confidence ?? "low"}</b> · 邻居 {(adj.get(n.node_key) ?? []).length}</div>
                             <div className="faint">来源 {n.source || "—"} · 有效 {fmtTime(n.valid_from)} → {n.valid_to && !n.valid_to.startsWith("9999") ? fmtTime(n.valid_to) : "现在"}</div>
                             <div className="faint">点击查看 24h 变更</div>
                           </>
@@ -264,8 +281,8 @@ function AggregateTable({ nodes }: { nodes: TopoNode[] }): React.ReactElement {
             <tr key={t}>
               <td className="mono">{t}</td>
               <td className="num mono">{v.count}</td>
-              <td className="num mono" style={{ color: "var(--ok)" }}>{v.high}</td>
-              <td className="num mono" style={{ color: "var(--warn)" }}>{v.medium}</td>
+              <td className="num mono t-ok">{v.high}</td>
+              <td className="num mono t-warn">{v.medium}</td>
               <td className="num mono faint">{v.low}</td>
             </tr>
           ))}
@@ -294,18 +311,18 @@ function NodeDetail({ nodeKey, neighbors }: { nodeKey: string; neighbors: string
   }, [nodeKey]);
 
   return (
-    <div className="detail" style={{ margin: 0, borderTop: "1px solid var(--line-soft)" }}>
-      <div style={{ fontWeight: 600, marginBottom: 6 }}>节点 <span className="mono">{nodeKey}</span></div>
-      <div className="faint" style={{ marginBottom: 6 }}>邻居 <b className="mono">{neighbors.length}</b>：{clampText(neighbors.join("、"), 120) || "—"}</div>
+    <div className="detail b-top">
+      <div className="sub-t">节点 <span className="mono">{nodeKey}</span></div>
+      <div className="faint mb-6">邻居 <b className="mono">{neighbors.length}</b>：{clampText(neighbors.join("、"), 120) || "—"}</div>
       {err ? <div className="banner err">变更查询失败：{err}</div> : null}
       {!changes && !err ? <span className="panel-sub"><span className="spin" />加载 24h 变更…</span> : null}
       {changes && changes.length === 0 ? <div className="faint">24h 内无变更</div> : null}
       {(changes ?? []).map((c, i) => (
-        <div key={`${c.id ?? i}`} style={{ fontSize: 12, marginBottom: 4 }}>
-          <span className="sev sev--info">{c.change_type}</span>{" "}
-          <span className="mono faint">{fmtTime(c.occurred_at)}</span>{" "}
-          {c.actor || c.source || ""} {c.summary || ""}
-          {c.confidence ? <span className="faint"> · conf={c.confidence}</span> : null}
+        <div className="rca-find" key={`${c.id ?? i}`}>
+          <span className="sev sev--info">{c.change_type}</span>
+          <span className="mono faint">{fmtTime(c.occurred_at)}</span>
+          <span className="rca-find-sum">{c.actor || c.source || ""} {c.summary || ""}</span>
+          {c.confidence ? <span className="faint">conf={c.confidence}</span> : null}
         </div>
       ))}
     </div>

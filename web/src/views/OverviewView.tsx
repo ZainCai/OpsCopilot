@@ -112,48 +112,62 @@ export function OverviewView({ onConn }: { onConn: (ok: boolean) => void }): Rea
       {err ? <Banner kind="err">加载失败：{err}（OPS_NOISE_SHADOW=off 或未接 DB 时返回 503）</Banner> : null}
       {truncated ? <Banner kind="warn">簇数量超过拉取上限（500），列表与「告警总量」为截断后口径</Banner> : null}
 
-      <div className="kpi-grid">
-        <StatCard label="活跃簇" value={kpi.active ?? "—"} unit="簇" sub={state === "active" ? `本页 ${clusters.length} 个` : "open + acked"} color="var(--brand)" />
-        <StatCard label="已解决" value={kpi.resolved ?? "—"} unit="簇" sub="静默期自动收敛" color="var(--ok)" />
-        <StatCard label="告警总量" value={totalAlerts} unit="条" sub="当前过滤下簇内累计" />
-        <StatCard label="拓扑规模" value={kpi.nodes ?? "—"} unit="节点" sub={kpi.edges != null ? `${kpi.edges} 边` : "边数未刷新"} />
-      </div>
+      {/* 面板布局对齐原型 .page-grid + .col-*（styles.css:235-240）：KPI 行 col-12、
+          主表 col-8、侧栏簇详情 col-4 */}
+      <div className="page-grid">
+        <div className="kpi-grid col-12">
+          <StatCard label="活跃簇" value={kpi.active ?? "—"} unit="簇" sub={state === "active" ? `本页 ${clusters.length} 个` : "open + acked"} tone="brand" />
+          <StatCard label="已解决" value={kpi.resolved ?? "—"} unit="簇" sub="静默期自动收敛" tone="ok" />
+          <StatCard label="告警总量" value={totalAlerts} unit="条" sub="当前过滤下簇内累计" />
+          <StatCard label="拓扑规模" value={kpi.nodes ?? "—"} unit="节点" sub={kpi.edges != null ? `${kpi.edges} 边` : "边数未刷新"} />
+        </div>
 
-      {/* 运维 KPI 行（W10-3 F-07）：GET /api/v1/kpis 真实读数（替换占位）。
-          口径：窗口内新建事件队列的 MTTA/MTTR（平均闭环与 MTTR 同口径合并
-          报告）；samples=0 显示破折号——"无数据"不是"零耗时"。 */}
-      <div className="sec-h" style={{ margin: "14px 0 8px", fontSize: 11.5, fontWeight: 600, color: "var(--text-2)" }}>
-        运维 KPI · 窗口 {opsKpi?.window ?? "—"}{opsKpi ? `（自 ${fmtTime(opsKpi.window_start)}）` : ""}
-      </div>
-      <div className="kpi-grid">
-        <StatCard
-          label="MTTA 平均确认"
-          value={opsKpi && opsKpi.stats.acked_samples > 0 ? fmtDurationSec(opsKpi.stats.mtta_seconds) : "—"}
-          unit="时长" sub={opsKpi ? `样本 ${opsKpi.stats.acked_samples} 单（窗口内新建）` : "GET /kpis 未就绪"} color="var(--brand)"
-        />
-        <StatCard
-          label="MTTR · 平均闭环"
-          value={opsKpi && opsKpi.stats.resolved_samples > 0 ? fmtDurationSec(opsKpi.stats.mttr_seconds) : "—"}
-          unit="时长" sub={opsKpi ? `样本 ${opsKpi.stats.resolved_samples} 单（含被合并）` : "GET /kpis 未就绪"} color="var(--ok)"
-        />
-        <StatCard label="新建事件" value={opsKpi?.stats.created_count ?? "—"} unit="单" sub="窗口吞吐 · 建单" />
-        <StatCard label="闭环事件" value={opsKpi?.stats.resolved_count ?? "—"} unit="单" sub="窗口吞吐 · 解决（含合并）" />
-      </div>
+        {/* 运维 KPI 行（W10-3 F-07）：GET /api/v1/kpis 真实读数（替换占位）。
+            口径：窗口内新建事件队列的 MTTA/MTTR（平均闭环与 MTTR 同口径合并
+            报告）；samples=0 显示破折号——"无数据"不是"零耗时"。 */}
+        <div className="col-12 sub-t muted">
+          运维 KPI · 窗口 {opsKpi?.window ?? "—"}{opsKpi ? `（自 ${fmtTime(opsKpi.window_start)}）` : ""}
+        </div>
+        <div className="kpi-grid col-12">
+          <StatCard
+            label="MTTA 平均确认"
+            value={opsKpi && opsKpi.stats.acked_samples > 0 ? fmtDurationSec(opsKpi.stats.mtta_seconds) : "—"}
+            unit="时长" sub={opsKpi ? `样本 ${opsKpi.stats.acked_samples} 单（窗口内新建）` : "GET /kpis 未就绪"} tone="brand"
+          />
+          <StatCard
+            label="MTTR · 平均闭环"
+            value={opsKpi && opsKpi.stats.resolved_samples > 0 ? fmtDurationSec(opsKpi.stats.mttr_seconds) : "—"}
+            unit="时长" sub={opsKpi ? `样本 ${opsKpi.stats.resolved_samples} 单（含被合并）` : "GET /kpis 未就绪"} tone="ok"
+          />
+          <StatCard label="新建事件" value={opsKpi?.stats.created_count ?? "—"} unit="单" sub="窗口吞吐 · 建单" />
+          <StatCard label="闭环事件" value={opsKpi?.stats.resolved_count ?? "—"} unit="单" sub="窗口吞吐 · 解决（含合并）" />
+        </div>
 
-      <Panel title="告警簇" sub={`${clusters.length} 个（${state === "active" ? "活跃" : state === "resolved" ? "已解决" : "全部"}）`}>
-        <DataTable
-          columns={columns}
-          rows={clusters}
-          rowKey={(c) => c.cluster_key}
-          onRowClick={(c) => setDetailKey((k) => (k === c.cluster_key ? null : c.cluster_key))}
-          selectedKey={detailKey ?? undefined}
-          empty={{
-            title: state === "active" ? "当前无活跃簇" : "当前过滤下没有簇",
-            desc: "影子模式下每条告警都会归簇（需 OPS_DB_DSN 且降噪影子模式开启）。",
-          }}
-        />
-        {detailKey ? <ClusterDetail clusterKey={detailKey} /> : null}
-      </Panel>
+        <div className="col-8">
+          <Panel title="告警簇" sub={`${clusters.length} 个（${state === "active" ? "活跃" : state === "resolved" ? "已解决" : "全部"}）`}>
+            <DataTable
+              columns={columns}
+              rows={clusters}
+              rowKey={(c) => c.cluster_key}
+              onRowClick={(c) => setDetailKey((k) => (k === c.cluster_key ? null : c.cluster_key))}
+              selectedKey={detailKey ?? undefined}
+              empty={{
+                title: state === "active" ? "当前无活跃簇" : "当前过滤下没有簇",
+                desc: "影子模式下每条告警都会归簇（需 OPS_DB_DSN 且降噪影子模式开启）。",
+              }}
+            />
+          </Panel>
+        </div>
+
+        {/* 侧栏面板（col-4）：点簇行原位展示簇详情 */}
+        <div className="col-4">
+          <Panel title="簇详情" sub={detailKey ?? undefined}>
+            <div className="panel-b">
+              {detailKey ? <ClusterDetail clusterKey={detailKey} /> : <div className="faint">点击左侧簇行查看该簇全量字段。</div>}
+            </div>
+          </Panel>
+        </div>
+      </div>
     </>
   );
 }
@@ -171,8 +185,8 @@ function ClusterDetail({ clusterKey }: { clusterKey: string }): React.ReactEleme
     return () => { dead = true; };
   }, [clusterKey]);
 
-  if (err) return <div className="detail" style={{ margin: 0 }}>详情加载失败：{err}</div>;
-  if (!c) return <div className="detail" style={{ margin: 0 }}><span className="spin" />加载簇 {clusterKey}…</div>;
+  if (err) return <div className="detail">详情加载失败：{err}</div>;
+  if (!c) return <div className="detail"><span className="spin" />加载簇 {clusterKey}…</div>;
 
   const rows: [string, React.ReactNode][] = [
     ["cluster_key", <span className="mono">{c.cluster_key}</span>],
@@ -186,16 +200,13 @@ function ClusterDetail({ clusterKey }: { clusterKey: string }): React.ReactEleme
     ["节点", <span className="mono">{(c.node_keys ?? []).join(", ") || "—"}</span>],
   ];
   return (
-    <div className="detail" style={{ margin: 0 }}>
-      <div style={{ fontWeight: 600, marginBottom: 6 }}>簇详情</div>
-      <div style={{ display: "grid", gridTemplateColumns: "84px 1fr", gap: "4px 10px" }}>
-        {rows.map(([k, v]) => (
-          <span key={k} style={{ display: "contents" }}>
-            <span className="faint">{k}</span>
-            <span style={{ fontSize: 11.5, overflowWrap: "anywhere" }}>{v}</span>
-          </span>
-        ))}
-      </div>
+    <div className="kv-grid">
+      {rows.map(([k, v]) => (
+        <span key={k} className="d-contents">
+          <span className="faint">{k}</span>
+          <span className="kv-v">{v}</span>
+        </span>
+      ))}
     </div>
   );
 }

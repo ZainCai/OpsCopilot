@@ -33,16 +33,28 @@ function ConfBar({ c }: { c: string }): React.ReactElement {
   );
 }
 
-function FindingLine({ f }: { f: RcaFinding }): React.ReactElement {
+/** 证据链条目（原型 .chain 口径 styles.css:333-348）：序号=证据时序，类型=六步归属；
+ *  ADR-007 三段置信度条原样保留（决策：不改成原型百分比条）。 */
+function FindingLine({ f, idx }: { f: RcaFinding; idx: number }): React.ReactElement {
   return (
-    <div className="rca-find">
-      <ConfBar c={f.confidence} />
-      <span className="rca-step-tag">{STEP_LABEL[f.step] ?? f.step}</span>
-      <span className="rca-find-sum">{f.summary}</span>
-      {(f.node_keys ?? []).length > 0
-        ? <span className="mono faint"> ·{(f.node_keys ?? []).join(" ,")}</span>
-        : null}
-      {f.ref ? <span className="mono faint" title="关联证据标识（跨步引用链）"> ·#{f.ref}</span> : null}
+    <div className="chain-item">
+      <div className="chain-marker">
+        <span className="chain-idx">{String(idx + 1).padStart(2, "0")}</span>
+        <span className="chain-line" />
+      </div>
+      <div className="chain-body">
+        <div className="chain-type">
+          {STEP_LABEL[f.step] ?? f.step}
+          {f.ref ? <em title="关联证据标识（跨步引用链）">#{f.ref}</em> : null}
+          <ConfBar c={f.confidence} />
+        </div>
+        <div className="chain-detail">
+          {f.summary}
+          {(f.node_keys ?? []).length > 0
+            ? <span className="mono faint"> ·{(f.node_keys ?? []).join(" ,")}</span>
+            : null}
+        </div>
+      </div>
     </div>
   );
 }
@@ -86,10 +98,10 @@ export function RcaSection({ id }: { id: string }): React.ReactElement {
 
   return (
     <div className="sec">
-      <div className="sec-h">
+      <div className="sec-h flex-row items-center gap-8">
         根因分析 · RCA
         <button
-          type="button" className="btn btn--sm" style={{ marginLeft: 10 }}
+          type="button" className="btn btn--sm"
           disabled={loading} onClick={() => void run(false)}
         >
           {loading ? <span className="spin" /> : null}
@@ -97,7 +109,7 @@ export function RcaSection({ id }: { id: string }): React.ReactElement {
         </button>
         {res && !loading
           ? (
-            <button type="button" className="btn btn--sm" style={{ marginLeft: 6 }} onClick={() => navigate("topology")}>
+            <button type="button" className="btn btn--sm" onClick={() => navigate("topology")}>
               在拓扑中看根因链路 →
             </button>
           )
@@ -118,18 +130,27 @@ export function RcaSection({ id }: { id: string }): React.ReactElement {
 
       {res ? (
         <>
-          {/* 六步状态条：done ✓ / pending … / failed ✕（步骤级失败不毁整单报告） */}
-          <div className="rca-steps">
-            {(res.steps ?? []).map((s) => (
-              <span
-                key={s.name} className={`rca-step st-${s.status}`}
-                title={`${s.name} · ${s.status} · ${s.duration_ms}ms${s.error ? ` · ${s.error}` : ""}`}
-              >
-                <b className="rca-step-i">{STEP_ICON[s.status] ?? "?"}</b>
-                <span>{STEP_LABEL[s.name] ?? s.name}</span>
-                <span className="faint mono">{s.duration_ms}ms</span>
-              </span>
-            ))}
+          {/* 六步流水线（原型 .pipeline 口径）：done 绿勾 / failed ✕红 / pending …warn 描边
+              （步骤级失败不毁整单报告）；连接线在前一步 done 时点亮 */}
+          <div className="pipeline">
+            {(res.steps ?? []).map((s, i) => {
+              const prev = (res.steps ?? [])[i - 1];
+              const linkDone = !!prev && prev.status === "done" && s.status !== "pending";
+              return (
+                <div
+                  key={s.name}
+                  className={`pipe-step${s.status === "done" ? " done" : s.status === "failed" ? " fail" : " pending"}`}
+                  title={`${s.name} · ${s.status} · ${s.duration_ms}ms${s.error ? ` · ${s.error}` : ""}`}
+                >
+                  {i > 0 ? <div className={`pipe-link${linkDone ? " done" : ""}`} /> : null}
+                  <div className="pipe-node">
+                    <div className="pipe-ic">{STEP_ICON[s.status] ?? "?"}</div>
+                    <div className="pipe-name">{STEP_LABEL[s.name] ?? s.name}</div>
+                    <div className="pipe-dur">{s.duration_ms}ms</div>
+                  </div>
+                </div>
+              );
+            })}
           </div>
 
           <div className="rca-meta">
@@ -148,7 +169,11 @@ export function RcaSection({ id }: { id: string }): React.ReactElement {
           <div className="rca-h">根因标注（{(res.root_causes ?? []).length}）</div>
           {(res.root_causes ?? []).length === 0
             ? <div className="faint">未标注根因——证据不足或归属步未产出（是运维事实，不是渲染缺失）。</div>
-            : (res.root_causes ?? []).map((f, i) => <FindingLine key={i} f={f} />)}
+            : (
+              <div className="chain">
+                {(res.root_causes ?? []).map((f, i) => <FindingLine key={i} f={f} idx={i} />)}
+              </div>
+            )}
 
           {/* findings 折叠（truncated 时明示裁了多少、给全量开关） */}
           <details className="rca-findings">
@@ -157,14 +182,18 @@ export function RcaSection({ id }: { id: string }): React.ReactElement {
               {res.truncated ? <span className="chip rca-trunc" title="OPS_RCA_MAX_FINDINGS 按置信度+时序截断（与审计同源）">已截断 {res.findings_truncated} 条</span> : null}
             </summary>
             {showingAll
-              ? <div className="faint" style={{ margin: "4px 0" }}>当前为全量视图（?all=1）：默认口径下少了 {res.findings_truncated} 条。</div>
+              ? <div className="faint my-4">当前为全量视图（?all=1）：默认口径下少了 {res.findings_truncated} 条。</div>
               : null}
             {(res.findings ?? []).length === 0
               ? <div className="faint">无 findings</div>
-              : (res.findings ?? []).map((f, i) => <FindingLine key={i} f={f} />)}
+              : (
+                <div className="chain">
+                  {(res.findings ?? []).map((f, i) => <FindingLine key={i} f={f} idx={i} />)}
+                </div>
+              )}
             {!showingAll && res.truncated && !loading
               ? (
-                <button type="button" className="btn btn--sm" style={{ marginTop: 6 }} onClick={() => void run(true)}>
+                <button type="button" className="btn btn--sm mt-10" onClick={() => void run(true)}>
                   拉取全量（?all=1 · 仍在 Token 门禁内）
                 </button>
               )
@@ -174,15 +203,27 @@ export function RcaSection({ id }: { id: string }): React.ReactElement {
           {/* 结论区：conclusion=null 是契约层面的显式"没有结论"，明示不装作 */}
           {res.conclusion != null
             ? (
-              <div className="rca-conc">
-                <div className="rca-h">LLM 结论 {res.llm_used ? <span className="chip chip--open">LLM</span> : null}</div>
-                <div style={{ whiteSpace: "pre-wrap" }}>{res.conclusion}</div>
+              <div className="ai-card mt-10">
+                <div className="ai-head">
+                  <span className="ai-tag">AI</span>
+                  <span className="ai-title">LLM 结论</span>
+                  {res.llm_used ? <span className="chip chip--ai">LLM</span> : null}
+                </div>
+                <p className="ai-text pre-wrap">{res.conclusion}</p>
               </div>
             )
             : (
-              <div className="banner warn" style={{ marginTop: 8 }}>
-                结论待 LLM 配置（conclude pending）——llm-gateway 未接线或本轮未产出，
-                ADR-003 禁止伪 RCA：这里明示「没有结论」，不代表分析没跑。
+              <div className="ai-card mt-10">
+                <div className="ai-head">
+                  <span className="ai-tag">AI</span>
+                  <span className="ai-title">结论待 LLM 配置（conclude pending）</span>
+                </div>
+                <p className="ai-text">
+                  llm-gateway 未接线或本轮未产出，ADR-003 禁止伪 RCA：这里明示「没有结论」，不代表分析没跑。
+                </p>
+                <div className="ai-chips">
+                  <span className="chip chip--warn">conclude pending</span>
+                </div>
               </div>
             )}
         </>

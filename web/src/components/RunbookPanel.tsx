@@ -200,16 +200,16 @@ export function RunbookSection({ id }: { id: string }): React.ReactElement {
 
   return (
     <div className={`sec${off ? " rb-off" : ""}`}>
-      <div className="sec-h">
+      <div className="sec-h flex-row items-center gap-8">
         处置手册 · Runbook（只记不执行）
         {!off && mounts
           ? (
-            <button type="button" className="btn btn--sm" style={{ marginLeft: 10 }} disabled={busy} onClick={() => void openPicker()}>
+            <button type="button" className="btn btn--sm" disabled={busy} onClick={() => void openPicker()}>
               {picker ? "收起" : "挂载手册"}
             </button>
           )
           : null}
-        <span className="faint" style={{ marginLeft: 10, fontWeight: 400 }}>
+        <span className="panel-sub">
           auto_execution:false · 台账非审计证据（取证看审计轨迹）
         </span>
       </div>
@@ -222,7 +222,7 @@ export function RunbookSection({ id }: { id: string }): React.ReactElement {
           </div>
         )
         : null}
-      {err ? <div className="banner err" style={{ marginBottom: 6 }}>Runbook：{err}</div> : null}
+      {err ? <div className="banner err mb-6">Runbook：{err}</div> : null}
 
       {/* 挂载选择器：E1 库列表 → 选 + E4 挂载；空库时给 E2 内联最小创建（title+content） */}
       {picker && !off
@@ -233,10 +233,10 @@ export function RunbookSection({ id }: { id: string }): React.ReactElement {
               : lib.length === 0
                 ? (
                   <>
-                    <div className="faint" style={{ marginBottom: 6 }}>
+                    <div className="faint mb-6">
                       手册库为空。可内联创建一本最小手册（标题 + markdown 正文；正文系统不解析、不执行，id 与适用范围走服务端默认）并立即挂载到本事件。
                     </div>
-                    <div className="form-row" style={{ maxWidth: 580 }}>
+                    <div className="form-row form-narrow">
                       <span className="muted">标题</span>
                       <input value={newTitle} onChange={(e) => setNewTitle(e.target.value)} placeholder="如：磁盘清理手册" />
                       <span className="muted">正文（md）</span>
@@ -252,7 +252,7 @@ export function RunbookSection({ id }: { id: string }): React.ReactElement {
                 )
                 : (
                   <>
-                    <div className="form-row" style={{ maxWidth: 580, gridTemplateColumns: "96px 1fr auto", alignItems: "center" }}>
+                    <div className="form-row form-row-3">
                       <span className="muted">库内手册</span>
                       <select className="select" value={picked} onChange={(e) => setPicked(e.target.value)}>
                         <option value="">选择手册…（{lib.length} 本，新→旧）</option>
@@ -262,14 +262,14 @@ export function RunbookSection({ id }: { id: string }): React.ReactElement {
                           </option>
                         ))}
                       </select>
-                      <span style={{ display: "flex", gap: 6 }}>
+                      <span className="push-right flex-row items-center gap-6">
                         <button type="button" className="btn btn--acc btn--sm" disabled={busy || !picked} onClick={() => void submitMount()}>
                           {busy ? <span className="spin" /> : null}挂载所选
                         </button>
                         <button type="button" className="btn btn--sm" onClick={() => setPicker(false)}>取消</button>
                       </span>
                     </div>
-                    <div className="faint" style={{ marginTop: 4 }}>挂载幂等：重复提交不产生第二条、不刷新首挂留痕（契约 E4），可安全重试。</div>
+                    <div className="faint my-4">挂载幂等：重复提交不产生第二条、不刷新首挂留痕（契约 E4），可安全重试。</div>
                   </>
                 )}
           </div>
@@ -287,7 +287,7 @@ export function RunbookSection({ id }: { id: string }): React.ReactElement {
           <div key={m.runbook_id}>
           <div className="cand">
             <span className="mono">{m.runbook_id}</span>
-            <span style={{ fontWeight: 600 }}>{m.title}</span>
+            <span className="fw-600">{m.title}</span>
             <span className="chip" title="适用范围（scope_severity · scope_service，空 = 不限）">{scopeText(m)}</span>
             <span
               className={`chip ${m.execution_count > 0 ? "chip--open" : ""}`}
@@ -296,7 +296,7 @@ export function RunbookSection({ id }: { id: string }): React.ReactElement {
               执行 {m.execution_count}
             </span>
             <span className="faint">挂载人 {m.mounted_by || "—"} · {fmtTime(m.mounted_at)}</span>
-            <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+            <span className="push-right flex-row items-center gap-6">
               <button
                 type="button" className="btn btn--sm" disabled={busy}
                 title="人事后手填一条执行流水（只记录，系统不代跑）"
@@ -311,7 +311,7 @@ export function RunbookSection({ id }: { id: string }): React.ReactElement {
           {recFor === m.runbook_id
             ? (
               <div className="rb-exec">
-                <div className="form-row" style={{ maxWidth: 580 }}>
+                <div className="form-row form-narrow">
                   <span className="muted">执行人</span>
                   <input value={execBy} onChange={(e) => setExecBy(e.target.value.trim())} placeholder="executed_by 身份钩子，如 zhangsan" />
                   <span className="muted">结果</span>
@@ -342,7 +342,7 @@ export function RunbookSection({ id }: { id: string }): React.ReactElement {
           >
             <summary>手册正文 · 执行历史{rows ? `（${rows.length}）` : `（已记 ${m.execution_count}，展开拉取）`}</summary>
             <pre className="rb-content">{m.content?.trim() || "（无正文）"}</pre>
-            <div className="faint" style={{ margin: "4px 0" }}>
+            <div className="faint my-4">
               执行历史 append-only · 旧→新（服务端 IDENTITY 发号，只读不可改）。再强调一次：只记不执行，本页不代跑手册。
             </div>
             {!rows
@@ -351,7 +351,7 @@ export function RunbookSection({ id }: { id: string }): React.ReactElement {
                 ? <div className="faint">该挂载点暂无执行记录。</div>
                 : rows.map((x) => (
                   <div className="rca-find" key={x.seq}>
-                    <span className="mono" style={{ color: "var(--brand)" }}>#{x.seq}</span>
+                    <span className="mono t-brand">#{x.seq}</span>
                     <span className="faint mono">{fmtTime(x.executed_at)}</span>
                     <span className="mono">{x.executed_by}</span>
                     <span className="rca-find-sum">{x.result}</span>

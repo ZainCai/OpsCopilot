@@ -23,11 +23,11 @@ export function Panel({ title, sub, actions, children, banner }: PanelProps): Re
   );
 }
 
-/** 行内状态横幅。 */
+/** 行内状态横幅（槽位间距走 .banner-slot utility）。 */
 export function Banner({ kind, children }: { kind: "err" | "warn"; children: ReactNode }): ReactNode {
   if (!children) return null;
   return (
-    <div style={{ margin: "12px var(--pad)" }}>
+    <div className="banner-slot">
       <div className={`banner ${kind}`}>{kind === "err" ? "⚠ " : "⚠ "}{children}</div>
     </div>
   );
@@ -35,7 +35,7 @@ export function Banner({ kind, children }: { kind: "err" | "warn"; children: Rea
 
 export function Loading({ text }: { text: string }): ReactNode {
   return (
-    <div style={{ margin: "12px var(--pad)" }}>
+    <div className="banner-slot">
       <div className="banner warn"><span className="spin" />{text}</div>
     </div>
   );

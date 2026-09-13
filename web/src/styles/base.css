@@ -40,7 +40,6 @@ body { font-family: var(--font-sans); background: var(--bg); color: var(--text);
 .btn--acc { background: var(--brand); border-color: var(--brand); color: var(--brand-ink); font-weight: 600; }
 .btn--acc:hover { background: color-mix(in srgb, var(--brand) 85%, #ffffff); border-color: transparent; color: var(--brand-ink); }
 .btn--sm { height: 26px; padding: 0 10px; font-size: 12px; border-radius: 7px; }
-label.toggle { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; color: var(--text-2); cursor: pointer; }
 
 /* seg 分段控件 */
 .seg { display: inline-flex; background: var(--panel-2); border: 1px solid var(--line); border-radius: 9px; padding: 2px; }
@@ -71,7 +70,7 @@ label.toggle { display: inline-flex; gap: 6px; align-items: center; font-size: 1
 .panel-h { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 var(--pad);
            border-bottom: 1px solid var(--line-soft); flex-wrap: wrap; row-gap: 4px; }
 .panel-t { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.panel-sub { font-size: 11.5px; color: var(--text-3); }
+.panel-sub { font-size: 11.5px; font-weight: 400; color: var(--text-3); } /* weight:400 供粗体标题内嵌时不被加粗（替代视图内联 fontWeight） */
 .panel-x { margin-left: auto; display: flex; align-items: center; gap: 8px; }
 .panel-b { padding: var(--pad); }
 .panel-b--flush { padding: 0; }
@@ -157,18 +156,13 @@ label.toggle { display: inline-flex; gap: 6px; align-items: center; font-size: 1
         vertical-align: -2px; margin-right: 7px; }
 @keyframes r { to { transform: rotate(360deg); } }
 
-/* 时间线（审计轨迹） */
-.tl { list-style: none; margin: 0; padding: 0 0 0 4px; }
-.tl li { position: relative; padding: 0 0 10px 18px; border-left: 1px solid var(--line-soft); }
-.tl li:last-child { border-left-color: transparent; padding-bottom: 2px; }
-.tl li::before { content: ""; position: absolute; left: -4px; top: 5px; width: 7px; height: 7px;
-                 border-radius: 50%; background: var(--brand); }
-.tl .tl-meta { font-family: var(--font-mono); font-size: 11px; color: var(--text-3); margin-left: 6px; }
+/* 时间线（审计轨迹/混合时间线共用容器）：条目行视觉走原型 .tl-item/.tl-t/.tl-dot
+   （styles.css:351-354，定义见下），旧的 li 伪点方案随第二轮视图迁移移除 */
+.tl { list-style: none; margin: 0; padding: 0; }
 
 /* 混合时间线（W10-1 F-03）来源徽标 */
-.tl .tl-kind { display: inline-flex; align-items: center; height: 20px; padding: 0 8px;
-               border-radius: 6px; font-size: 11px; font-weight: 600; border: 1px solid transparent; }
-.tl .tl-kind + .sev { margin-left: 6px; }
+.tl-kind { display: inline-flex; align-items: center; height: 20px; padding: 0 8px;
+           border-radius: 6px; font-size: 11px; font-weight: 600; border: 1px solid transparent; }
 .tl-kind.k-alert_in  { color: var(--crit); border-color: color-mix(in srgb, var(--crit) 40%, transparent); background: color-mix(in srgb, var(--crit) 10%, transparent); }
 .tl-kind.k-alert_out { color: var(--text-2); border-color: var(--line); background: color-mix(in srgb, var(--text-3) 12%, transparent); }
 .tl-kind.k-change    { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent); background: color-mix(in srgb, var(--warn) 10%, transparent); }
@@ -179,26 +173,17 @@ label.toggle { display: inline-flex; gap: 6px; align-items: center; font-size: 1
             color: var(--text-2); font-size: 12.5px; line-height: 1.8; }
 .todo-box code { font-family: var(--font-mono); color: var(--text-3); }
 
-/* ===== W11-2 · RCA 区块（事件详情） ===== */
-.rca-steps { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 6px; }
-.rca-step { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px;
-            border-radius: 8px; border: 1px solid var(--line); background: var(--panel); font-size: 11.5px; }
-.rca-step-i { font-family: var(--font-mono); }
-.rca-step.st-done   { color: var(--ok);   border-color: color-mix(in srgb, var(--ok) 40%, transparent); }
-.rca-step.st-pending{ color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent); }
-.rca-step.st-failed { color: var(--crit); border-color: color-mix(in srgb, var(--crit) 45%, transparent); }
+/* ===== W11-2 · RCA 区块（事件详情） =====
+   六步流水线/证据链/AI 结论卡片改用原型 .pipeline/.chain/.ai-card（见下方与 AI 卡片块），
+   旧 .rca-step chips 与 .rca-conc 已随之移除；以下仅保留仍被引用的行内样式。 */
 .rca-meta { font-size: 11.5px; color: var(--text-2); margin: 4px 0; line-height: 1.7; }
 .rca-h { font-size: 11.5px; font-weight: 600; color: var(--text-2); margin: 10px 0 4px; }
 .rca-find { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; font-size: 12px; margin-bottom: 5px; }
 .rca-find-sum { flex: 1 1 260px; min-width: 0; overflow-wrap: anywhere; }
-.rca-step-tag { flex: none; font-size: 10.5px; color: var(--text-3); border: 1px solid var(--line-soft);
-                border-radius: 5px; padding: 0 5px; }
 .rca-findings { margin-top: 10px; border: 1px solid var(--line-soft); border-radius: 8px; padding: 8px 12px; }
 .rca-findings summary { cursor: pointer; font-size: 12px; font-weight: 600; color: var(--text-2); }
 .rca-trunc { margin-left: 8px; color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent);
              background: color-mix(in srgb, var(--warn) 10%, transparent); height: 18px; font-size: 10.5px; }
-.rca-conc { margin-top: 10px; border: 1px solid color-mix(in srgb, var(--brand) 35%, transparent); border-radius: 8px;
-            padding: 10px 12px; background: color-mix(in srgb, var(--brand) 6%, transparent); font-size: 12.5px; line-height: 1.7; }
 
 /* ADR-007 三段置信度条：3 格填充数即档位（high=3/medium=2/low=1），非百分比 */
 .conf { display: inline-flex; align-items: center; gap: 2px; flex: none; }
@@ -208,6 +193,21 @@ label.toggle { display: inline-flex; gap: 6px; align-items: center; font-size: 1
 .conf.warn { color: var(--warn); }
 .conf.low  { color: var(--text-3); }
 .conf-t { font-family: var(--font-mono); font-size: 10.5px; margin-left: 3px; }
+
+/* ===== AI 卡片家族（补缺：原型 styles.css:287-303 移植，ai 语境统一走 --ai 令牌；
+   原型 304-307 的百分比 conf 条不移植——ADR-007 三段置信度条见上方既有定义） ===== */
+.ai-card { background: color-mix(in srgb, var(--ai) 7%, var(--panel));
+           border: 1px solid color-mix(in srgb, var(--ai) 32%, transparent);
+           border-left: 3px solid var(--ai); border-radius: var(--radius);
+           padding: 14px 16px; min-width: 0; }
+.ai-head { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.ai-tag { display: inline-flex; align-items: center; gap: 4px; height: 19px; padding: 0 7px;
+          border-radius: 6px; background: var(--ai); color: #ffffff;
+          font-size: 10.5px; font-weight: 700; letter-spacing: 1px; }
+.ai-title { font-size: 12.5px; font-weight: 600; color: var(--ai); letter-spacing: .3px; }
+.ai-text { margin: 9px 0 0; font-size: 13px; line-height: 1.65; }
+.ai-chips { display: flex; gap: 7px; margin-top: 10px; flex-wrap: wrap; }
+.ai-actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
 
 /* ===== W11-4 · Runbook 挂载台账（只记不执行；docs/前端契约-runbook.md） ===== */
 .rb-off { opacity: .55; }                                   /* 503（store 未接线）变灰，同 RCA/session 降级口径 */
@@ -241,14 +241,18 @@ label.toggle { display: inline-flex; gap: 6px; align-items: center; font-size: 1
 .chat-row.user { align-self: flex-end; text-align: right; }
 .chat-row.assistant { align-self: flex-start; }
 .chat-meta { font-size: 10.5px; color: var(--text-3); margin-bottom: 3px; }
-.chat-bubble { font-size: 12.5px; line-height: 1.65; padding: 8px 11px; border-radius: 10px; text-align: left;
+/* 气泡尾角 + 语义描边（原型 chat-bubble 口径 styles.css:532-540：assistant 左上尾角
+   + --ai 描边；user 右上尾角 + brand 底；pending 虚线为 W11-5 问答降级语义保留） */
+.chat-bubble { font-size: 12.5px; line-height: 1.65; padding: 8px 11px; border-radius: 12px; text-align: left;
                white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid var(--line-soft); background: var(--panel-2); }
-.chat-row.user .chat-bubble { background: color-mix(in srgb, var(--brand) 14%, transparent);
-                              border-color: color-mix(in srgb, var(--brand) 35%, transparent); }
+.chat-row.assistant .chat-bubble { border-top-left-radius: 3px; border-color: color-mix(in srgb, var(--ai) 35%, transparent); }
+.chat-row.user .chat-bubble { border-top-right-radius: 3px; background: color-mix(in srgb, var(--brand) 20%, var(--panel));
+                               border-color: color-mix(in srgb, var(--brand) 35%, transparent); }
 .chat-bubble.pending { border-style: dashed; color: var(--text-2); }
 
 /* ===== W11-3 · 拓扑自绘画布（SVG 边 + foreignObject HTML 节点卡） ===== */
-.topo-wrap { position: relative; padding: 6px var(--pad) 12px; overflow: hidden; }
+/* 画布底板对齐原型 .topo-wrap（styles.css:407）：panel-2 底 + 8px 圆角 */
+.topo-wrap { position: relative; background: var(--panel-2); border-radius: 8px; padding: 6px var(--pad) 12px; overflow: hidden; }
 .topo-svg { width: 100%; height: auto; display: block; }
 .topo-edge { stroke: var(--line); stroke-width: 1; }
 .topo-edge.hot { stroke: var(--brand); stroke-width: 2; }
@@ -267,9 +271,21 @@ label.toggle { display: inline-flex; gap: 6px; align-items: center; font-size: 1
           border-radius: 5px; padding: 0 4px; }
 .topo-h.bad { color: var(--crit); border-color: color-mix(in srgb, var(--crit) 40%, transparent);
               background: color-mix(in srgb, var(--crit) 8%, transparent); }
-.topo-tip { position: absolute; pointer-events: none; z-index: 5; max-width: 320px; background: var(--raised);
-            border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); padding: 8px 11px;
+/* tip min-width 190 + radius 10 对齐原型 .topo-tip（styles.css:414-418）；
+   .tt-t 标题行移植原型 styles.css:419 */
+.topo-tip { position: absolute; pointer-events: none; z-index: 5; min-width: 190px; max-width: 320px;
+            background: var(--raised); border: 1px solid var(--line); border-radius: 10px;
+            box-shadow: var(--shadow); padding: 10px 12px;
             font-size: 11.5px; line-height: 1.6; }
+.topo-tip .tt-t { font-weight: 600; font-size: 12px; margin-bottom: 6px; display: flex; align-items: center; gap: 7px; }
+/* 图例 + 根因徽标（补缺：原型 styles.css:420-428 移植） */
+.topo-legend { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; font-size: 11.5px; color: var(--text-2); }
+.lg-i { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.lg-line { width: 22px; height: 0; border-top: 2px solid var(--text-3); }
+.lg-line.dash { border-top-style: dashed; }
+.lg-line.dot { border-top-style: dotted; }
+.badge-root { display: inline-flex; align-items: center; height: 16px; padding: 0 5px; border-radius: 4px;
+              background: var(--rootc); color: #ffffff; font-size: 9.5px; font-weight: 700; letter-spacing: 1px; }
 
 /* 响应式（对齐原型 README P1 主题） */
 @media (max-width: 960px) {
@@ -358,7 +374,7 @@ label.toggle { display: inline-flex; gap: 6px; align-items: center; font-size: 1
 .meter { width: 92px; height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; }
 .meter i { display: block; height: 100%; border-radius: 3px; }
 
-/* RCA 六步流水线（原型 pipeline；替换现 rca-step chips，下一轮视图迁移用） */
+/* RCA 六步流水线（原型 pipeline；第二轮已由 RcaPanel .rca-step chips 迁入此 markup） */
 .pipeline { display: flex; align-items: stretch; gap: 0; overflow-x: auto; padding: 4px 0 2px; }
 .pipe-step { display: flex; align-items: center; gap: 0; flex: 1; min-width: 0; }
 .pipe-node { display: flex; flex-direction: column; align-items: center; gap: 6px; flex: none; padding: 0 6px; }
@@ -367,6 +383,8 @@ label.toggle { display: inline-flex; gap: 6px; align-items: center; font-size: 1
 .pipe-step.done .pipe-ic { border-color: var(--ok); color: var(--ok); background: color-mix(in srgb, var(--ok) 10%, transparent); }
 .pipe-step.run .pipe-ic { border-color: var(--brand); color: var(--brand); animation: pipe-spin 1.2s linear infinite; }
 .pipe-step.fail .pipe-ic { border-color: var(--crit); color: var(--crit); }
+/* 补缺：pending 步 warn 描边（原型 styles.css:316-321 只有 done/run，本轮视图迁移新增口径） */
+.pipe-step.pending .pipe-ic { border-color: var(--warn); color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, transparent); }
 @keyframes pipe-spin { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--brand) 45%, transparent); } 100% { box-shadow: 0 0 0 9px transparent; } }
 .pipe-name { font-size: 12px; font-weight: 600; white-space: nowrap; }
 .pipe-dur { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-3); white-space: nowrap; }
@@ -411,6 +429,30 @@ label.toggle { display: inline-flex; gap: 6px; align-items: center; font-size: 1
 .flex-1 { flex: 1 1 0%; min-width: 0; }
 .flex-none { flex: 0 0 auto; }
 .cursor-pointer { cursor: pointer; }
+/* 第二轮换皮补缺：视图内联样式收敛点（原型无同名条目的注明本轮新增） */
+.p-12 { padding: 12px; }                 /* 移植原型 styles.css:579 */
+.text-center { text-align: center; }     /* 本轮新增（原型该场景为内联） */
+.mb-6 { margin-bottom: 6px; }            /* 本轮新增 */
+.my-4 { margin: 4px 0; }                  /* 本轮新增 */
+.mt-10 { margin-top: 10px; }             /* 本轮新增 */
+.push-right { margin-left: auto; }       /* 本轮新增（原型 .panel-x 同口径的独立工具版） */
+.fw-600 { font-weight: 600; }            /* 本轮新增 */
+.d-contents { display: contents; }       /* 本轮新增（kv 网格行包装） */
+.pre-wrap { white-space: pre-wrap; }      /* 本轮新增（LLM 结论多行文本） */
+.sub-t { font-weight: 600; margin-bottom: 6px; }           /* 本轮新增（详情小标题） */
+.b-top { border-top: 1px solid var(--line-soft); }          /* 本轮新增（分区块顶分隔） */
+.form-narrow { max-width: 580px; }                          /* 本轮新增（表单宽度上限） */
+.form-row-3 { display: grid; grid-template-columns: 96px 1fr auto; gap: 6px 10px;
+              align-items: center; max-width: 580px; }      /* 本轮新增（选择器行三段式） */
+.kv-grid { display: grid; grid-template-columns: 84px 1fr; gap: 4px 10px; } /* 本轮新增（详情字段表） */
+.kv-v { font-family: var(--font-mono); font-size: 11.5px; overflow-wrap: anywhere; } /* 本轮新增（字段值） */
+.ol-steps { margin: 0; padding-left: 18px; }               /* 本轮新增（建议措施列表） */
+.banner-slot { margin: 12px var(--pad); }                  /* 本轮新增（面板内横幅槽位） */
+.banner.rootc { background: color-mix(in srgb, var(--rootc) 8%, transparent);
+                color: var(--text-2); border: 1px solid color-mix(in srgb, var(--rootc) 30%, transparent);
+                align-items: center; }                       /* 本轮新增（根因横幅用 --rootc 令牌） */
+.t-brand { color: var(--brand); } .t-ok { color: var(--ok); } .t-warn { color: var(--warn); }
+.t-crit { color: var(--crit); } .t-idle { color: var(--text-3); } /* 本轮新增（文字语义色，收敛 KPI/表格内联着色） */
 
 /* <1200px：侧栏收 64px 图标轨（原型 P1-02 断点） */
 @media (max-width: 1199px) {
