@@ -1,5 +1,5 @@
 {
-  "base": "http://[::1]:5173",
+  "base": "http://localhost:5174",
   "day": "20260913",
   "results": [
     {

@@ -98,3 +98,127 @@ jobs:
       - name: go-plugin Linux smoke
         working-directory: tools/smoke/goplugin
         run: go run ./host
+
+  web-walkthrough:
+    # W12 顺手项收口：双分辨率走查进 CI（收口纪要遗留表"走查工具进 CI"行）。
+    # 与 build-and-check 并行：service 网络各 job 独立，这里另建专用库
+    # opscopilot_ci（不与 test job 的 opscopilot_test 混淆），双 Redis 按
+    # ADR-004 角色各自容器化（对齐 docker-compose 的 redis:7-alpine +
+    # AOF/noeviction 与 LRU 口径，端口 6380/6381 同本机）。走查打的是
+    # **构建产物**（vite preview + preview.proxy 代理 /api），比 dev server
+    # 更接近生产形态。walkthrough.mjs 现在 overflowOrError>0 时以退出码 1
+    # 红掉本 job（此前只打印不置码）。
+    # ⚠ 首跑观察点（本机无法跑 workflow 验证）：
+    #   1) chrome 可用性——ubuntu-latest 预装 Google Chrome（/usr/bin/google-chrome，
+    #      由 resolveBrowser 兜底命中）。若 runner 镜像变更导致缺失，报错信息会列出
+    #      尝试路径，可设 WALKTHROUGH_BROWSER 或加 browser-setup 一步补救；
+    #   2) preview 就绪时序——healthz 轮询后另起 preview 并轮询 5173 首页 200，
+    #      若冷启动慢再加大重试窗口；
+    #   3) web/.npmrc 指向 npmmirror（lockfile resolved 同源），海外 runner 拉取
+    #      通常可用，若明显变慢/超时再评估 CI 侧 registry 覆盖；
+    #   4) artifact 用 docs/reviews/web-walkthrough-* 通配，会连带仓库里已归档的
+    #      历史走查目录（小体积 PNG，14 天保留可接受）。
+    runs-on: ubuntu-latest
+    services:
+      timescaledb:
+        image: timescale/timescaledb:2.29.2-pg17
+        env:
+          POSTGRES_DB: opscopilot
+          POSTGRES_USER: opscopilot
+          POSTGRES_PASSWORD: opscopilot
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U opscopilot -d opscopilot"
+          --health-interval 5s
+          --health-retries 10
+      redis-alert:
+        # 与 docker-compose 同款角色参数（告警实例 AOF everysec + noeviction）
+        image: redis:7-alpine
+        command: >
+          redis-server --appendonly yes --appendfsync everysec
+          --maxmemory-policy noeviction
+        ports:
+          - 6380:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-retries 10
+      redis-cache:
+        # 缓存实例：LRU 可逐出
+        image: redis:7-alpine
+        command: >
+          redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+        ports:
+          - 6381:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"  # 与本机验证口径（v22.23.2 便携版）对齐；vite 5 支持 ≥18
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: 前端构建（tsc --noEmit + vite build → dist/）
+        working-directory: web
+        run: npm ci && npm run build
+      - name: 后端二进制构建
+        run: go build -o opscopilot ./cmd/opscopilot
+      - name: 初始化走查库（专用 opscopilot_ci，migrations 从零应用）
+        # 与 reset_test_pg.sh 同一建库通道（scripts/migrate），库名分开、
+        # service 网络各 job 独立，首跑观察点之一：timescale 扩展在新建库
+        # 上直接可用（000001 的 CREATE EXTENSION IF NOT EXISTS 口径）。
+        env:
+          WALK_DB_DSN: postgres://opscopilot:opscopilot@localhost:5432/opscopilot_ci?sslmode=disable
+        run: go run ./scripts/migrate -dsn "$WALK_DB_DSN" -path migrations -create-db
+      - name: 起后端（127.0.0.1:8080，token=dev 对齐走查预置）
+        env:
+          REDIS_ALERT_ADDR: 127.0.0.1:6380
+          REDIS_CACHE_ADDR: 127.0.0.1:6381
+          OPS_DB_DSN: postgres://opscopilot:opscopilot@localhost:5432/opscopilot_ci?sslmode=disable
+          OPS_WEBHOOK_TOKEN: dev
+          OPS_LISTEN_ADDR: 127.0.0.1:8080
+        run: |
+          nohup ./opscopilot > /tmp/ops-app.log 2>&1 &
+          ok=""
+          for _ in $(seq 1 30); do
+            sleep 1
+            code=$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' http://127.0.0.1:8080/healthz || true)
+            [ "$code" = "200" ] && ok=1 && break
+          done
+          if [ -z "$ok" ]; then echo "后端未就绪，/tmp/ops-app.log："; cat /tmp/ops-app.log; exit 1; fi
+      - name: 起 vite preview（构建产物 + preview.proxy 转发 /api → 8080）
+        working-directory: web
+        run: |
+          VITE_API_PROXY=http://127.0.0.1:8080 nohup npx vite preview --port 5173 --strictPort > /tmp/vite-preview.log 2>&1 &
+          ok=""
+          for _ in $(seq 1 15); do
+            sleep 1
+            code=$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' http://127.0.0.1:5173/ || true)
+            [ "$code" = "200" ] && ok=1 && break
+          done
+          if [ -z "$ok" ]; then echo "preview 未就绪，/tmp/vite-preview.log："; cat /tmp/vite-preview.log; exit 1; fi
+      - name: 双分辨率走查（5 视口 × 6 路由，非 0 退出码即红）
+        working-directory: web
+        run: node scripts/walkthrough.mjs http://localhost:5173
+      - name: 收集后端/preview 日志进走查产物目录
+        if: always()
+        run: |
+          dir="docs/reviews/web-walkthrough-$(date -u +%Y%m%d)"
+          mkdir -p "$dir"
+          cp /tmp/ops-app.log "$dir/app.log" 2>/dev/null || true
+          cp /tmp/vite-preview.log "$dir/preview.log" 2>/dev/null || true
+          ls -la "$dir"
+      - name: 上传走查产物（PNG + report.json + 日志）
+        if: always()  # 绿跑也留截图证据；失败时日志就在同一 artifact 里
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-walkthrough
+          path: docs/reviews/web-walkthrough-*
+          retention-days: 14

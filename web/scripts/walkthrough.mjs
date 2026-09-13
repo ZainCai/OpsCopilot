@@ -1,12 +1,35 @@
-// 双分辨率走查工具（W12 工具链评估落地）：puppeteer-core + 系统 Edge，
+// 双分辨率走查工具（W12 工具链评估落地）：puppeteer-core + 系统浏览器
+// （Windows Edge / Linux chrome-chromium，解析顺序见 resolveBrowser），
 // 无需下载浏览器。用法：node scripts/walkthrough.mjs [baseUrl]
 // 产出：docs/reviews/web-walkthrough-<yyyymmdd>/ 下截图 PNG + report.json
 // （每视口×路由的侧栏宽度、横向溢出、控制台错误读数）。
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import puppeteer from "puppeteer-core";
 
 const BASE = process.argv[2] || "http://[::1]:5173";
-const EDGE = "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
+// 浏览器可执行文件解析（走查进 CI 后必须跨平台，本机 Windows / CI ubuntu）：
+//   WALKTHROUGH_BROWSER 显式覆盖 > Windows Edge 现路径 > Linux 常见
+//   chrome/chromium（CHROME_PATH env 或 /usr/bin 系统路径）。
+//   ubuntu-latest runner 预装 Google Chrome（/usr/bin/google-chrome），
+//   与本机"零浏览器下载"口径一致（puppeteer-core 不自带浏览器）。
+function resolveBrowser() {
+  const candidates = [
+    process.env.WALKTHROUGH_BROWSER,
+    "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+    process.env.CHROME_PATH,
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium",
+  ].filter(Boolean);
+  const hit = candidates.find((p) => existsSync(p));
+  if (!hit) {
+    console.error(
+      "walkthrough: 未找到可用浏览器，依次尝试过：\n  " + candidates.join("\n  ") +
+      "\n请安装 Edge/Chrome/Chromium，或设 WALKTHROUGH_BROWSER=<可执行文件绝对路径>。",
+    );
+    process.exit(2);
+  }
+  return hit;
+}
 const DAY = new Date().toISOString().slice(0, 10).replaceAll("-", "");
 const OUT = `../docs/reviews/web-walkthrough-${DAY}`;
 mkdirSync(OUT, { recursive: true });
@@ -21,7 +44,7 @@ const VIEWPORTS = [
 const ROUTES = ["overview", "alerts", "incidents", "topology", "settings", "audit"];
 
 const browser = await puppeteer.launch({
-  executablePath: EDGE, headless: "new",
+  executablePath: resolveBrowser(), headless: "new",
   args: ["--no-sandbox", "--disable-gpu", "--window-size=1920,1080"],
 });
 const report = { base: BASE, day: DAY, results: [] };
@@ -85,3 +108,6 @@ writeFileSync(`${OUT}/report.json`, JSON.stringify(report, null, 2));
 const bad = report.results.filter((r) => r.hScroll > 2 || r.errors.length > 0);
 console.log(`pages=${report.results.length} overflowOrError=${bad.length}`);
 for (const b of bad) console.log("  !", b.viewport, b.route, `hScroll=${b.hScroll}`, b.errors.slice(0, 2).join(" | "));
+// CI 门禁（web-walkthrough job）：有溢出/错误必须以非 0 退出码红掉，
+// 此前只打印不置码——job 会把失败当成功。
+if (bad.length > 0) process.exitCode = 1;

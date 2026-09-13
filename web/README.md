@@ -88,17 +88,27 @@ src/
 
 端点契约与冻结声明详见 [`docs/前端分离说明-冻结console.md`](../docs/前端分离说明-冻结console.md)。
 
-## 双分辨率走查（自动化，已落地）
+## 双分辨率走查（自动化，已落地 + 已进 CI）
 
 > 排期 W11-3 验收项「双分辨率截图」已由 `scripts/walkthrough.mjs` 自动化：
-> puppeteer-core + **系统 Edge**（零浏览器下载），5 视口（1920/1366/1180 图标轨/900/390）
-> × 6 路由逐页截图 + 侧栏宽度/横向溢出/HTTP 错误断言，`/rca(/session)` 的 503 视为
-> 设计内降级不计错。产物落 `docs/reviews/web-walkthrough-<yyyymmdd>/`（PNG + report.json）。
+> puppeteer-core + **系统浏览器**（解析顺序：`WALKTHROUGH_BROWSER` > Windows Edge
+> 现路径 > `CHROME_PATH` / `/usr/bin/google-chrome` / `/usr/bin/chromium`，全落空
+> 则报错退出码 2），5 视口（1920/1366/1180 图标轨/900/390）× 6 路由逐页截图 +
+> 侧栏宽度/横向溢出/HTTP 错误断言，`/rca(/session)` 的 503 视为设计内降级不计错。
+> 产物落 `docs/reviews/web-walkthrough-<yyyymmdd>/`（PNG + report.json）。
+> **CI 已纳入**（W12 顺手项收口）：`.github/workflows/ci.yml` 的 `web-walkthrough`
+> job——ubuntu-latest + timescaledb/双 Redis service 起真后端，`vite preview` 服务
+> **构建产物**（`preview.proxy` 与 dev 代理同源配置）跑走查；`overflowOrError>0`
+> 以退出码 1 红掉 job；PNG/report.json/后端日志经 `upload-artifact@v4` 归档 14 天。
+>
+> 本地等价命令（与 CI 同形态：build 产物 + preview，不打 dev server）：
 
 ```bash
-# 前置：后端在 8090（灰度实例）或自起；dev 代理指过去
-VITE_API_PROXY=http://127.0.0.1:8090 npx vite --port 5173 --strictPort &
-npm i -D puppeteer-core && node scripts/walkthrough.mjs
+# 前置：后端在 8090（灰度实例）或自起；preview 代理指过去
+cd web && npm run build
+VITE_API_PROXY=http://127.0.0.1:8090 npx vite preview --port 5173 --strictPort &
+node scripts/walkthrough.mjs http://localhost:5173   # 期望 pages=30 overflowOrError=0
+# 浏览器不在默认路径时：WALKTHROUGH_BROWSER=<可执行文件> 覆盖
 ```
 
 人工走查（RCA 区块 / 拓扑画布 / AI 抽屉 / Runbook 区块的交互深度项）仍按下述步骤补：
