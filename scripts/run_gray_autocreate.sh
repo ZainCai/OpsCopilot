@@ -113,14 +113,22 @@ seed_push() {
   # 幂等靠 (tenant,origin,source_ref) 待处理态唯一索引——同指纹重推不堆积；
   # 指纹带启动时戳：死信行（processed_at IS NULL 且 attempts>=5）同指纹会永久占位，
   # 换时戳保证重启后种子注入必入队。
-  local now stamp
+  # **payload 必须走文件**：Git Bash 向原生 curl.exe 传参时按系统 ANSI 码页（GBK）
+  # 转换命令行，中文 summary 到服务端已成非法 UTF-8、被 JSON 解码替换成 U+FFFD
+  # （2026-09-13 灰度首跑实证）。临时文件由 bash 直写，UTF-8 字节全程不变。
+  local now stamp payload
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   stamp="$(date +%s)"
+  payload="$(mktemp)"
+  cat > "$payload" <<EOF
+{"status":"firing","alerts":[
+  {"labels":{"alertname":"GraySeedHighCPU","instance":"n1","job":"nodes","severity":"critical"},"annotations":{"summary":"灰度种子告警（链路A push 通路自检）"},"startsAt":"$now","fingerprint":"grayseed-$stamp-01"},
+  {"labels":{"alertname":"GraySeedDiskFull","instance":"n2","job":"nodes","severity":"warning"},"annotations":{"summary":"灰度种子告警 2"},"startsAt":"$now","fingerprint":"grayseed-$stamp-02"}]}
+EOF
   curl -s --noproxy '*' -X POST "$OPS_URL/api/v1/ingest/alertmanager" \
     -H "Content-Type: application/json" -H "X-OpsCopilot-Token: $GRAY_TOKEN" \
-    -d "{\"status\":\"firing\",\"alerts\":[
-      {\"labels\":{\"alertname\":\"GraySeedHighCPU\",\"instance\":\"n1\",\"job\":\"nodes\",\"severity\":\"critical\"},\"annotations\":{\"summary\":\"灰度种子告警（链路A push 通路自检）\"},\"startsAt\":\"$now\",\"fingerprint\":\"grayseed-$stamp-01\"},
-      {\"labels\":{\"alertname\":\"GraySeedDiskFull\",\"instance\":\"n2\",\"job\":\"nodes\",\"severity\":\"warning\"},\"annotations\":{\"summary\":\"灰度种子告警 2\"},\"startsAt\":\"$now\",\"fingerprint\":\"grayseed-$stamp-02\"}]}" || true
+    --data-binary "@$payload" || true
+  rm -f "$payload"
   echo ""
 }
 
