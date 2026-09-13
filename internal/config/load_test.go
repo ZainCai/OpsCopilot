@@ -178,6 +178,49 @@ func TestValidateAutoAttachRequiresEnforce(t *testing.T) {
 	}
 }
 
+// TestValidateAutoCreateAutoAttachMatrix W10-4（ADR-016）配置矩阵：
+// OPS_INCIDENT_AUTOCREATE × OPS_AUTOATTACH × OPS_NOISE_MODE 的联动合法性——
+// AUTOCREATE 自身无 Validate 约束（worker 消费开关，任何组合都不构成"配置矛盾"）；
+// AUTOATTACH 的 enforce 前置（fail-fast）不因 AUTOCREATE 开启而放松。
+// 行为侧的"两路同开收敛一单"联动断言见 cmd 层
+// TestAutoCreateAutoAttachConvergeSingleIncident（autocreate_matrix_test.go）。
+func TestValidateAutoCreateAutoAttachMatrix(t *testing.T) {
+	cases := []struct {
+		name                     string
+		autoCreate, attach, mode string
+		wantErr                  string // "" = 合法装载；否则错误须含该子串
+	}{
+		{"转正组合 AUTOCREATE+AUTOATTACH+enforce 合法", "on", "on", "enforce", ""},
+		{"AUTOCREATE=on 不放松 AUTOATTACH+shadow 矛盾", "on", "on", "shadow", EnvAutoAttach},
+		{"AUTOCREATE=on 单独（AUTOATTACH off、shadow）合法", "on", "off", "shadow", ""},
+		{"AUTOATTACH=on+enforce 与 AUTOCREATE=off 组合合法", "off", "on", "enforce", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := redisEnv("127.0.0.1:6380", "127.0.0.1:6381")
+			env[EnvIngestAutoCreate] = tc.autoCreate
+			env[EnvAutoAttach] = tc.attach
+			env[EnvNoiseMode] = tc.mode
+			c, err := LoadFrom(envMap(env))
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("want error mentioning %s, got %v", tc.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if c.Ingest.AutoCreate != (tc.autoCreate == "on") {
+				t.Fatalf("Ingest.AutoCreate = %v, want %s", c.Ingest.AutoCreate, tc.autoCreate)
+			}
+			if c.Noise.AutoAttach != (tc.attach == "on") {
+				t.Fatalf("Noise.AutoAttach = %v, want %s", c.Noise.AutoAttach, tc.attach)
+			}
+		})
+	}
+}
+
 func TestLoadFromDefaults(t *testing.T) {
 	got, err := LoadFrom(envMap(redisEnv("127.0.0.1:6380", "127.0.0.1:6381")))
 	if err != nil {
