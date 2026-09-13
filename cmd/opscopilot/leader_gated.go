@@ -30,11 +30,21 @@ func runLeaderGated(ctx context.Context, gate leaderGate, starts ...func(context
 		if ctx.Err() != nil {
 			return
 		}
+		// Notify 标准姿势（契约见 leader.go:142-148"先取通道、select 等待、
+		// 醒来重读 IsLeader"）：**先捕获通道，再判 IsLeader**。两步各自加锁，
+		// 顺序不可颠倒——若反过来"先判 IsLeader==true 再取通道"，一次
+		// setLeader(false) 的 close-换新通道（leader.go:352-357）恰落在两者之间，
+		// 取到的就是那张**不会再被 close 的新通道**，本次 demote 广播被漏掉，
+		// 监督器挂等新翻转、gated 循环在非 leader 态继续跑（ADR-012 单 owner
+		// 违例的双写窗口）。先捕获、后校验：捕获之后发生的任何翻转都会 close
+		// 这张已在手的通道，select 必收。
+		notify := gate.Notify()
 		if !gate.IsLeader() {
+			// 非 leader（fail-closed）：挂起等翻转或整体停机，醒来看当前态。
 			select {
 			case <-ctx.Done():
 				return
-			case <-gate.Notify():
+			case <-notify:
 			}
 			continue // 醒来看当前态：成为 leader 才进入下一段，否则继续等
 		}
@@ -48,17 +58,22 @@ func runLeaderGated(ctx context.Context, gate leaderGate, starts ...func(context
 				start(lctx)
 			}()
 		}
-		// 等"失去 leader"或整体停机。Notify 是 stale-able 广播：醒来重读
-		// IsLeader，杜绝把同向事件数错。
-		for gate.IsLeader() {
+		// 等"失去 leader"或整体停机。进入本分支的 notify 已在捕获 IsLeader
+		// 之前取好，漏不到这次 demote；每次被一次翻转唤醒后**重新捕获**
+		// notify 再判状态（维持"捕获→判→等"顺序），既杜绝漏唤醒也不把同向
+		// 事件数错（stale-able 广播：醒来看当前态）。
+		for {
+			if !gate.IsLeader() {
+				break // 失去 leader：出等待，走 cancel + wg.Wait 停全部循环
+			}
 			select {
-			case <-ctx.Done():
-				break
-			case <-gate.Notify():
+			case <-ctx.Done(): // 整体停机，交由下方 ctx.Err() 判定退出
+			case <-notify: // 一次翻转，重读状态并重新捕获通道
 			}
 			if ctx.Err() != nil {
 				break
 			}
+			notify = gate.Notify()
 		}
 		cancel()
 		wg.Wait()

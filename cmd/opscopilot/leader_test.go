@@ -167,6 +167,37 @@ func waitReleased(t *testing.T, c *countingLoop) {
 	}
 }
 
+// TestRunLeaderGatedCaptureThenDemoteNoWakeupLoss P1-1 唤醒竞态回归钉：
+// runLeaderGated 的修复建立在 Notify 契约之上——"先捕获、再判状态"，捕获
+// 之后发生的任何翻转都会 close 那张已在手的旧通道。本用例直接断言该通道
+// 语义（fakeGate.set 与真实 setLeader 同为 close-换新通道），不强造微秒时序：
+//  1. 捕获通道 → 随后 demote ⇒ 捕获到的旧通道必须已 close（不漏唤醒）；
+//  2. demote 后重新捕获 ⇒ 新通道在无下一次翻转时不得被 close（不虚醒）。
+//
+// 若破坏其一，"捕获→判→等"顺序就失去意义，leader 分支会在永不 close 的通道
+// 上挂死、漏掉 demote（gated 循环在非 leader 态继续跑）。
+func TestRunLeaderGatedCaptureThenDemoteNoWakeupLoss(t *testing.T) {
+	gate := newFakeGate(true)
+	notify := gate.Notify() // 模拟监督器：判 IsLeader 之前先捕获通道
+	gate.set(false)         // 恰好落在捕获之后的 demote
+	select {
+	case <-notify:
+		// 不漏唤醒：捕获到的旧通道已被 close
+	default:
+		t.Fatal("captured notify channel not closed after demote — supervisor would miss the wake (P1-1 regression)")
+	}
+	if gate.IsLeader() {
+		t.Fatal("gate still reports leader after demote")
+	}
+	// 重新捕获的通道在下一次翻转前不得被 close。
+	fresh := gate.Notify()
+	select {
+	case <-fresh:
+		t.Fatal("freshly captured notify channel spuriously closed without a state flip")
+	default:
+	}
+}
+
 // ---------- LeaderElector 降级路径（无 DB / off） ----------
 
 // TestLeaderDegradedAlwaysLeader 无 pool（或 election off）→ 构造即恒 leader，
