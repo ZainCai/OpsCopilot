@@ -152,6 +152,25 @@ export interface AuditResponse {
   count: number;
 }
 
+// ---------- 全局审计（GET /api/v1/audit，W12 审计解锁包） ----------
+/** 列表行是后端视图（auditEntryView）：detail 全文只从单事件端点取，
+ *  summary 由后端按 action 的既定 detail 键提取（缺键回退 detail 首 120 字符）。 */
+export interface AuditGlobalEntry {
+  incident_id: string;
+  action: string; // 封闭集合：create|transition|attach_cluster|merge|external_recovery_ignored|rate_limited|ingest_failed|rca
+  actor: string;
+  occurred_at: string;
+  summary: string;
+}
+export interface AuditListResponse {
+  entries: AuditGlobalEntry[];
+  count: number;
+  next_cursor: string; // 空 = 已到末尾（keyset：(occurred_at, id) 倒序游标）
+  persistence: string; // memory（无 DSN 镜像，易失）| timescaledb
+  /** 仅内存镜像时出现：如实声明"重启即丢/护栏丢最旧"（R6-4 口径）。 */
+  partial_hint?: string;
+}
+
 // ---------- 事件混合时间线（GET /api/v1/incidents/{id}/timeline，W10-1/F-03） ----------
 /** kind 封闭集合（rest_timeline.go TimelineKind*，同刻稳定序 change<action<alert）。 */
 export type TimelineKind = "alert_in" | "alert_out" | "change" | "action";

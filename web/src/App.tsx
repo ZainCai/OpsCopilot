@@ -22,7 +22,7 @@ export function App(): React.ReactElement {
   const view = (() => {
     switch (route.path) {
       case "overview": return <OverviewView onConn={onConn} />;
-      case "incidents": return <IncidentsView onConn={onConn} />;
+      case "incidents": return <IncidentsView onConn={onConn} focusId={route.query.get("id") ?? ""} />;
       case "topology": return <TopologyView />;
       case "settings": return <SettingsView />;
       case "audit": return <AuditView />;

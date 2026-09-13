@@ -44,8 +44,11 @@ const STREAM_STATES: Record<StreamStatus | "off", StreamChip> = {
  * GET /{id}/duplicates、GET /{id}/audit、GET /{id}/timeline（W10-1 混合时间线）、
  * POST /incidents（人工建单）、POST /{id}/transition、POST /{id}/merge、
  * GET /auth/status、SSE /events/stream。
+ *
+ * 深链选中（W12 审计解锁包）：#/incidents?id=<incident_id>（审计页"事件"列）
+ * 经 focusId 进入——详情面板按 id 独立拉取，已解决/被当前过滤挡掉的单也能打开。
  */
-export function IncidentsView({ onConn }: { onConn: (ok: boolean) => void }): React.ReactElement {
+export function IncidentsView({ onConn, focusId = "" }: { onConn: (ok: boolean) => void; focusId?: string }): React.ReactElement {
   const [state, setState] = useState<StateFilter>("active");
   const [origin, setOrigin] = useState("");
   const [rows, setRows] = useState<Incident[]>([]);
@@ -116,6 +119,12 @@ export function IncidentsView({ onConn }: { onConn: (ok: boolean) => void }): Re
       .then((s) => setAuthReady(s.write_authorized))
       .catch(() => setAuthReady(false));
   }, []);
+
+  // 深链选中（#/incidents?id=…，审计页跳转入口）：focusId 非空即打开该单
+  // 详情；置空不反向关闭——用户手动关详情后不该被路由残参拉回。
+  useEffect(() => {
+    if (focusId) setDetailId(focusId);
+  }, [focusId]);
 
   const columns: Column<Incident>[] = [
     {

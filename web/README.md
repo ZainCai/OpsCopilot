@@ -79,7 +79,7 @@ src/
 | `#/incidents` 事件 | view-events / 原型 pages/incidents.jsx+incident.jsx | ✅ 已迁移（列表/游标/详情/建单/流转/合并/SSE+轮询降级） |
 | `#/topology` 拓扑 | view-overview 的拓扑图面板 / 原型 pages/topology.jsx | ✅ 已实装（W11-3：自绘 SVG/HTML 分层环形画布、hover tip/邻接边高亮、根因链路红环+一跳虚线、节点 24h 变更、>300 分桶聚合） |
 | `#/settings` 设置·通知渠道 | view-settings / 原型 pages/settings.jsx | ⬜ 占位（端点已备：GET/POST /notify/channels、enabled、DELETE） |
-| `#/audit` 全局审计 | （内嵌页无；原型无） | ⏸ 阻塞（待后端全局审计列表端点，ADR-005；单事件审计已在事件详情实装） |
+| `#/audit` 全局审计 | （内嵌页无；原型无） | ✅ 已实装（W12 审计解锁包：GET /api/v1/audit 全局检索——actor/action/时间窗 24h·7d·全部 过滤、动作 chip 徽章、游标"加载更多"、事件 ID 深链 `#/incidents?id=` 选中详情；persistence=memory 如实降级横幅；哈希链独立审计面仍属 M3/ADR-005） |
 | — RCA 根因分析（事件详情区块） | 原型 pages/rca.jsx | ✅ 已实装（W11-2：GET /incidents/{id}/rca 六步状态条、ADR-007 三段置信度根因列表、findings 折叠 + ?all=1 全量、conclusion pending 明示） |
 | — AI 复盘问答（事件详情抽屉） | （原型无；二期 #7 S2 端点） | ✅ 只读版（W11-5：GET/POST /incidents/{id}/rca/session，user/assistant 气泡 + pending 徽标；OPS_SESSION=off 探测后入口隐藏；无任何执行入口） |
 | — 处置手册 Runbook（事件详情区块） | 原型 pages/remediation.jsx 的"手册"子面 | ✅ 记录版（W11-4：契约 docs/前端契约-runbook.md E1–E7；挂载列表 + execution_count 徽标、库选挂载/空库内联建册、记一次执行 + 执行历史展开；只记不执行，无 DSN 时 503 变灰降级） |

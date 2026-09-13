@@ -19,6 +19,10 @@ export const ENDPOINTS = {
   incidentDuplicates: (id: string) =>
     `${V1}/incidents/${encodeURIComponent(id)}/duplicates`, // GET
   incidentAudit: (id: string) => `${V1}/incidents/${encodeURIComponent(id)}/audit`, // GET
+  // W12 审计解锁包：全局审计检索（读路径无 Token，口径同 incidentAudit；
+  // 参数 actor/action（封闭集合，未知 400）/since/until（RFC3339，[since,until) 半开）/
+  // limit（默认 200 上限 1000）/cursor（keyset，坏 400）；rest_audit.go）。
+  audit: `${V1}/audit`, //                 GET
   incidentTimeline: (id: string) =>
     `${V1}/incidents/${encodeURIComponent(id)}/timeline`, // GET（W10-1 混合时间线 ?limit=&cursor=）
   incidentMerge: (id: string) => `${V1}/incidents/${encodeURIComponent(id)}/merge`, // POST
