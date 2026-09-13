@@ -131,3 +131,29 @@ OPS_INGEST_INTERVAL=1s          # 默认 5s → 1s
   补的是"AUTOCREATE 与它组合时的行为"，不改约束本身。
 - **排期**：W10-4 行"ADR-012"笔误 → ADR-016（文首勘误），行标 ✅（决策留痕完成，
   灰度按本 ADR 执行）。
+
+
+## 灰度执行记录
+
+- **段一启动**：2026-09-13 20:22（本地时区）· 环境=开发机 demo（TimescaleDB+双 Redis
+  compose 栈，5432/6380/6381 探活通过；本机无 docker CLI，栈由别处管理）· 独立灰度租户
+  `gray01` · 参数组=`OPS_INCIDENT_AUTOCREATE=on + OPS_INGEST_BATCH=500 +
+  OPS_INGEST_INTERVAL=1s + OPS_NOISE_MODE=enforce + OPS_AUTOATTACH=on`（其余键走 .env
+  现状；另按 `scripts/run_demo.sh` 同款接法带 `OPS_PROM_URL`=假 Prometheus 注入器与
+  `OPS_PULL_ALERTS=on`）。启停：`bash scripts/run_gray_autocreate.sh start|stop|status`；
+  读数：`bash scripts/gray_autocreate_status.sh`（一次性、人跑，不自启）。
+- **首份读数摘要（2026-09-13 20:25，全链真实跑通）**：`autoattach_total
+  attached=1/conflict=0/skipped=0`（硬验收 attached≥1 达成）· `opscopilot_is_leader=1`
+  · sink 队列水位=0、drops=0 · `ingest_queue(gray01)` pending=0 / 近 24h 入队=12 /
+  消费=12 / 死信=0（含 push 种子 2 + 场景 pull，source_ref=promFingerprint 建单与
+  autoattach 直写收敛同单）· 灰度租户 incident 总=4、attach_cluster 审计=1 ·
+  `GET /api/v1/incidents` 200 count=4 · 未触发限流折叠（rate_limited=0、burst 聚合单=0）。
+- **环境注记**：开发库 schema 停在 v17 而 HEAD 代码要 v20（`acked_at` 缺列曾致链路 A
+  消费全数死信）——已用仓库自带 `scripts/migrate`（幂等重放）对齐至 v20 并登记台账，
+  灰度租户坏窗口期残骸已一次性清洗后再启动；`opscopilot upgrade` 在"golang-migrate CLI
+  建的 PK+dirty 混合形状"上登记语句待修（本次以 migrate 重放绕过，未改 Go 代码）。
+- **段二·一周观察窗到期评估（待填，到期日 2026-09-20）**：留此一行——届时按本 ADR
+  段二判据核对 ≥7 天读数：误建单争议=0、`conflict` 计数不增长、`ingest_queue
+  Pending` 无持续增长、burst 折叠段排空时长可接受，并附 `gray_autocreate_status.sh`
+  首末两次读数（判断标准：pending 峰值 ≪ 批量×排空速率且趋势平/降；
+  attached/(attached+skipped) 无恶化；drops 恒 0——非 0 即查 sink 预算）。

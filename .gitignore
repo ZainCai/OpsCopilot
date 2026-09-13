@@ -19,6 +19,8 @@ credentials.yaml
 Thumbs.db
 # 审核补充（R6）：构建产物与运行时输出
 .demo/
+# ADR-016 灰度段一运行时产物（exe/日志/pidfile/读数助手，见 scripts/run_gray_autocreate.sh）
+.gray/
 # RCA 评测集（二期池 #8）运行时产物：exe/日志/JSONL（report.md 在 docs/reviews 跟踪）
 .rca-eval/
 *.log
@@ -28,3 +30,5 @@ csmoke.log
 # 独立前端工程（ADR-013）：依赖与构建产物不入库，web/ 源码照常跟踪
 web/node_modules/
 web/dist/
+# upgrade 前置逻辑备份落点（开发库快照，不入库）
+backups/
