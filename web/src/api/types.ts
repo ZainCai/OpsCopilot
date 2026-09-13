@@ -256,6 +256,91 @@ export interface SessionResponse {
   persistence: string;
 }
 
+// ---------- Runbook 记录版（E1–E7，W11-4/F-12；契约 docs/前端契约-runbook.md） ----------
+/** 字段名逐一对齐契约 §2（rest_runbook.go）。总口径：只记录与展示、不自动执行；
+ * 执行记录非审计证据（不进 incident_audit 哈希链，展示面不标"审计级"）。 */
+export interface Runbook {
+  id: string; // 业务键；E2 省略则服务端生成 "RBK-<时间戳>"
+  title: string; // 必填，≤512
+  content?: string; // markdown 正文，≤262144B；系统不解析不执行
+  scope_severity?: string; // "" | critical | warning | info（"" = 不限级别）
+  scope_service?: string; // 服务标签，"" = 不限
+  created_by: string; // 必填（身份钩子）
+  created_at?: string;
+  updated_at?: string;
+}
+/** E1 GET /runbooks（库列表，新→旧）。 */
+export interface RunbooksResponse {
+  runbooks: Runbook[];
+  count: number;
+  persistence?: string;
+}
+/** E2 POST /runbooks 回显。 */
+export interface RunbookCreateResponse {
+  runbook: Runbook;
+  persistence?: string;
+}
+/** E3 列表项 MountView：手册字段 + 挂载元数据 + 执行计数，平铺单层。
+ * 注意键是 runbook_id（契约 §2 明示无 id 键——挂载视图的键，避免与手册主键二义）。 */
+export interface RunbookMountView {
+  runbook_id: string;
+  title: string;
+  content?: string;
+  scope_severity?: string;
+  scope_service?: string;
+  created_by?: string; // 手册作者
+  created_at?: string;
+  updated_at?: string;
+  mounted_by?: string; // 首次挂载人（幂等重挂不刷新）
+  mounted_at?: string;
+  execution_count: number; // 该挂载点已记录执行条数
+}
+export interface IncidentRunbooksResponse {
+  incident_id: string;
+  runbooks: RunbookMountView[];
+  count: number;
+  persistence?: string;
+}
+/** E4 挂载回显（成功与幂等重挂同码同形，可安全重试）。 */
+export interface RunbookMountResponse {
+  incident_id: string;
+  runbook_id: string;
+  mounted: boolean;
+  persistence?: string;
+}
+/** E5 解挂回显（只断挂载关系，执行记录保留）。 */
+export interface RunbookUnmountResponse {
+  incident_id: string;
+  runbook_id: string;
+  unmounted: boolean;
+  persistence?: string;
+}
+/** 执行记录行（append-only；seq/executed_at 服务端发号打点，前端只读不可传）。 */
+export interface RunbookExecution {
+  seq: number; // int64，挂载内严格递增
+  executed_by: string; // 必填（身份钩子）
+  executed_at: string;
+  result: string; // 自由文本，≤8192B
+  refs: unknown[]; // 元素自由（string 或 object）；缺省 []，≤100 元素
+}
+/** E6 GET executions（旧→新）；auto_execution 恒 false（契约 §0 总口径）。 */
+export interface RunbookExecutionsResponse {
+  incident_id: string;
+  runbook_id: string;
+  executions: RunbookExecution[];
+  count: number;
+  auto_execution: boolean;
+  persistence?: string;
+}
+/** E7 POST executions 回显（只记不执行）。 */
+export interface RunbookExecutionAppendResponse {
+  incident_id: string;
+  runbook_id: string;
+  execution: RunbookExecution;
+  auto_execution: boolean;
+  persistence?: string;
+}
+
 // ---------- 鉴权探测（GET /api/v1/auth/status） ----------
 export interface AuthStatus {
   write_authorized: boolean;

@@ -14,6 +14,7 @@ import { PageHead } from "../components/Layout";
 import { Seg, StatCard } from "../components/Stat";
 import { AuditTimeline, MixedTimeline } from "../components/Timeline";
 import { RcaSection } from "../components/RcaPanel";
+import { RunbookSection } from "../components/RunbookPanel";
 import { AiDrawer, probeSession, sessionEntryVisible } from "../components/AiDrawer";
 import { fmtTime, fmtDurationSec, isZeroTime, timeAgoText } from "../lib/format";
 
@@ -361,6 +362,7 @@ function IncidentDetail({ id, onChanged }: { id: string; onChanged: () => void }
       </div>
       <TimelineSection id={id} refresh={tlRefresh} />
       <RcaSection id={id} />
+      <RunbookSection id={id} />
       <div className="sec">
         <div className="sec-h">疑似重复（L2 · 只提示不自动合并）</div>
         {cands.length === 0

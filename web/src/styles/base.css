@@ -214,6 +214,16 @@ label.toggle { display: inline-flex; gap: 6px; align-items: center; font-size: 1
 .conf.low  { color: var(--text-3); }
 .conf-t { font-family: var(--font-mono); font-size: 10.5px; margin-left: 3px; }
 
+/* ===== W11-4 · Runbook 挂载台账（只记不执行；docs/前端契约-runbook.md） ===== */
+.rb-off { opacity: .55; }                                   /* 503（store 未接线）变灰，同 RCA/session 降级口径 */
+.rb-picker { border: 1px dashed var(--line); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; }
+.rb-exec { background: var(--panel); border: 1px solid var(--line-soft); border-radius: 7px;
+           padding: 8px 10px; margin: -2px 0 8px; }
+.rb-content { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono);
+              font-size: 11.5px; color: var(--text-2); background: var(--panel-2);
+              border: 1px solid var(--line-soft); border-radius: 8px; padding: 8px 10px;
+              margin: 6px 0; max-height: 240px; overflow: auto; }
+
 /* ===== W11-5 · AI 复盘抽屉（只读问答，无任何执行入口） ===== */
 .drawer-mask { position: fixed; inset: 0; background: rgba(2, 6, 18, .45); z-index: 60; }
 .drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(440px, 94vw); background: var(--panel);

@@ -32,6 +32,16 @@ export const ENDPOINTS = {
   // POST body {content, actor}（DisallowUnknownFields，字段名以 Go 侧为准）。
   incidentRcaSession: (id: string) => `${V1}/incidents/${encodeURIComponent(id)}/rca/session`, // GET | POST
 
+  // Runbook 记录版（rest_runbook.go E1–E7，契约 docs/前端契约-runbook.md，W11-4/F-12）：
+  // 只记录与展示、不自动执行（执行响应恒带 auto_execution:false）；写路径 Token+JSON；
+  // 无 DSN 时全端点显式 503（store 未接线，不伪装空 200）。
+  runbooks: `${V1}/runbooks`, // E1 GET（库列表 新→旧）| E2 POST（新建，id 可省略）
+  incidentRunbooks: (id: string) => `${V1}/incidents/${encodeURIComponent(id)}/runbooks`, // E3 GET（挂载+正文+计数）| E4 POST（挂载，幂等可重试）
+  incidentRunbook: (id: string, rid: string) =>
+    `${V1}/incidents/${encodeURIComponent(id)}/runbooks/${encodeURIComponent(rid)}`, // E5 DELETE（解挂；执行历史保留）
+  incidentRunbookExecutions: (id: string, rid: string) =>
+    `${V1}/incidents/${encodeURIComponent(id)}/runbooks/${encodeURIComponent(rid)}/executions`, // E6 GET（旧→新）| E7 POST（记一次执行；未挂载 404）
+
   // 运维 KPI（W10-3 F-07；?window=168h&severity=…，口径见 rest_kpi.go）
   kpis: `${V1}/kpis`, //                  GET
 

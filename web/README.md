@@ -82,12 +82,13 @@ src/
 | `#/audit` 全局审计 | （内嵌页无；原型无） | ⏸ 阻塞（待后端全局审计列表端点，ADR-005；单事件审计已在事件详情实装） |
 | — RCA 根因分析（事件详情区块） | 原型 pages/rca.jsx | ✅ 已实装（W11-2：GET /incidents/{id}/rca 六步状态条、ADR-007 三段置信度根因列表、findings 折叠 + ?all=1 全量、conclusion pending 明示） |
 | — AI 复盘问答（事件详情抽屉） | （原型无；二期 #7 S2 端点） | ✅ 只读版（W11-5：GET/POST /incidents/{id}/rca/session，user/assistant 气泡 + pending 徽标；OPS_SESSION=off 探测后入口隐藏；无任何执行入口） |
+| — 处置手册 Runbook（事件详情区块） | 原型 pages/remediation.jsx 的"手册"子面 | ✅ 记录版（W11-4：契约 docs/前端契约-runbook.md E1–E7；挂载列表 + execution_count 徽标、库选挂载/空库内联建册、记一次执行 + 执行历史展开；只记不执行，无 DSN 时 503 变灰降级） |
 | — 自动修复 | 原型 pages/remediation.jsx | ⬜ 二期候选（ADR-003 单执行出口未放开，前端不造入口） |
 | — 仪表盘 | 原型 pages/dashboard.jsx | ➡ 由 #/overview 承载（不双开） |
 
 端点契约与冻结声明详见 [`docs/前端分离说明-冻结console.md`](../docs/前端分离说明-冻结console.md)。
 
-## W11 手工验证步骤（RCA 区块 / 拓扑画布 / AI 抽屉）
+## W11 手工验证步骤（RCA 区块 / 拓扑画布 / AI 抽屉 / Runbook 区块）
 
 > 排期 W11-3 验收项「双分辨率截图」：本工程开发环境无无头浏览器依赖（不为此
 > 强装 puppeteer/playwright），按下方步骤在真实浏览器双分辨率（≥1600px 宽 &
@@ -113,7 +114,16 @@ cd web && npm run dev    # http://127.0.0.1:5173
    （user 右 / assistant 左，含 seq/时间/身份）、输入提问 Ctrl+Enter 发送、
    LLM 未配置时提问后出现虚线 pending 气泡（不假答）。负路径：
    `OPS_SESSION=off` 起后端 → 入口按钮整体隐藏（探测 GET session 503）。
-4. **窄分辨率**：浏览器缩到 <960px——抽屉宽度自适应 ≤94vw，topbar/KPI 换行，
+4. **Runbook 区块**（需后端接 `OPS_DB_DSN`，契约 `docs/前端契约-runbook.md`）：
+   事件详情「处置手册 · Runbook」→「挂载手册」：库空时出现内联创建最小表单
+   （标题 + markdown 正文，建册即挂载）；有库时下拉选册 →「挂载所选」（幂等，
+   重复提交不产生第二条）；挂载行显示 标题/适用范围/`执行 N` 徽标；点
+   「记录一次执行」填 执行人 + result（refs 每行一条可省）→ 保存后 `执行 N`
+   递增；展开「手册正文 · 执行历史」懒拉 E6（append-only 旧→新，页面明示
+   「只记不执行 · auto_execution:false」）；「解挂」确认框提示历史记录不删除，
+   解挂后重开库重挂计数续算。负路径：**不带 DSN 起后端** → 进详情即见区块
+   整体变灰 + 黄色横幅「该功能需持久化后端（503）」，与 RCA/session 降级口径一致。
+5. **窄分辨率**：浏览器缩到 <960px——抽屉宽度自适应 ≤94vw，topbar/KPI 换行，
    画布随 viewBox 等比缩放不破版。
 
 ## 构建状态
