@@ -42,6 +42,11 @@ const SchemaMaxVersion = 20
 
 // schema_migrations 表由 upgrade 首次执行时创建（本仓库的迁移文件从不碰它，
 // scripts/migrate 全量建库路径也不写它——表缺席 = 空库/未跟踪库，版本读 0）。
+// 注意 CREATE TABLE IF NOT EXISTS 对**已存在**的表是 no-op：README/ADR-006 确立
+// `migrate -path migrations … up`（golang-migrate）为主线通道，它建的表形状是
+// (version bigint, dirty boolean NOT NULL) **无 PK 无默认值**——与本表形状不同、
+// 且没有可供 ON CONFLICT 用的唯一约束。故登记语句必须按表形状探测分流，
+// 见 registerVersion / schemaMigrationsShape。
 const ensureSchemaMigrationsDDL = `CREATE TABLE IF NOT EXISTS schema_migrations (
     version    integer PRIMARY KEY,
     applied_at timestamptz NOT NULL DEFAULT now()
@@ -60,20 +65,47 @@ type rowQuerier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-// schemaVersionLookup 可注入的版本读数（startupSchemaGate 的单测用假 lookup，
+// schemaProbe 启动闸门读数：库内版本 + "未跟踪存量库"判别。
+type schemaProbe struct {
+	version int
+	// legacyUntracked = 版本读 0 但域表（alert_event/incident/change_record
+	// 任一）已存在：多半是 scripts/migrate 或 psql 通道建的全 schema 存量库
+	// （两条通道都不维护 schema_migrations），**不是**新建空库。闸门据此放行
+	// + 响亮提示跑 upgrade 登记，而不是按"落后 20 > gap"误拒启（P2-D4）。
+	legacyUntracked bool
+}
+
+// schemaVersionLookup 可注入的闸门读数（startupSchemaGate 的单测用假 lookup，
 // 不碰真库）。
-type schemaVersionLookup func(ctx context.Context, dsn string) (int, error)
+type schemaVersionLookup func(ctx context.Context, dsn string) (schemaProbe, error)
+
+// domainTablesAnySQL 域表存在性探测（三个建库通道都会建的核心表任在其一
+// 即视为"存量库"；to_regclass 按 search_path 解析，与表存在性探测同口径）。
+const domainTablesAnySQL = `SELECT (to_regclass('alert_event') IS NOT NULL)
+    OR (to_regclass('incident') IS NOT NULL)
+    OR (to_regclass('change_record') IS NOT NULL)`
 
 // querySchemaVersion schemaVersionLookup 的默认实现：pgx 直连读数。
 // 连接失败原样报错——是否致命由调用方定（server 闸门降级为 WARNING，
 // upgrade 直接失败退出）。
-func querySchemaVersion(ctx context.Context, dsn string) (int, error) {
+func querySchemaVersion(ctx context.Context, dsn string) (schemaProbe, error) {
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
-		return 0, fmt.Errorf("connect %s: %w", redactDSN(dsn), err)
+		return schemaProbe{}, fmt.Errorf("connect %s: %w", redactDSN(dsn), err)
 	}
 	defer func() { _ = conn.Close(ctx) }()
-	return readSchemaVersion(ctx, conn)
+	v, err := readSchemaVersion(ctx, conn)
+	if err != nil {
+		return schemaProbe{}, err
+	}
+	p := schemaProbe{version: v}
+	if v == 0 {
+		// 只在"读 0"时才多跑一次只读探测区分空库 vs 未跟踪存量库。
+		if err := conn.QueryRow(ctx, domainTablesAnySQL).Scan(&p.legacyUntracked); err != nil {
+			return schemaProbe{}, fmt.Errorf("probe domain tables (untracked-legacy detection): %w", err)
+		}
+	}
+	return p, nil
 }
 
 func readSchemaVersion(ctx context.Context, q rowQuerier) (int, error) {
@@ -103,19 +135,23 @@ func redactDSN(dsn string) string {
 // 返回 error = 拒启；返回 nil 时可能已经通过 logf 打过响亮 WARNING。
 // 决策矩阵（gap = cfg.DB.MaxVersionGap，默认 3）：
 //
-//	DB 版本 >  常量            → 拒启（旧二进制配新库）
-//	DB 版本 == 常量            → 放行（静默）
-//	常量 − DB 版本 ≤ gap      → 放行 + WARNING（提示跑 upgrade）
-//	常量 − DB 版本 > gap       → 拒启（落后太多，先 upgrade）
-//	lookup 报错（DB 不可达）   → 放行 + WARNING（与装配层 PG 降级同取向）
+//	DB 版本 >  常量                          → 拒启（旧二进制配新库）
+//	DB 版本 == 常量                          → 放行（静默）
+//	DB 版本 == 0 且域表已在（未跟踪存量库） → 放行 + WARNING 提示跑 upgrade
+//	                                          登记（scripts/migrate / psql 建的
+//	                                          全 schema 库，"读 0"≠"落后 20"）
+//	常量 − DB 版本 ≤ gap                    → 放行 + WARNING（提示跑 upgrade）
+//	常量 − DB 版本 > gap（含真空库读 0）    → 拒启（落后太多，先 upgrade）
+//	lookup 报错（DB 不可达）                → 放行 + WARNING（与装配层 PG 降级同取向）
 func startupSchemaGate(ctx context.Context, dsn string, maxVersion, gap int,
 	lookup schemaVersionLookup, logf func(format string, args ...any)) error {
-	dbVer, err := lookup(ctx, dsn)
+	probe, err := lookup(ctx, dsn)
 	if err != nil {
 		logf("WARNING: schema version gate SKIPPED — schema_migrations unreadable (%v); "+
 			"starting anyway (same degrade stance as the pg sink being unreachable)", err)
 		return nil
 	}
+	dbVer := probe.version
 	switch {
 	case dbVer > maxVersion:
 		return fmt.Errorf("schema too NEW: DB is at version %d but this binary only understands up to %d — "+
@@ -123,6 +159,15 @@ func startupSchemaGate(ctx context.Context, dsn string, maxVersion, gap int,
 			"二选一：恢复升级前的备份（backups/pre-upgrade-*.sql），或换用配套该 schema 版本的 opscopilot 二进制",
 			dbVer, maxVersion)
 	case dbVer == maxVersion:
+		return nil
+	case dbVer == 0 && probe.legacyUntracked:
+		// 未跟踪存量库（P2-D4）：schema 实际齐全，只是没有版本台账——拒启是
+		// 误伤（"落后 20"是读数假象）。放行但响亮提示登记，登记本身零 schema
+		// 改动（迁移幂等重放 + 写台账行）。
+		logf("WARNING: schema_migrations missing/empty on a POPULATED db (domain tables exist) — "+
+			"this looks like an untracked DB built by scripts/migrate or psql, NOT a fresh empty one; "+
+			"starting anyway. Run `opscopilot upgrade` to register the current version "+
+			"(all %d migrations are idempotent — closing this gap only writes tracker rows)", maxVersion)
 		return nil
 	case maxVersion-dbVer <= gap:
 		logf("WARNING: DB schema v%d is %d version(s) BEHIND binary v%d (within OPS_MAX_VERSION_GAP=%d) — "+
@@ -264,6 +309,16 @@ func runUpgrade(opts upgradeOptions) error {
 	if _, err := conn.Exec(ctx, ensureSchemaMigrationsDDL); err != nil {
 		return fmt.Errorf("建 schema_migrations 跟踪表: %w", err)
 	}
+	// P1-2：表形状探测分流。IF NOT EXISTS 对已存在的表是 no-op——golang-migrate
+	// 主线库留下来的是 (version bigint, dirty NOT NULL) 无 PK 形状，在它上面
+	// ON CONFLICT (version) 必报 42P10、裸 INSERT (version) 撞 dirty NOT NULL，
+	// 迁移半程退出（语句已落库、版本未登记）重跑同处死循环。登记语句按
+	// 探测结果选形，两种形状都能走完整 upgrade 流程。
+	shape, err := probeSchemaMigrationsShape(ctx, conn)
+	if err != nil {
+		return fmt.Errorf("探测 schema_migrations 形状: %w", err)
+	}
+	fmt.Fprintf(out, "schema_migrations 形状: %s\n", shape.describe())
 
 	fmt.Fprintf(out, "开始应用 %d 个迁移（逐语句执行，与 scripts/migrate 同律；"+
 		"各迁移自带 IF NOT EXISTS 幂等，中途失败修复后重跑 upgrade 即续传）:\n", len(pending))
@@ -281,9 +336,7 @@ func runUpgrade(opts upgradeOptions) error {
 					filepath.Base(f.path), i+1, len(stmts), err, strings.TrimSpace(stmt), f.version-1)
 			}
 		}
-		if _, err := conn.Exec(ctx,
-			`INSERT INTO schema_migrations (version) VALUES ($1) ON CONFLICT (version) DO NOTHING`,
-			f.version); err != nil {
+		if err := registerVersion(ctx, conn, shape, f.version); err != nil {
 			return fmt.Errorf("记录版本 %d: %w", f.version, err)
 		}
 		fmt.Fprintf(out, "  ✔ v%-4d %-46s %3d 条语句 (%s)\n",
@@ -296,6 +349,108 @@ func runUpgrade(opts upgradeOptions) error {
 	}
 	fmt.Fprintf(out, "upgrade 完成: v%d -> v%d；备份: %s\n", cur, final, backupPath)
 	return nil
+}
+
+// ---------- 跟踪表形状探测与兼容登记（P1-2） ----------
+
+// schemaMigrationsShape schema_migrations 形状探测结果（登记语句的兼容开关）。
+// 两个主流形状：
+//
+//	versionUniq  version 单列 PK/唯一约束——opscopilot 自建形状
+//	             （ensureSchemaMigrationsDDL），可用 ON CONFLICT (version)；
+//	hasDirty     有 dirty 列——golang-migrate 主线形状 (version bigint,
+//	             dirty boolean NOT NULL) 且无 PK：ON CONFLICT 无约束可用、
+//	             裸 INSERT 撞 NOT NULL，且 golang-migrate 约定"单行=当前版本"。
+type schemaMigrationsShape struct {
+	versionUniq bool
+	hasDirty    bool
+}
+
+func (s schemaMigrationsShape) describe() string {
+	switch {
+	case s.versionUniq:
+		return "自建形状（version 唯一约束可用 → ON CONFLICT 登记）"
+	case s.hasDirty:
+		return "golang-migrate 主线形状（无唯一约束、dirty NOT NULL → 单行 DELETE+INSERT 同事务登记）"
+	default:
+		return "无唯一约束、无 dirty 列（INSERT…SELECT WHERE NOT EXISTS 登记）"
+	}
+}
+
+// probeSchemaMigrationsShape 只读探测（information_schema/pg_constraint，不改
+// 任何数据）。调用前提：表已存在（upgrade 在建表/IF NOT EXISTS 之后才探测）。
+func probeSchemaMigrationsShape(ctx context.Context, conn *pgx.Conn) (schemaMigrationsShape, error) {
+	var sh schemaMigrationsShape
+	// version 单列 PK/唯一约束存在性（ON CONFLICT (version) 的可用性判据）。
+	if err := conn.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			  FROM pg_constraint c
+			  JOIN pg_attribute a
+			    ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1]
+			 WHERE c.conrelid = to_regclass('schema_migrations')
+			   AND c.contype IN ('p', 'u')
+			   AND cardinality(c.conkey) = 1
+			   AND a.attname = 'version')`).Scan(&sh.versionUniq); err != nil {
+		return sh, fmt.Errorf("probe version unique constraint: %w", err)
+	}
+	// dirty 列存在性（golang-migrate 形状判据；current_schema 限定，与备份取列同口径）。
+	if err := conn.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.columns
+			 WHERE table_name = 'schema_migrations'
+			   AND table_schema = current_schema()
+			   AND column_name = 'dirty')`).Scan(&sh.hasDirty); err != nil {
+		return sh, fmt.Errorf("probe dirty column: %w", err)
+	}
+	return sh, nil
+}
+
+// registerVersion 登记"版本 N 已应用"（幂等：中途失败修复后重跑 upgrade 可
+// 续传）。按探测到的表形状选形——这是对旧版"无条件 ON CONFLICT (version)
+// DO NOTHING"只在自建 PK 形状上成立、在 golang-migrate 主线形状上报 42P10
+// 的修复（P1-2：语句已落库、版本未登记的半程退出死循环）。
+func registerVersion(ctx context.Context, conn *pgx.Conn, sh schemaMigrationsShape, version int) error {
+	switch {
+	case sh.versionUniq:
+		// 自建形状：version 列自带唯一约束，ON CONFLICT 最短路径；
+		// applied_at 走列默认值 now()。
+		_, err := conn.Exec(ctx,
+			`INSERT INTO schema_migrations (version) VALUES ($1) ON CONFLICT (version) DO NOTHING`,
+			version)
+		return err
+	case sh.hasDirty:
+		// golang-migrate 主线形状：无唯一约束可用（ON CONFLICT → 42P10），
+		// dirty NOT NULL 无默认（裸 INSERT(version) 插不进）。且 golang-migrate
+		// 的读侧约定是"全表只有一行 = 当前版本"（SELECT version, dirty LIMIT 1
+		// 不带 ORDER BY）——追加多行会让它随机读到旧版本。故按 golang-migrate
+		// 自身的语义重写台账：清掉整表再写唯一一行 (N, false)。false = 不脏，
+		// 与"该版本迁移语句全部成功应用后才登记"的含义一致。两条语句必须同
+		// 事务：拆开存在"DELETE 已提交、INSERT 失败"的半窗，MAX(version) 会
+		// 倒退到更低版本，下次启动闸门按假读数误判。
+		tx, err := conn.Begin(ctx)
+		if err != nil {
+			return fmt.Errorf("开登记事务: %w", err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }() // Commit 成功后 Rollback 无害
+		if _, err := tx.Exec(ctx, `DELETE FROM schema_migrations`); err != nil {
+			return fmt.Errorf("清 golang-migrate 台账行: %w", err)
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO schema_migrations (version, dirty) VALUES ($1, false)`, version); err != nil {
+			return fmt.Errorf("写 golang-migrate 台账行: %w", err)
+		}
+		return tx.Commit(ctx)
+	default:
+		// 兜底形状（无唯一约束、无 dirty，如手建的裸表）：
+		// INSERT…SELECT WHERE NOT EXISTS 不依赖任何约束即幂等；读-插在同一
+		// 语句内完成，单语句本身即原子（无需显式事务）。
+		_, err := conn.Exec(ctx, `
+			INSERT INTO schema_migrations (version)
+			SELECT $1 WHERE NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = $1)`,
+			version)
+		return err
+	}
 }
 
 // ---------- 应用前逻辑备份 ----------

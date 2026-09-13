@@ -48,31 +48,34 @@ func TestListMigrationsSortedAndContiguous(t *testing.T) {
 //	落后 1..3       → 放行 + WARNING
 //	落后 4（>gap）  → 拒启
 //	DB 更新（>20）  → 拒启（旧二进制配新库）
+//	读 0 + 域表已在（未跟踪存量库，P2-D4）→ 放行 + WARNING 提示登记
 //	lookup 报错     → 放行 + WARNING（DB 不可达不拦，降级哲学）
 func TestStartupSchemaGate(t *testing.T) {
 	cases := []struct {
 		name    string
 		dbVer   int
+		legacy  bool // version==0 且域表存在（scripts/migrate/psql 建的未跟踪存量库）
 		lookup  error
 		wantErr bool
 		wantLog string
 	}{
-		{"equal-pass-silent", 20, nil, false, ""},
-		{"behind-1-warn", 19, nil, false, "BEHIND"},
-		{"behind-equals-gap-warn", 17, nil, false, "BEHIND"},
-		{"behind-gap-plus-1-reject", 16, nil, true, ""},
-		{"empty-db-untracked-reject", 0, nil, true, ""},
-		{"db-newer-reject", 21, nil, true, "旧二进制配新库"},
-		{"lookup-error-pass-warn", 0, errors.New("dial refused"), false, "SKIPPED"},
+		{"equal-pass-silent", 20, false, nil, false, ""},
+		{"behind-1-warn", 19, false, nil, false, "BEHIND"},
+		{"behind-equals-gap-warn", 17, false, nil, false, "BEHIND"},
+		{"behind-gap-plus-1-reject", 16, false, nil, true, ""},
+		{"fresh-empty-db-reject", 0, false, nil, true, ""},
+		{"untracked-legacy-pass-warn", 0, true, nil, false, "untracked"},
+		{"db-newer-reject", 21, false, nil, true, "旧二进制配新库"},
+		{"lookup-error-pass-warn", 0, false, errors.New("dial refused"), false, "SKIPPED"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var logged []string
-			lookup := func(ctx context.Context, dsn string) (int, error) {
+			lookup := func(ctx context.Context, dsn string) (schemaProbe, error) {
 				if tc.lookup != nil {
-					return 0, tc.lookup
+					return schemaProbe{}, tc.lookup
 				}
-				return tc.dbVer, nil
+				return schemaProbe{version: tc.dbVer, legacyUntracked: tc.legacy}, nil
 			}
 			err := startupSchemaGate(context.Background(), "dsn://x", 20, 3, lookup,
 				func(format string, args ...any) {
