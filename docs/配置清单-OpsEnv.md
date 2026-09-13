@@ -139,6 +139,7 @@ M2 **只记录与展示**，不驱动自动升级（OPS_ESCALATION_* 是独立�
 | 66 | `OPS_SLA_WARNING_MINUTES` | 事件 SLA | 正整数（分钟） | `240`（4h） | 同上 → **启动失败** | 同上（warning 档） |
 | 67 | `OPS_SLA_INFO_MINUTES` | 事件 SLA | 正整数（分钟） | `1440`（24h；severity 白名单外同按此档兜底） | 同上 → **启动失败** | 同上（info 档 + 未知级兜底） |
 | 68 | `OPS_KPI_WINDOW` | 运维 KPI | 正 duration | `168h`（7d；**W10-3 F-07 新增**） | 非正 duration/非法 → **启动失败**（REST `?window=` 非法是请求级 400，不动启动） | `config.KPI.Window` → `RESTLimits.KPIWindow` → `handleKPIs`（GET /api/v1/kpis 默认观察窗；聚合口径唯一来源 `internal/incident/kpi.go`，数据源 incident 表：MTTA/MTTR/吞吐，平均闭环与 MTTR 同口径合并） |
+| 69 | `OPS_MAX_VERSION_GAP` | DB | 正整数 | `3`（**W11-6 新增**） | 非正整数 → **启动失败**（posInt 同款） | `config.DB.MaxVersionGap` → `main.go` 启动闸门 `startupSchemaGate`（`cmd/opscopilot/version.go`）：DB schema 落后二进制 ≤ 本值 → WARNING 放行；> 本值 → 拒启；DB 领先二进制一律拒启。配套补差命令 `opscopilot upgrade [--dry-run]`（应用前自动逻辑备份到 `backups/pre-upgrade-<ts>.sql`） |
 
 > #6 指标（非 env，登记于此便于对照）：每个有界结构两项——
 > `opscopilot_mem_entries{store="builder|builder_edges|incidents|escalation_ledger|noise_dedup|noise_clusters|noise_sigcache|audit"}`（gauge）

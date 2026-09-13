@@ -23,7 +23,7 @@ opscopilot/
 ├── web/                     # 独立前端工程（Vite+React+TS，ADR-013；console.html 已冻结）
 ├── scripts/                 # 边界检查 / demo / 容量基线 / 评测 / 测试库重置等编排脚本
 ├── tools/                   # faultinjector（剧本注入器）、rca_eval（golden 评测集）、evaluate.py、loadtest 等
-├── migrations/              # golang-migrate SQL（000001~000018）
+├── migrations/              # golang-migrate SQL（000001~000020）
 ├── docs/                    # ADR、排期、方案、配置清单、容量、验收/评测报告、历史审核
 └── .github/workflows/ci.yml # CI：build/test + 边界检查 + Windows/Linux 冒烟
 ```
@@ -210,6 +210,29 @@ opscopilot_is_leader                                                 本实例 l
 ```bash
 curl -s http://127.0.0.1:8080/metrics | grep -E 'fired_to_(verdict|notify)_seconds_(count|p95)'
 ```
+
+### schema 升级与跨版本拒启（W11-6）
+
+```bash
+opscopilot upgrade            # 连 OPS_DB_DSN，补齐 schema_migrations 与 migrations/*.up.sql 的缺口
+opscopilot upgrade --dry-run  # 只读：列缺口，不建表、不备份、不应用
+```
+
+实 upgrade 在应用任何迁移前先做**逻辑备份**：逐表 `SELECT` 导出 INSERT 文本到
+`backups/pre-upgrade-<时间戳>.sql`（范围：incident / incident_cluster / incident_audit /
+change_record / alert_cluster / runbook 三表 / alert_event 前 10 万行）。备份失败即中止，
+DB 不动。定位为开发/演示库的文本级快照（非物理备份；恢复 = 空库重放该文件）。
+
+跨版本拒启：server 启动时（有 `OPS_DB_DSN` 才校验）比对 `schema_migrations` 与二进制内
+`SchemaMaxVersion` 常量（`cmd/opscopilot/version.go`，测试钉死与 migrations/ 最大编号一致）：
+
+| DB 版本 vs 二进制常量 | 行为 |
+|---|---|
+| 相等 | 放行（静默） |
+| DB 落后 ≤ `OPS_MAX_VERSION_GAP`（默认 3） | 放行 + 响亮 WARNING 提示跑 upgrade |
+| DB 落后 > gap | 拒启 |
+| DB 更新（旧二进制配新库） | 拒启：恢复 backups/pre-upgrade 备份或换配套二进制 |
+| 无 `OPS_DB_DSN` / schema_migrations 不可读 | 跳过校验（内存降级哲学，同 pg sink 缺席） |
 
 ### 运维脚本入口
 
