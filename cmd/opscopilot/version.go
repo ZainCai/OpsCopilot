@@ -38,7 +38,7 @@ import (
 // SchemaMaxVersion 本二进制期望的 schema 版本（= migrations/ 最大编号）。
 // **手工维护**：新增 migrations/0000NN_*.up.sql 时必须同步 +1，
 // TestSchemaMaxVersionMatchesMigrationsDir 会钉死这一点（忘改即红）。
-const SchemaMaxVersion = 20
+const SchemaMaxVersion = 21
 
 // schema_migrations 表由 upgrade 首次执行时创建（本仓库的迁移文件从不碰它，
 // scripts/migrate 全量建库路径也不写它——表缺席 = 空库/未跟踪库，版本读 0）。

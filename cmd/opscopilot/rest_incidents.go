@@ -255,6 +255,9 @@ func (g *RESTGateway) handleAudit(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "audit not wired")
 		return
 	}
+	// 打点口径同 GET /api/v1/audit：一次到达审计后端的读取尝试计一次
+	// （source=incident；后端故障仍计入——降级面要数得出来）。
+	g.countAuditRead(auditSourceIncident)
 	list, err := g.audit.List(r.PathValue("id"))
 	if err != nil {
 		// D5 决策 A + 第八轮 D1：审计后端故障必须如实回 500，不能把

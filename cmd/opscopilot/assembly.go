@@ -393,6 +393,8 @@ func NewAssembly(logger connector.Logger, cfg *config.Config) (*Assembly, error)
 		return nil, err
 	}
 	rest.SetLogf(logf)
+	// W12 审计解锁包：读路径打点（opscopilot_audit_reads_total{source}）。
+	rest.SetMetrics(appMetrics)
 	// 告警中心数据源（仅 DB 部署有值；内存态该端点 503 并透出口径）。
 	rest.SetDB(pgPool, tenant)
 

@@ -116,7 +116,16 @@ type AppMetrics struct {
 	//   skipped  = 建单/挂簇 IO 异常或 labels 缺失算不出幂等键（异常面，
 	//              伴 WARNING 与 attachFailures 累计）。
 	AutoAttach map[string]*metrics.Counter
+	// AuditReads "查审计"访问计数（W12 审计解锁包）：按入口（source =
+	// global | incident）分桶。本期口径——独立的 audit_read 审计动作与
+	// 哈希链留痕属 M3（ADR-005），先用 Prometheus 计数器替代留痕；
+	// 只计"到达审计后端的读取尝试"（参数错 400 不触库不计，后端故障计）。
+	AuditReads map[string]*metrics.Counter
 }
+
+// auditReadSources 审计读取计数的固定维度集合（编译期确定，对齐 sinkStores
+// 范式；与 rest_audit.go/rest_incidents.go 的两个读入口一一对应）。
+var auditReadSources = []string{"global", "incident"}
 
 // latencyStages 延迟观测的两种阶段（跳过计数器的固定维度集合）。
 var latencyStages = []string{"verdict", "notify"}
@@ -170,6 +179,7 @@ func NewAppMetrics() *AppMetrics {
 		LLMRequests:        make(map[string]*metrics.Counter, len(llmOutcomes)),
 		SessionLLMRequests: make(map[string]*metrics.Counter, len(llmOutcomes)),
 		AutoAttach:         make(map[string]*metrics.Counter, len(autoAttachOutcomes)),
+		AuditReads:         make(map[string]*metrics.Counter, len(auditReadSources)),
 		RCADuration: reg.Histogram("opscopilot_rca_duration_seconds",
 			"On-demand RCA analysis latency (evidence collection + six-step pipeline), outcome-agnostic", nil, rcaBuckets, latencyWindow),
 		LLMDuration: reg.Histogram("opscopilot_llm_duration_seconds",
@@ -206,6 +216,10 @@ func NewAppMetrics() *AppMetrics {
 	for _, s := range autoAttachOutcomes {
 		m.AutoAttach[s] = reg.Counter("opscopilot_autoattach_total",
 			"Cluster-to-incident auto-attach attempts (OPS_AUTOATTACH, enforce new-incident path) by outcome: attached = incident upserted + cluster attached (audited); conflict = one-cluster-one-incident unique index owned by another incident, skipped by design (first ticket holds the fault domain); skipped = create/attach failure or no labels to derive source_ref", metrics.LabelSet{"outcome": s})
+	}
+	for _, s := range auditReadSources {
+		m.AuditReads[s] = reg.Counter("opscopilot_audit_reads_total",
+			"Audit trail read attempts reaching the audit backend, by entry point (global = GET /api/v1/audit, incident = GET /api/v1/incidents/{id}/audit); interim trail substitute for the audit_read action + hash chain deferred to M3 (ADR-005)", metrics.LabelSet{"source": s})
 	}
 	return m
 }
@@ -338,6 +352,18 @@ func (m *AppMetrics) CountAutoAttach(outcome string) {
 		c = m.AutoAttach["skipped"]
 	}
 	c.Inc()
+}
+
+// CountAuditRead 记一次"查审计"读取尝试（source = global|incident，字面量
+// 调用点；未知 source 静默忽略——维度集合编译期固定，查不到键说明与
+// auditReadSources 脱节，指标不该拖垮读路径，对齐 CountLatencySkipped 纪律）。
+func (m *AppMetrics) CountAuditRead(source string) {
+	if m == nil {
+		return
+	}
+	if c, ok := m.AuditReads[source]; ok {
+		c.Inc()
+	}
 }
 
 // ObserveVerdictLatency 记录"发射 → 判决生成"延迟（口径见文件头 #8 注记）。

@@ -55,6 +55,18 @@ func (f *fakeAudit) List(string) ([]AuditEntry, error) {
 	return f.entries, nil
 }
 
+// ListPage 轻量替身：全局审计契约由 audit_listpage_test.go 对真实现锁定，
+// 编排器测试只需接口可用（返回过滤后全量、无游标）。
+func (f *fakeAudit) ListPage(q AuditQuery) (AuditPage, error) {
+	out := []AuditEntry{}
+	for _, e := range f.entries {
+		if (q.Actor == "" || e.Actor == q.Actor) && (q.Action == "" || string(e.Action) == q.Action) {
+			out = append(out, e)
+		}
+	}
+	return AuditPage{Items: out}, nil
+}
+
 // rcaEnv 内存形态的编排器测试环境（节点 n1..n3，边 n1->n2->n3，medium）。
 type rcaEnv struct {
 	orch    *RCAOrchestrator

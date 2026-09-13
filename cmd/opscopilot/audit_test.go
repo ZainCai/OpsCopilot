@@ -31,6 +31,10 @@ func (failingAuditLog) List(string) ([]AuditEntry, error) {
 	return nil, fmt.Errorf("%w: boom: host=secret-db.internal", ErrAuditUnavailable)
 }
 
+func (failingAuditLog) ListPage(AuditQuery) (AuditPage, error) {
+	return AuditPage{}, fmt.Errorf("%w: boom: host=secret-db.internal", ErrAuditUnavailable)
+}
+
 // TestMemAuditListNoError 内存实现恒不失败（error 为 nil，统一接口形态）。
 func TestMemAuditListNoError(t *testing.T) {
 	l := NewMemAuditLog()

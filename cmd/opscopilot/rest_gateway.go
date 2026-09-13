@@ -80,7 +80,22 @@ type RESTGateway struct {
 	// runbooks Runbook 记录版 store（W11-4 F-12；nil = 无 DB，runbook 端点
 	// 显式 503——对齐 RCA 降级口径：可诊断的关闭态好过静默的空列表）。
 	runbooks *runbook.Store
+	// metrics 应用指标集（W12 审计解锁包：opscopilot_audit_reads_total 的
+	// 记账入口；nil 安全——指标缺失不得影响读路径）。装配期 SetMetrics 注入。
+	metrics *AppMetrics
 }
+
+// SetMetrics 挂载应用指标集（装配期调用；nil = 不打点）。
+func (g *RESTGateway) SetMetrics(m *AppMetrics) { g.metrics = m }
+
+// 审计读取计数的来源标签（与 AppMetrics.AuditReads 维度同源）。
+const (
+	auditSourceGlobal   = "global"   // GET /api/v1/audit
+	auditSourceIncident = "incident" // GET /api/v1/incidents/{id}/audit
+)
+
+// countAuditRead 打点入口（nil 安全；调用点见两个审计读 handler）。
+func (g *RESTGateway) countAuditRead(source string) { g.metrics.CountAuditRead(source) }
 
 // SetRunbook 挂载 Runbook store（装配期调用；nil = 不接线，端点显式 503）。
 func (g *RESTGateway) SetRunbook(s *runbook.Store) { g.runbooks = s }
@@ -186,6 +201,9 @@ func (g *RESTGateway) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/incidents", g.handleCreateIncident)
 	mux.Handle("GET /api/v1/incidents/{id}/duplicates", h)
 	mux.Handle("GET /api/v1/incidents/{id}/audit", h)
+	// W12 审计解锁包：全局审计检索（读路径鉴权口径同 /{id}/audit——无 Token，
+	// handler 与契约见 rest_audit.go）。
+	mux.Handle("GET /api/v1/audit", h)
 	// W10-1（F-03）事件混合时间线：告警进出∥变更∥处置三源归并（读路径，
 	// 鉴权口径同现有 GET）。
 	mux.Handle("GET /api/v1/incidents/{id}/timeline", h)
@@ -237,6 +255,8 @@ func (g *RESTGateway) route(w http.ResponseWriter, r *http.Request) {
 		g.handleRunbookList(w, r)
 	case "/api/v1/kpis":
 		g.handleKPIs(w, r)
+	case "/api/v1/audit":
+		g.handleAuditGlobal(w, r)
 	default:
 		// /api/v1/clusters/{key} 与 /api/v1/incidents/{id}：路径参数经 PathValue 取。
 		if key := r.PathValue("key"); key != "" {
