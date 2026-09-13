@@ -13,6 +13,8 @@ import { OriginBadge, SevBadge, StateChip } from "../components/Badges";
 import { PageHead } from "../components/Layout";
 import { Seg, StatCard } from "../components/Stat";
 import { AuditTimeline, MixedTimeline } from "../components/Timeline";
+import { RcaSection } from "../components/RcaPanel";
+import { AiDrawer, probeSession, sessionEntryVisible } from "../components/AiDrawer";
 import { fmtTime, fmtDurationSec, isZeroTime, timeAgoText } from "../lib/format";
 
 /** 事件状态机（后端 rest_incidents.go 保证合法性，前端只展示允许转移）。 */
@@ -259,6 +261,16 @@ function IncidentDetail({ id, onChanged }: { id: string; onChanged: () => void }
   const [audit, setAudit] = useState<AuditResponse["entries"]>([]);
   const [err, setErr] = useState("");
   const [tlRefresh, setTlRefresh] = useState(0); // 写操作成功后强制重拉混合时间线
+  const [aiOpen, setAiOpen] = useState(false);
+  // AI 抽屉入口可见性（W11-5 降级）：探测前按模块缓存放行；探测确认
+  // OPS_SESSION=off（503）后隐藏。详见 components/AiDrawer.tsx 头注释。
+  const [aiVisible, setAiVisible] = useState(sessionEntryVisible());
+
+  useEffect(() => {
+    let dead = false;
+    void probeSession(id).then((ok) => { if (!dead) setAiVisible(ok); });
+    return () => { dead = true; };
+  }, [id]);
 
   const reload = useCallback(async () => {
     setErr("");
@@ -339,8 +351,16 @@ function IncidentDetail({ id, onChanged }: { id: string; onChanged: () => void }
             </button>
           ))
           : <span className="panel-sub">已解决，无可用操作</span>}
+        {aiVisible
+          ? (
+            <button type="button" className="btn btn--sm" style={{ marginLeft: "auto" }} title="基于该事件 RCA 证据的复盘问答（只读，无执行入口）" onClick={() => setAiOpen(true)}>
+              AI 复盘问答
+            </button>
+          )
+          : null}
       </div>
       <TimelineSection id={id} refresh={tlRefresh} />
+      <RcaSection id={id} />
       <div className="sec">
         <div className="sec-h">疑似重复（L2 · 只提示不自动合并）</div>
         {cands.length === 0
@@ -362,6 +382,7 @@ function IncidentDetail({ id, onChanged }: { id: string; onChanged: () => void }
         <div className="sec-h">审计轨迹（{audit.length}）</div>
         <AuditTimeline entries={audit} />
       </div>
+      {aiOpen ? <AiDrawer incidentId={id} onClose={() => setAiOpen(false)} /> : null}
     </div>
   );
 }

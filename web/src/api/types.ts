@@ -49,12 +49,17 @@ export interface TopoNode {
   node_key: string;
   node_type?: string;
   confidence?: Confidence;
+  // 时点有效性双时态（pb.TopologyNode json tag：valid_from/valid_to）与来源
+  valid_from?: string;
+  valid_to?: string;
+  source?: string;
 }
 export interface TopoEdge {
   src_key: string;
   dst_key: string;
   confidence?: Confidence;
   relation?: string;
+  source?: string;
 }
 export interface TopologyResponse {
   nodes: TopoNode[];
@@ -186,6 +191,69 @@ export interface KPIResponse {
   generated_at: string;
   severity: string; // 空 = 未过滤
   stats: KPIStats;
+}
+
+// ---------- RCA 按需根因分析（GET /api/v1/incidents/{id}/rca，W11-2 · ADR-014） ----------
+/** 六步流水线封闭集合（internal/rca/steps.go Step* 常量）。 */
+export type RcaStepName = "collect" | "hypothesize" | "verify" | "attribution" | "conclude" | "recommend";
+/** 步骤状态（internal/rca/rca.go Status*：pending=占位未实现，failed=本步出错但整体可诊断）。 */
+export type RcaStepStatus = "done" | "pending" | "failed";
+export interface RcaStep {
+  name: string; // 理论上 ∈ RcaStepName，宽松处理防后端加步炸前端
+  status: RcaStepStatus;
+  duration_ms: number;
+  error?: string;
+}
+/** 单条产出（rcaFindView）；confidence 三段口径与拓扑同源（ADR-007）。 */
+export interface RcaFinding {
+  step: string;
+  summary: string;
+  node_keys?: string[];
+  confidence: Confidence;
+  ref?: string;
+}
+export interface RcaEvidenceCounts {
+  nodes: number;
+  edges: number;
+  changes: number;
+}
+export interface RcaResponse {
+  incident_id: string;
+  title?: string;
+  cluster_keys?: string[];
+  t0?: string;
+  window?: string; // Go duration 文本（如 "24h0m0s"）
+  alerted_nodes?: string[];
+  evidence: RcaEvidenceCounts;
+  steps?: RcaStep[]; // Go nil slice → JSON null（"跑过但为空"与"没跑"都不炸渲染）
+  findings?: RcaFinding[];
+  root_causes?: RcaFinding[];
+  /** null = conclude pending（llm-gateway 未接线，ADR-003 禁止伪 RCA）。 */
+  conclusion: string | null;
+  llm_used: boolean;
+  /** 本次回显的 findings 相对全量有裁剪（?all=1 恒 false）。 */
+  truncated: boolean;
+  /** 被 OPS_RCA_MAX_FINDINGS 裁掉的条数（全量报告口径）。 */
+  findings_truncated: number;
+  persistence: string; // memory | timescaledb
+}
+
+// ---------- RCA 复盘会话（GET/POST /api/v1/incidents/{id}/rca/session，二期 #7 S2） ----------
+export interface SessionTurn {
+  seq: number;
+  role: "user" | "assistant"; // 拍板②封闭集合
+  content: string;
+  created_by?: string;
+  created_at: string;
+}
+export interface SessionResponse {
+  incident_id: string;
+  created_by?: string;
+  participants?: string[];
+  turns: SessionTurn[]; // 后端保证空会话回显 []（不给 null 分支）
+  /** 仅 POST 回显：pending = LLM 未配置/失败，assistant 轮不在 turns 里（宁 pending 不假答）。 */
+  assistant_status?: "answered" | "pending";
+  persistence: string;
 }
 
 // ---------- 鉴权探测（GET /api/v1/auth/status） ----------

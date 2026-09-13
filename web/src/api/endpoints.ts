@@ -25,6 +25,13 @@ export const ENDPOINTS = {
   incidentTransition: (id: string) =>
     `${V1}/incidents/${encodeURIComponent(id)}/transition`, // POST（可带 sla_minutes 覆盖）
 
+  // 按需根因分析（rest_rca.go，ADR-014）：GET ?actor=（写审计留痕）&all=1（全量 findings）；
+  // OPS_RCA=off → 503，超时 → 504。分析按请求重跑（同步），前端按钮触发不自动拉。
+  incidentRca: (id: string) => `${V1}/incidents/${encodeURIComponent(id)}/rca`, // GET
+  // RCA 复盘会话（rest_rca_session.go，二期 #7 S2）：GET 读会话（OPS_SESSION=off → 503）；
+  // POST body {content, actor}（DisallowUnknownFields，字段名以 Go 侧为准）。
+  incidentRcaSession: (id: string) => `${V1}/incidents/${encodeURIComponent(id)}/rca/session`, // GET | POST
+
   // 运维 KPI（W10-3 F-07；?window=168h&severity=…，口径见 rest_kpi.go）
   kpis: `${V1}/kpis`, //                  GET
 
