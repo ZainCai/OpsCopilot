@@ -171,7 +171,7 @@ body { font-family: var(--font-sans); background: var(--bg); color: var(--text);
 /* 骨架占位 */
 .todo-box { border: 1px dashed var(--line); border-radius: var(--radius); padding: 22px;
             color: var(--text-2); font-size: 12.5px; line-height: 1.8; }
-.todo-box code { font-family: var(--font-mono); color: var(--text-3); }
+.todo-box code { font-family: var(--font-mono); color: var(--text-3); overflow-wrap: anywhere; } /* 长端点路径窄屏防横向溢出（390 走查实测） */
 
 /* ===== W11-2 · RCA 区块（事件详情） =====
    六步流水线/证据链/AI 结论卡片改用原型 .pipeline/.chain/.ai-card（见下方与 AI 卡片块），

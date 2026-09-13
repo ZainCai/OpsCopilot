@@ -84,6 +84,9 @@ export function IncidentsView({ onConn }: { onConn: (ok: boolean) => void }): Re
   // 突发合并——300ms 内的多次变更折成一次刷新。
   const streamStatus = useRef<StreamStatus>("connecting");
   useEffect(() => {
+    // 首屏与过滤切换即时拉取（双分辨率走查实测：仅靠 SSE 事件/30s 轮询兜底，
+    // 流正常时新挂载页面会空列表——对齐 Alerts/Overview 的 mount-load 口径）
+    void load();
     const handle = openIncidentStream(
       () => {
         if (reloadTimer.current) return;
