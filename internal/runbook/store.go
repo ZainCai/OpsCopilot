@@ -238,6 +238,11 @@ SELECT 1 FROM incident_runbook WHERE tenant_id = $1 AND incident_id = $2 AND run
 // AppendExecution 追加一条执行记录（**append-only：本包对该表零
 // UPDATE/DELETE 语句**）。seq 由列级 IDENTITY 发号，挂载内严格递增。
 // 挂载不存在 → ErrNotMounted（执行必须挂在既有挂载点上，"记无所记"如实拒绝）。
+// 竞态纪律：挂载检查与插入同事务，且对挂载行 **FOR UPDATE**——并行的解挂会
+// 等本事务提交再删（历史落在保留下来的日志里），或先删成功、本处检查落空
+// 如实 404；不给"边解挂边写入"留下第三种既非也不是的中间态。
+// （本表对挂载**不建外键**是刻意的：CASCADE 会毁历史、RESTRICT 会挡解挂，
+// 都不对——见 migration 000020 头注释；所以约束兜不住，必须行锁。）
 // refs 为空时落 '[]'；合法性由 cmd 入口校验（本层只保证 JSONB 可存）。
 func (s *Store) AppendExecution(ctx context.Context, incidentID, runbookID, executedBy, result string, refs json.RawMessage) (Execution, error) {
 	if len(refs) == 0 {
@@ -245,15 +250,24 @@ func (s *Store) AppendExecution(ctx context.Context, incidentID, runbookID, exec
 	}
 	cctx, cancel := queryCtx(ctx)
 	defer cancel()
-	mounted, err := s.Mounted(cctx, incidentID, runbookID)
+	tx, err := s.pool.Begin(cctx)
 	if err != nil {
-		return Execution{}, err
+		return Execution{}, fmt.Errorf("runbook store: begin append %s->%s: %w", incidentID, runbookID, err)
 	}
-	if !mounted {
+	defer tx.Rollback(cctx) //nolint:errcheck // Commit 后为 no-op；失败路径负责回滚
+	var one int
+	err = tx.QueryRow(cctx, `
+SELECT 1 FROM incident_runbook
+WHERE tenant_id = $1 AND incident_id = $2 AND runbook_id = $3 FOR UPDATE`,
+		s.tenant, incidentID, runbookID).Scan(&one)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return Execution{}, ErrNotMounted
 	}
+	if err != nil {
+		return Execution{}, fmt.Errorf("runbook store: lock mount %s->%s: %w", incidentID, runbookID, err)
+	}
 	var e Execution
-	err = s.pool.QueryRow(cctx, `
+	err = tx.QueryRow(cctx, `
 INSERT INTO runbook_execution_log (tenant_id, incident_id, runbook_id, executed_by, result, refs)
 VALUES ($1, $2, $3, $4, $5, $6::jsonb)
 RETURNING seq, executed_at`,
@@ -261,6 +275,9 @@ RETURNING seq, executed_at`,
 		Scan(&e.Seq, &e.ExecutedAt)
 	if err != nil {
 		return Execution{}, fmt.Errorf("runbook store: append execution %s->%s: %w", incidentID, runbookID, err)
+	}
+	if err := tx.Commit(cctx); err != nil {
+		return Execution{}, fmt.Errorf("runbook store: commit append %s->%s: %w", incidentID, runbookID, err)
 	}
 	e.ExecutedBy, e.Result, e.Refs = executedBy, result, refs
 	return e, nil
