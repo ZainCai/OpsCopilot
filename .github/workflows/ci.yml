@@ -8,6 +8,30 @@ on:
 jobs:
   build-and-check:
     runs-on: ubuntu-latest
+    # P1-3（round10 审核）：真库回归进 CI。此前 pgstore/选举/升级演练等 DSN
+    # 门控用例在 CI 全部静默 skip（本地 22 包全绿、40 个 pgstore 子用例真跑，
+    # CI 侧是空白）。service 镜像与 docker-compose.yaml 同源
+    # （timescale/timescaledb:2.29.2-pg17，扩展随镜像预加载，000001 的
+    # CREATE EXTENSION IF NOT EXISTS timescaledb 在新建库上直接可用）。
+    # ⚠ CI 改动本机无法跑 workflow 验证，首跑需观察：service 就绪时序、
+    # timescale 镜像拉取、reset 建库、integration 构建标签仍被排除。
+    services:
+      timescaledb:
+        image: timescale/timescaledb:2.29.2-pg17
+        env:
+          POSTGRES_DB: opscopilot
+          POSTGRES_USER: opscopilot
+          POSTGRES_PASSWORD: opscopilot
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U opscopilot -d opscopilot"
+          --health-interval 5s
+          --health-retries 10
+    env:
+      # 只给测试用 DSN（真库回归门控）；OPS_DB_DSN 刻意不设——server 装配
+      # 路径不连库，与"无 DSN = 内存降级"的本地单测口径一致。
+      OPS_TEST_PG_DSN: postgres://opscopilot:opscopilot@localhost:5432/opscopilot_test?sslmode=disable
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -29,12 +53,18 @@ jobs:
         run: go vet ./...
       - name: Build
         run: go build ./...
+      - name: 初始化测试库（migrations 从零应用，CI 无 .env 也可跑）
+        # reset_test_pg.sh 优先取 OPS_TEST_PG_DSN 环境变量（.env 缺席时
+        # if [ -f .env ] 守卫自然跳过），内部走 `go run ./scripts/migrate
+        # -create-db --wipe`——建库 + 按序应用全部 migrations 的通道与本地
+        # 演练完全同一脚本，不另起第二套迁移器（主线 migrate CLI 不引入）。
+        run: bash scripts/reset_test_pg.sh --wipe
       - name: Test
-        run: go test ./...
+        run: go test ./... -count=1
       - name: Test with race detector
         # 并发正确性门禁：W3 审查发现两处漏锁（IngestDiscover/CoverageReport），
         # 根因是本地 Windows 跑不了 -race（cgo 限制），必须由 CI 兜底。
-        run: go test -race ./...
+        run: go test -race ./... -count=1
       - name: 模块边界检查（P1-2）
         run: python scripts/check_module_boundaries.py
 
