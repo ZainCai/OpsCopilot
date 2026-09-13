@@ -108,6 +108,11 @@ type DBSection struct {
 	// MaxConns 共享连接池上限（D7 决策 A）。原非法值静默取 pgx 默认——
 	// 收敛为非法即启动失败。
 	MaxConns int // OPS_DB_MAX_CONNS，默认 16
+	// MaxVersionGap W11-6 跨版本拒启闸门的"允许落后版本数"：DB schema 落后
+	// 本二进制 ≤ 本值时放行 + WARNING，超过即拒启（闸门见 cmd/opscopilot
+	// version.go startupSchemaGate）。默认 3——三个迁移片段的 schema 漂移内
+	// 服务仍可按旧语义读写；再远宁拒勿猜。
+	MaxVersionGap int // OPS_MAX_VERSION_GAP，默认 3
 }
 
 // SecuritySection 安全门禁（D1/D2 决策）：监听地址、写密钥、豁免与跨源白名单。
@@ -454,6 +459,12 @@ const (
 	// 二条；pgx 默认 max(4,NumCPU) 在并发下易耗尽。
 	DefaultDBMaxConns = 16
 
+	// DefaultMaxVersionGap W11-6 跨版本闸门默认：允许 DB schema 落后二进制
+	// 至多 3 个版本（放行 + WARNING）；超过即拒启。取值依据：单周迭代节奏
+	// 下 3 个迁移 ≈ 一次发布周期的漂移上界，再大就不是"稍后 upgrade"而是
+	// "跑错了对"。
+	DefaultMaxVersionGap = 3
+
 	DefaultConnectorInterval = 30 * time.Second
 	DefaultConnectorTimeout  = 30 * time.Second
 
@@ -587,6 +598,7 @@ func Defaults() *Config {
 	c.Redis.Alert = RedisConfig{Addr: DefaultAlertRedisAddr, Role: RedisAlert}
 	c.Redis.Cache = RedisConfig{Addr: DefaultCacheRedisAddr, Role: RedisCache}
 	c.DB.MaxConns = DefaultDBMaxConns
+	c.DB.MaxVersionGap = DefaultMaxVersionGap
 	c.Security.ListenAddr = DefaultListenAddr
 	c.Connector.Interval = DefaultConnectorInterval
 	c.Connector.OpTimeout = DefaultConnectorTimeout

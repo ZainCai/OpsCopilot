@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -40,6 +41,14 @@ func newHTTPServer(m config.MetricsSection, addr string, h http.Handler) *http.S
 }
 
 func main() {
+	// W11-6 子命令分流：`opscopilot upgrade [--dry-run]` 跑 schema 升级后退出；
+	// 无参（默认）与其他参数 = server 模式，行为与 W11-6 之前一致（零变化）。
+	upgrading, dryRun, migrationsPath, usage := parseUpgradeArgs(os.Args[1:])
+	if usage != "" {
+		fmt.Fprintf(os.Stderr, "%s\n", usage)
+		os.Exit(2)
+	}
+
 	// 双 Redis 实例约束（v1.2 C2/P1-1）在启动期强制。配置一次装载：
 	// 全仓 OPS_*/REDIS_* 只在这里读取；非法值聚合报错、拒绝启动（#2）。
 	cfg, err := config.Load()
@@ -48,8 +57,44 @@ func main() {
 		os.Exit(1)
 	}
 
+	if upgrading {
+		if cfg.DB.DSN == "" {
+			fmt.Fprintln(os.Stderr, "upgrade: OPS_DB_DSN 未设置——无库可升（内存降级形态没有 schema 版本可言）")
+			os.Exit(1)
+		}
+		if err := runUpgrade(upgradeOptions{
+			DSN:           cfg.DB.DSN,
+			MigrationsDir: migrationsPath,
+			BackupDir:     "backups",
+			DryRun:        dryRun,
+			MaxVersion:    SchemaMaxVersion,
+			Out:           os.Stdout,
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "upgrade 失败: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	logger := log.New(os.Stdout, "opscopilot ", log.LstdFlags|log.LUTC)
 	logger.Printf("config validated (dual-redis enforced)")
+
+	// W11-6 跨版本拒启闸门（矩阵与降级取向见 version.go 文件头）：有 DSN 才查
+	// schema_migrations；DB 不可达只 WARNING 不拦（与下方 pg sink 缺席降级同
+	// 一条哲学线），真版本错配才 FATAL 退出——错误信息直接给出 opscopilot
+	// upgrade / OPS_MAX_VERSION_GAP 出路。
+	if cfg.DB.DSN != "" {
+		gateCtx, gateCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		err := startupSchemaGate(gateCtx, cfg.DB.DSN, SchemaMaxVersion, cfg.DB.MaxVersionGap,
+			querySchemaVersion, logger.Printf)
+		gateCancel()
+		if err != nil {
+			logger.Printf("FATAL: %v", err)
+			os.Exit(1)
+		}
+	} else {
+		logger.Printf("schema gate: skipped (no OPS_DB_DSN — in-memory degrade; upgrade/cross-version guard need a DB)")
+	}
 
 	// W3 装配：拓扑引擎 + 发现入口（TopologySink）+ 变更事件库 + webhook。
 	// TopologySink 同时实现 connector.Sink——W4 起它既是 webhook 的变更库，
@@ -343,6 +388,32 @@ func main() {
 	}
 	<-done
 	logger.Printf("bye")
+}
+
+// parseUpgradeArgs W11-6 子命令参数分流。返回 (是否 upgrade, --dry-run,
+// 迁移目录, 用法错误信息)。非 upgrade 首参一律按 server 模式放行——与
+// W11-6 之前"参数被忽略"的既有行为逐字节一致（默认无参 = server 零变化）。
+func parseUpgradeArgs(args []string) (upgrading, dryRun bool, migrationsPath, usage string) {
+	if len(args) == 0 || args[0] != "upgrade" {
+		return false, false, "migrations", ""
+	}
+	migrationsPath = "migrations"
+	for i := 1; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--dry-run":
+			dryRun = true
+		case a == "--path" && i+1 < len(args):
+			i++
+			migrationsPath = args[i]
+		case strings.HasPrefix(a, "--path="):
+			migrationsPath = strings.TrimPrefix(a, "--path=")
+		default:
+			return true, dryRun, migrationsPath,
+				"用法: opscopilot upgrade [--dry-run] [--path <迁移目录，默认 migrations>]"
+		}
+	}
+	return true, dryRun, migrationsPath, ""
 }
 
 // onOffLabel 启动日志用的开关文案（决策 2 / R8：auto-create）。

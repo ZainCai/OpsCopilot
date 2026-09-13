@@ -25,6 +25,9 @@ const (
 
 	EnvDBDSN      = "OPS_DB_DSN"
 	EnvDBMaxConns = "OPS_DB_MAX_CONNS"
+	// EnvMaxVersionGap W11-6 跨版本拒启闸门：server 启动允许 DB schema 落后
+	// 二进制的最大版本数（默认 3；超过即拒启，≤ 默认值放行 + WARNING）。
+	EnvMaxVersionGap = "OPS_MAX_VERSION_GAP"
 
 	EnvListenAddr           = "OPS_LISTEN_ADDR"
 	EnvWebhookToken         = "OPS_WEBHOOK_TOKEN"
@@ -135,6 +138,7 @@ func LoadFrom(lookup LookupFunc) (*Config, error) {
 
 	c.DB.DSN = p.str(EnvDBDSN)
 	c.DB.MaxConns = p.posInt(EnvDBMaxConns, DefaultDBMaxConns)
+	c.DB.MaxVersionGap = p.posInt(EnvMaxVersionGap, DefaultMaxVersionGap)
 
 	c.Security.ListenAddr = p.strOr(EnvListenAddr, DefaultListenAddr)
 	c.Security.WebhookToken = p.raw(EnvWebhookToken) // 令牌不 Trim：原样比对
