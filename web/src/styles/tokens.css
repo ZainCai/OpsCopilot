@@ -1,6 +1,6 @@
-/* ===== 设计令牌 —— 从 cmd/opscopilot/console.html 现网 CSS 抽出 =====
-   与内嵌页保持同一皮肤口径（EagleOps 原型规范适配版）：
-   暗色默认 + 浅色跟随系统；改令牌只改这一处。 */
+/* ===== 设计令牌 —— 对齐 console_source_sample 原型规范（EagleOps） =====
+   暗色默认 + 浅色双通道：系统跟随（media）为默认，[data-theme] 为手动覆盖钩子
+   （当前无切换 UI，供测试与后续设置页使用）；改令牌只改这一处。 */
 :root {
   --font-sans: "IBM Plex Sans", "Noto Sans SC", -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
   --font-mono: "IBM Plex Mono", "SF Mono", Consolas, "Courier New", monospace;
@@ -16,23 +16,48 @@
   --text: #f1f5f9;
   --text-2: #94a3b8;
   --text-3: #64748b;
-  --brand: #6366f1;
+  --brand: #6366f1;          /* 结构性元素专用 */
   --brand-ink: #ffffff;
+  --ai: #8b5cf6;             /* AI 语境（结论/助手气泡/追问入口） */
   --ok: #22c55e;
   --warn: #f59e0b;
   --crit: #ef4444;
   --info: #3b82f6;
-  --radius: 10px;
+  --rootc: #dc2626;          /* 根因标注（拓扑红环/徽标，比 crit 深一档） */
+
+  --side-w: 256px;           /* 原型口径 240–280px */
   --row-h: 44px;
   --pad: 18px;
+  --radius: 10px;
   --shadow: 0 12px 34px rgba(2, 6, 18, 0.5);
+  --mask: rgba(4, 9, 20, 0.62);
 }
+
+/* 浅色（系统跟随，默认行为不变；:not([data-theme]) 让手动通道优先） */
 @media (prefers-color-scheme: light) {
-  :root {
+  :root:not([data-theme]) {
     --bg: #eef2f7; --bg-soft: #f4f7fb; --panel: #ffffff; --panel-2: #f6f8fc;
     --raised: #ffffff; --line: #dbe3ee; --line-soft: #e6ecf4;
     --text: #0f172a; --text-2: #475569; --text-3: #94a3b8;
-    --brand: #4f46e5; --ok: #16a34a; --warn: #d97706; --crit: #dc2626; --info: #2563eb;
+    --brand: #4f46e5; --ai: #7c3aed;
+    --ok: #16a34a; --warn: #d97706; --crit: #dc2626; --info: #2563eb; --rootc: #b91c1c;
     --shadow: 0 8px 26px rgba(30, 42, 60, 0.14);
+    --mask: rgba(24, 34, 48, 0.42);
   }
 }
+
+/* 浅色（手动覆盖通道） */
+[data-theme="light"] {
+  --bg: #eef2f7; --bg-soft: #f4f7fb; --panel: #ffffff; --panel-2: #f6f8fc;
+  --raised: #ffffff; --line: #dbe3ee; --line-soft: #e6ecf4;
+  --text: #0f172a; --text-2: #475569; --text-3: #94a3b8;
+  --brand: #4f46e5; --ai: #7c3aed;
+  --ok: #16a34a; --warn: #d97706; --crit: #dc2626; --info: #2563eb; --rootc: #b91c1c;
+  --shadow: 0 8px 26px rgba(30, 42, 60, 0.14);
+  --mask: rgba(24, 34, 48, 0.42);
+}
+
+/* 强调色/密度变体（原型令牌位，暂无切换 UI；dark 即 :root 默认不重复声明） */
+[data-accent="sky"] { --brand: #0ea5e9; }
+[data-accent="teal"] { --brand: #14b8a6; }
+[data-density="compact"] { --row-h: 34px; --pad: 12px; }
