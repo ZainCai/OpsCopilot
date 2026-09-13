@@ -132,6 +132,18 @@ curl -s '.../timeline?limit=50&cursor=<next_cursor>'                        # �
 - `partial=true` + `missing` 表达降级：依赖源缺席（无 DSN ⇒ 告警源、降噪关闭 ⇒ 变更无法归因、无审计 ⇒ 处置源）或查询失败/截断时，**可用源照常归并返回 200**，缺席原因逐源透出；单条源故障不拖垮整页；
 - 前端落 `web/` 事件详情区（console.html 已冻结），kind 徽标 + 游标"加载更多"。
 
+### 全局审计检索（W12 审计解锁包）
+
+`GET /api/v1/audit` 人工与自动动作的统一检索面（控制台 `#/audit` 视图）：`actor` 与 `action` 精确过滤（action 封闭集合 = `cmd/opscopilot/audit.go` 常量，与 incident_audit CHECK 同源，本期不扩）、`since`/`until` RFC3339 半开时间窗 `[since,until)`、`limit`（默认 200 上限 1000）、keyset 游标 `cursor`（`(occurred_at,id)` 时间倒序，翻页不重不漏）。响应 `{entries[{incident_id,action,actor,occurred_at,summary}],count,next_cursor,persistence,partial_hint?}`——`summary` 由后端按各 action 的既定 detail 键提取（缺键回退 detail 首 120 字符）；无 DSN 走内存镜像并如实标 `persistence=memory` + `partial_hint`。读路径鉴权口径同 `GET /incidents/{id}/audit`（无 Token，bind loopback-only）；后端故障 500 脱敏（D5/D1），未知 action / 坏游标 400。读路径索引见 migration 000021；"查审计"计数指标 `opscopilot_audit_reads_total{source}`（哈希链独立审计面属 M3，ADR-005）。
+
+```bash
+curl -s 'http://127.0.0.1:8080/api/v1/audit?actor=zhang&action=rca&since=2026-09-12T00:00:00%2B08:00&limit=50'
+curl -s '.../api/v1/audit?limit=50&cursor=<next_cursor>'   # 游标续页（空=到末尾）
+# => {"entries":[{"incident_id":"INC-…","action":"rca","actor":"zhang",
+#      "occurred_at":"…","summary":"根因 1 条 · findings 4 · 用时 1200ms"}],
+#     "count":1,"next_cursor":"","persistence":"timescaledb"}
+```
+
 ### 事件 SLA 时钟（F-04 / W10-2）与运维 KPI（F-07 / W10-3）
 
 **SLA**：目标时长按严重级取默认（`OPS_SLA_CRITICAL_MINUTES=60` / `WARNING=240` / `INFO=1440`），单事件可经 REST 覆盖（建单/流转体 `sla_minutes`，0=按级默认）。`GET /incidents[/{id}]` 返回**只读派生**三字段（不落冗余列）：`sla_deadline = created_at + 有效目标`，`sla_remaining_seconds`（可为负）与 `sla_breached` 未闭环按 now、**终态（resolved，含被合并）冻结在闭环时刻**。M2 只记录与展示，不驱动自动升级。迁移 000019 同时补 `acked_at` 首戳（只落一次，MTTA 数据源）。
@@ -198,6 +210,7 @@ opscopilot_autoattach_total{outcome="attached"|"conflict"|"skipped"}  W10-6 自�
 opscopilot_rca_requests_total{outcome} / _rca_duration_seconds / _rca_autotrigger_dropped_total
                                                                      按需 RCA 请求/耗时/自动触发队满丢弃
 opscopilot_llm_requests_total{outcome} / _session_llm_*              llm-gateway 与复盘会话出站请求（降级面可计数）
+opscopilot_audit_reads_total{source="global"|"incident"}             查审计读取尝试计数（W12 解锁包；本期"查审计"留痕替代——audit_read 动作 + 哈希链属 M3/ADR-005）
 opscopilot_mem_entries{store} / _mem_evictions_total{store}          内存有界结构规模/淘汰（#6）
 opscopilot_is_leader                                                 本实例 leader 态 0/1（ADR-012）
 ```

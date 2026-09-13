@@ -31,3 +31,11 @@ v1.0 方案声称审计日志"WORM 不可篡改"，却又把审计与业务数�
 ## 交叉检查提醒
 
 审计埋点统一在 api-gateway 完成，**模块内禁止自行上报**（与计量同理），否则口径会漂移。
+
+---
+
+> **2026-09-13 注记（W12 审计解锁包）**：全局审计视图先行落地——`GET /api/v1/audit`
+> （ListPage 双 store 游标分页 + migration 000021 读路径索引）与控制台 `#/audit`
+> 检索页；"查审计"留痕本期由指标 `opscopilot_audit_reads_total{source=global|incident}`
+> 计数替代。**独立审计实例、哈希链防篡改与读路径 audit_read 动作留痕仍属 M3**，
+> 本决策与理由不变（§5 迁移表与 web/README 同步更新）。

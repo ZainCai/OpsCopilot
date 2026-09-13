@@ -43,6 +43,7 @@ Base：`/api/v1`。读路径无鉴权（受 CORS/监听门禁保护，ADR-009）
 | `/api/v1/incidents/{id}` | GET | 单事件快照 | — | rest_incidents.go |
 | `/api/v1/incidents/{id}/duplicates` | GET | L2 疑似重复候选（只提示不自动合并） | — | rest_incidents.go |
 | `/api/v1/incidents/{id}/audit` | GET | 单事件审计轨迹（append-only + 哈希链，ADR-005） | — | rest_incidents.go |
+| `/api/v1/audit` | GET | 全局审计检索：`actor`、`action`（封闭集合，未知 400）、`since`/`until`（RFC3339，半开 `[since,until)`）、`limit`（默认 200 上限 1000）、`cursor`（keyset，坏 400）→ `{entries,count,next_cursor,persistence,partial_hint?}`，时间倒序；行含后端提取的 `summary`（W12 审计解锁包） | — | rest_audit.go |
 | `/api/v1/incidents/{id}/merge` | POST | `{target_id,actor}` 人工合并 | ✅ | rest_incidents.go |
 | `/api/v1/incidents/{id}/transition` | POST | `{to,actor}` 状态机流转 | ✅ | rest_stream.go |
 | `/api/v1/alerts` | GET | 影子判决流（alert_event source='shadow'）`limit`（默认 200、上限 1000）→ `{alerts,count}`，含知识库富化字段 | — | rest_alerts.go |
@@ -82,7 +83,7 @@ Base：`/api/v1`。读路径无鉴权（受 CORS/监听门禁保护，ADR-009）
 | 已完成 | 告警中心、事件（含 SSE/写操作）、降噪总览（簇+KPI+详情） | — |
 | 已完成（09-13，W11） | 拓扑画布（自绘 SVG+分桶+根因高亮/图例）、RCA 区块（pipeline/证据链/ai-card）、AI 复盘抽屉、Runbook 台账、SLA 时钟、KPI 行 | 端点已备 |
 | 下一批 | 设置·通知渠道 CRUD + 表单校验（现为 TODO 骨架；`.switch` 口径见 web/README） | OPS_DB_DSN |
-| 二期 | 全局审计视图 | **阻塞**：待后端新增审计列表端点（ADR-005） |
+| 已完成（09-13，W12） | 全局审计视图：后端 `GET /api/v1/audit`（ListPage 双 store 契约 + 000021 索引 + audit_reads 计数）+ `#/audit` 实装（过滤条/游标加载更多/事件 ID 深链 `#/incidents?id=` 选中详情） | —（原"阻塞 ADR-005"已解除：本期只开读面，独立实例/哈希链/audit_read 留痕仍属 M3） |
 | 二期候选 | 原型独有页（自动修复 remediation、命令面板/搜索） | 待后端能力立项（ADR-003 单执行出口未放开） |
 | 收口 | web/ 功能超集 + 验收通过后，另立 ADR 移除 go:embed 通道 | 全部视图迁移完毕 |
 
