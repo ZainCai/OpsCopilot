@@ -23,7 +23,7 @@
 | overview 降噪总览 | 活跃簇 KPI×4、簇表格（state 过滤）、簇详情、拓扑图（SVG，节点置信度着色、>300 分桶聚合、节点邻域+时间切片+24h 变更） | `#/overview`（已迁移，拓扑图除外）+ `#/topology`（占位） |
 | alerts 告警中心 | 影子判决流表格 + 知识库富化详情（级别/摘要/指标阈值/影响/措施） | `#/alerts`（已迁移） |
 | events 事件 | KPI×4、状态/来源过滤、游标分页、人工建单、详情（转移/疑似重复合并/审计轨迹）、Token 输入、SSE 实时+30s 轮询降级 | `#/incidents`（已迁移） |
-| settings 设置 | 通知渠道 CRUD（generic/feishu/wecom、最低严重级路由、启停、内置 console 兜底不可删） | `#/settings`（占位，端点已备） |
+| settings 设置 | 通知渠道 CRUD（generic/feishu/wecom、最低严重级路由、启停、内置 console 兜底不可删） | `#/settings`（已实装：列表/新增校验/软开关/删除，见 §5） |
 
 ## 2. API 契约清单（唯一事实来源：`cmd/opscopilot/rest_*.go` 的 `Register()`）
 
@@ -82,7 +82,7 @@ Base：`/api/v1`。读路径无鉴权（受 CORS/监听门禁保护，ADR-009）
 |---|---|---|
 | 已完成 | 告警中心、事件（含 SSE/写操作）、降噪总览（簇+KPI+详情） | — |
 | 已完成（09-13，W11） | 拓扑画布（自绘 SVG+分桶+根因高亮/图例）、RCA 区块（pipeline/证据链/ai-card）、AI 复盘抽屉、Runbook 台账、SLA 时钟、KPI 行 | 端点已备 |
-| 下一批 | 设置·通知渠道 CRUD + 表单校验（现为 TODO 骨架；`.switch` 口径见 web/README） | OPS_DB_DSN |
+| 已完成（09-13，W9-2 收尾） | 设置·通知渠道 CRUD + 表单校验：`#/settings` 实装（列表含禁用 + URL 脱敏、新增表单前端校验逐条镜像后端 ValidateChannel、`.switch` 软开关 label+隐藏 checkbox、删除确认、内置 console 兜底行不给删除）；后端零 Go 改动；"可选超时"后端 REST 无字段（DisallowUnknownFields），表单不提供 | OPS_DB_DSN（灰度 8090 真链路冒烟通过） |
 | 已完成（09-13，W12） | 全局审计视图：后端 `GET /api/v1/audit`（ListPage 双 store 契约 + 000021 索引 + audit_reads 计数）+ `#/audit` 实装（过滤条/游标加载更多/事件 ID 深链 `#/incidents?id=` 选中详情） | —（原"阻塞 ADR-005"已解除：本期只开读面，独立实例/哈希链/audit_read 留痕仍属 M3） |
 | 二期候选 | 原型独有页（自动修复 remediation、命令面板/搜索） | 待后端能力立项（ADR-003 单执行出口未放开） |
 | 收口 | web/ 功能超集 + 验收通过后，另立 ADR 移除 go:embed 通道 | 全部视图迁移完毕 |
@@ -98,4 +98,5 @@ puppeteer-core 驱动系统 Edge（零浏览器下载），5 视口（1920/1366/
 × 6 路由逐页截图并断言侧栏宽度、横向溢出、HTTP 错误（`/rca(/session)` 503 属设计内
 降级不计错）；产物落 `docs/reviews/web-walkthrough-<yyyymmdd>/`（PNG + report.json）。
 用法与前置见 `web/README.md`「双分辨率走查」节；当前基线 30/30 全绿
-（`545d1f8`，2026-09-13）。
+（`545d1f8`，2026-09-13；W9-2 设置页实装批复跑确认 30/30，证据刷新于
+`web-walkthrough-20260913/`）。

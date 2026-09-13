@@ -333,6 +333,16 @@ body { font-family: var(--font-sans); background: var(--bg); color: var(--text);
 .switch.on { background: var(--brand); }
 .switch.on::after { transform: translateX(14px); background: var(--brand-ink); }
 
+/* 设置·通知渠道（W9-2 web 实装批）：label 包裹视觉隐藏的 checkbox + .switch 呈现
+   （原型 .switch 口径：checkbox 语义/键盘可达零改，仅藏外观） */
+.sw-l { position: relative; display: inline-flex; align-items: center; cursor: pointer; }
+.sw-l input { position: absolute; opacity: 0; width: 0; height: 0; pointer-events: none; }
+/* 表单校验就地标红（与后端 ValidateChannel 规则逐条对齐，错误文本随字段） */
+.form-row input.bad, .form-row select.bad { border-color: var(--crit); }
+.field-err { grid-column: 2; color: var(--crit); font-size: 11.5px; }
+/* URL 脱敏单元格（对齐原型列宽口径：定宽省略号，防长 URL 撑表横向溢出） */
+.ch-url { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* chip 语义色板（原型口径；既有 --open/--acked/--resolved 保留） */
 .chip--ok   { color: var(--ok);   border-color: color-mix(in srgb, var(--ok) 35%, transparent);   background: color-mix(in srgb, var(--ok) 8%, transparent); }
 .chip--warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 35%, transparent); background: color-mix(in srgb, var(--warn) 8%, transparent); }

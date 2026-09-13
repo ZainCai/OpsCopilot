@@ -380,6 +380,14 @@ export interface ChannelsResponse {
   channels: NotifyChannel[];
   warning?: string;
 }
+/** POST upsert / POST enabled / DELETE 共用回包（rest_notify.go reloadAndReport）：
+ *  写成功后热重载注册表，active_channels = 重载后启用渠道数；
+ *  warning 非空 = 已落库但重载失败（提示"重启或下次写入补上"，必须透出）。 */
+export interface ChannelWriteResponse {
+  status: string;
+  active_channels: number;
+  warning?: string;
+}
 
 // ---------- SSE（GET /api/v1/events/stream，事件名 "incident"） ----------
 export interface SSEIncidentMessage {

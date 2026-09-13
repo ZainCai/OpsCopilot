@@ -78,7 +78,7 @@ src/
 | `#/alerts` 告警中心 | view-alerts / 原型 pages/alerts.jsx | ✅ 已迁移（GET /alerts + 结构化详情） |
 | `#/incidents` 事件 | view-events / 原型 pages/incidents.jsx+incident.jsx | ✅ 已迁移（列表/游标/详情/建单/流转/合并/SSE+轮询降级） |
 | `#/topology` 拓扑 | view-overview 的拓扑图面板 / 原型 pages/topology.jsx | ✅ 已实装（W11-3：自绘 SVG/HTML 分层环形画布、hover tip/邻接边高亮、根因链路红环+一跳虚线、节点 24h 变更、>300 分桶聚合） |
-| `#/settings` 设置·通知渠道 | view-settings / 原型 pages/settings.jsx | ⬜ 占位（端点已备：GET/POST /notify/channels、enabled、DELETE） |
+| `#/settings` 设置·通知渠道 | view-settings / 原型 pages/settings.jsx | ✅ 已实装（W9-2 收尾：列表含禁用 + URL 脱敏（只留 scheme+host+首段 path，凭据段/query 不进 DOM）、新增表单校验逐条镜像后端 ValidateChannel（名称正则/保留名 console/kind 与 min_severity 封闭集/URL 协议白名单且大小写敏感+≤2048，就地标红）、`.switch` 软开关（label+隐藏 checkbox，失败回滚+横幅）、删除确认（new-incident 不再送达）、内置 console 兜底行不给删除、503 变灰同族降级、热重载 warning 透出；后端零 Go 改动，"可选超时"REST 无字段不提供） |
 | `#/audit` 全局审计 | （内嵌页无；原型无） | ✅ 已实装（W12 审计解锁包：GET /api/v1/audit 全局检索——actor/action/时间窗 24h·7d·全部 过滤、动作 chip 徽章、游标"加载更多"、事件 ID 深链 `#/incidents?id=` 选中详情；persistence=memory 如实降级横幅；哈希链独立审计面仍属 M3/ADR-005） |
 | — RCA 根因分析（事件详情区块） | 原型 pages/rca.jsx | ✅ 已实装（W11-2：GET /incidents/{id}/rca 六步状态条、ADR-007 三段置信度根因列表、findings 折叠 + ?all=1 全量、conclusion pending 明示） |
 | — AI 复盘问答（事件详情抽屉） | （原型无；二期 #7 S2 端点） | ✅ 只读版（W11-5：GET/POST /incidents/{id}/rca/session，user/assistant 气泡 + pending 徽标；OPS_SESSION=off 探测后入口隐藏；无任何执行入口） |
