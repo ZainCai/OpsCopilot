@@ -29,6 +29,7 @@ import (
 	pb "opscopilot/internal/contracts/pb"
 	"opscopilot/internal/incident"
 	"opscopilot/internal/notify"
+	"opscopilot/internal/runbook"
 	"opscopilot/internal/sessionstore"
 	"opscopilot/internal/topology"
 	"opscopilot/pkg/memguard"
@@ -84,6 +85,8 @@ type Assembly struct {
 	NotifyReg *notify.Registry
 	// Channels 渠道配置存储（nil = 无 DB，渠道配置不可管）。
 	Channels *ChannelStore
+	// Runbooks Runbook 记录版 store（W11-4 F-12；nil = 无 DB，runbook 端点 503）。
+	Runbooks *runbook.Store
 	// Metrics 指标集与 /metrics 暴露（W9-4：告警链路延迟打点）。
 	Metrics *AppMetrics
 	// Leader 选主与 leader 状态源（#11/ADR-012，实现见 leader.go）。装配只
@@ -344,6 +347,13 @@ func NewAssembly(logger connector.Logger, cfg *config.Config) (*Assembly, error)
 			}
 		}
 	}
+	// W11-4（F-12）Runbook 记录版：手册库/挂载/执行记录三表纯 PG（无内存兜底，
+	// 与 ChannelStore 同纪）；无 DB 时不接线 → runbook 端点显式 503。
+	// 无功能开关：只记不执行、零链路侵入（排期口径），DB 在即可用。
+	var rbStore *runbook.Store
+	if pgPool != nil {
+		rbStore = runbook.NewStore(pgPool, tenant)
+	}
 	gate := attachNoiseGate(noiseEngine, notifyReg, pgPool, logf)
 	// W9-4：Gate 的实时计数直接读运行时状态暴露成 gauge——不在第二条
 	// 路径上重复记账（两处记账必然漂移；真相源只有 notify_gate_stats
@@ -397,6 +407,7 @@ func NewAssembly(logger connector.Logger, cfg *config.Config) (*Assembly, error)
 		Events:    hub,
 		NotifyReg: notifyReg,
 		Channels:  chStore,
+		Runbooks:  rbStore,
 		Metrics:   appMetrics,
 		Leader:    leader,
 		audit:     audit,
@@ -406,6 +417,8 @@ func NewAssembly(logger connector.Logger, cfg *config.Config) (*Assembly, error)
 	// 渠道 CRUD 后热生效：REST 写入配置即回调重载注册表（否则新渠道要
 	// 重启才生效——"配置改了没反应"是运维最恨的一类 bug）。
 	rest.SetChannels(asm.Channels, asm.reloadNotifyChannels)
+	// W11-4：Runbook 记录版接线（nil = 无 DB，端点显式 503，降级不报错）。
+	rest.SetRunbook(asm.Runbooks)
 
 	// W10-6 簇→事件生产自动挂簇（OPS_AUTOATTACH，config.Validate 已保证
 	// on ⇒ 降噪启用且 enforce——挂点只在 enforce 判决 new-incident 出口）。

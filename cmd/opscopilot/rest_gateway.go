@@ -22,6 +22,7 @@ import (
 	"google.golang.org/grpc/status"
 	"opscopilot/internal/config"
 	"opscopilot/internal/incident"
+	"opscopilot/internal/runbook"
 )
 
 // RESTLimits 网关侧的时间窗与请求体上限（#10 去魔法数字：值唯一来自
@@ -76,7 +77,13 @@ type RESTGateway struct {
 	// session RCA 复盘会话编排器（二期池 #7 S2；nil = OPS_SESSION=off，
 	// GET/POST /api/v1/incidents/{id}/rca/session 显式 503）。
 	session *SessionOrchestrator
+	// runbooks Runbook 记录版 store（W11-4 F-12；nil = 无 DB，runbook 端点
+	// 显式 503——对齐 RCA 降级口径：可诊断的关闭态好过静默的空列表）。
+	runbooks *runbook.Store
 }
+
+// SetRunbook 挂载 Runbook store（装配期调用；nil = 不接线，端点显式 503）。
+func (g *RESTGateway) SetRunbook(s *runbook.Store) { g.runbooks = s }
 
 // SetRCA 挂载按需 RCA 编排器（装配期调用；nil = 关闭，端点显式 503）。
 func (g *RESTGateway) SetRCA(o *RCAOrchestrator) { g.rca = o }
@@ -184,6 +191,15 @@ func (g *RESTGateway) Register(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/incidents/{id}/timeline", h)
 	mux.HandleFunc("POST /api/v1/incidents/{id}/merge", g.handleMergeIncident)
 	mux.HandleFunc("POST /api/v1/incidents/{id}/transition", g.handleTransitionIncident)
+	// W11-4（F-12）Runbook 记录版：手册库 + 事件挂载 + 执行记录（只记不执行，
+	// handler 与契约见 rest_runbook.go / docs/前端契约-runbook.md）。
+	mux.Handle("GET /api/v1/runbooks", h)
+	mux.HandleFunc("POST /api/v1/runbooks", g.handleRunbookCreate)
+	mux.Handle("GET /api/v1/incidents/{id}/runbooks", h)
+	mux.HandleFunc("POST /api/v1/incidents/{id}/runbooks", g.handleIncidentRunbookMount)
+	mux.HandleFunc("DELETE /api/v1/incidents/{id}/runbooks/{rid}", g.handleIncidentRunbookUnmount)
+	mux.Handle("GET /api/v1/incidents/{id}/runbooks/{rid}/executions", h)
+	mux.HandleFunc("POST /api/v1/incidents/{id}/runbooks/{rid}/executions", g.handleIncidentRunbookExecutionAppend)
 	mux.HandleFunc("GET /api/v1/auth/status", g.handleAuthStatus)
 	// W11 实时推送：SSE 事件流（控制台事件页订阅）。
 	mux.Handle("GET /api/v1/events/stream", h)
@@ -216,6 +232,9 @@ func (g *RESTGateway) route(w http.ResponseWriter, r *http.Request) {
 	case "/api/v1/incidents":
 		// POST /api/v1/incidents 由 mux 精确模式（method+path）接管，不会进到这里。
 		g.handleIncidents(w, r)
+	case "/api/v1/runbooks":
+		// POST /api/v1/runbooks 同上由精确模式接管；这里只会是 GET（手册库列表）。
+		g.handleRunbookList(w, r)
 	case "/api/v1/kpis":
 		g.handleKPIs(w, r)
 	default:
@@ -225,6 +244,13 @@ func (g *RESTGateway) route(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if id := r.PathValue("id"); id != "" {
+			// W11-4 二级路径参数 {rid}：executions 读（GET 走 h 包装进这里；
+			// POST 记执行与 DELETE 解挂由 mux 精确模式接管）。必须先于
+			// {id} 单参数分发——executions 路径同时携带 id 与 rid。
+			if rid := r.PathValue("rid"); rid != "" && strings.HasSuffix(r.URL.Path, "/executions") {
+				g.handleIncidentRunbookExecutionsList(w, r)
+				return
+			}
 			switch {
 			case strings.HasSuffix(r.URL.Path, "/duplicates"):
 				g.handleDuplicates(w, r)
@@ -232,6 +258,8 @@ func (g *RESTGateway) route(w http.ResponseWriter, r *http.Request) {
 				g.handleAudit(w, r)
 			case strings.HasSuffix(r.URL.Path, "/timeline"):
 				g.handleIncidentTimeline(w, r)
+			case strings.HasSuffix(r.URL.Path, "/runbooks"):
+				g.handleIncidentRunbooksList(w, r)
 			case strings.HasSuffix(r.URL.Path, "/rca/session"):
 				g.handleSessionRead(w, r) // 二期池 #7：复盘会话读（懒恢复在编排器内）
 			case strings.HasSuffix(r.URL.Path, "/rca"):
