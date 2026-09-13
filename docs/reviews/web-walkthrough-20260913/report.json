@@ -1,0 +1,276 @@
+{
+  "base": "http://[::1]:5173",
+  "day": "20260913",
+  "results": [
+    {
+      "viewport": "1920",
+      "route": "overview",
+      "sidebarW": 256,
+      "navGroupVisible": true,
+      "hScroll": 0,
+      "shot": "1920-overview.png",
+      "errors": []
+    },
+    {
+      "viewport": "1920",
+      "route": "alerts",
+      "sidebarW": 256,
+      "navGroupVisible": true,
+      "hScroll": 0,
+      "shot": "1920-alerts.png",
+      "errors": []
+    },
+    {
+      "viewport": "1920",
+      "route": "incidents",
+      "sidebarW": 256,
+      "navGroupVisible": true,
+      "hScroll": 0,
+      "shot": "1920-incidents.png",
+      "errors": []
+    },
+    {
+      "viewport": "1920",
+      "route": "topology",
+      "sidebarW": 256,
+      "navGroupVisible": true,
+      "hScroll": 0,
+      "shot": "1920-topology.png",
+      "errors": []
+    },
+    {
+      "viewport": "1920",
+      "route": "settings",
+      "sidebarW": 256,
+      "navGroupVisible": true,
+      "hScroll": 0,
+      "shot": "1920-settings.png",
+      "errors": []
+    },
+    {
+      "viewport": "1920",
+      "route": "audit",
+      "sidebarW": 256,
+      "navGroupVisible": true,
+      "hScroll": 0,
+      "shot": "1920-audit.png",
+      "errors": []
+    },
+    {
+      "viewport": "1366",
+      "route": "overview",
+      "sidebarW": 256,
+      "navGroupVisible": true,
+      "hScroll": 0,
+      "shot": "1366-overview.png",
+      "errors": []
+    },
+    {
+      "viewport": "1366",
+      "route": "alerts",
+      "sidebarW": 256,
+      "navGroupVisible": true,
+      "hScroll": 0,
+      "shot": "1366-alerts.png",
+      "errors": []
+    },
+    {
+      "viewport": "1366",
+      "route": "incidents",
+      "sidebarW": 256,
+      "navGroupVisible": true,
+      "hScroll": 0,
+      "shot": "1366-incidents.png",
+      "errors": []
+    },
+    {
+      "viewport": "1366",
+      "route": "topology",
+      "sidebarW": 256,
+      "navGroupVisible": true,
+      "hScroll": 0,
+      "shot": "1366-topology.png",
+      "errors": []
+    },
+    {
+      "viewport": "1366",
+      "route": "settings",
+      "sidebarW": 256,
+      "navGroupVisible": true,
+      "hScroll": 0,
+      "shot": "1366-settings.png",
+      "errors": []
+    },
+    {
+      "viewport": "1366",
+      "route": "audit",
+      "sidebarW": 256,
+      "navGroupVisible": true,
+      "hScroll": 0,
+      "shot": "1366-audit.png",
+      "errors": []
+    },
+    {
+      "viewport": "1180-rail",
+      "route": "overview",
+      "sidebarW": 64,
+      "navGroupVisible": false,
+      "hScroll": 0,
+      "shot": "1180-rail-overview.png",
+      "errors": []
+    },
+    {
+      "viewport": "1180-rail",
+      "route": "alerts",
+      "sidebarW": 64,
+      "navGroupVisible": false,
+      "hScroll": 0,
+      "shot": "1180-rail-alerts.png",
+      "errors": []
+    },
+    {
+      "viewport": "1180-rail",
+      "route": "incidents",
+      "sidebarW": 64,
+      "navGroupVisible": false,
+      "hScroll": 0,
+      "shot": "1180-rail-incidents.png",
+      "errors": []
+    },
+    {
+      "viewport": "1180-rail",
+      "route": "topology",
+      "sidebarW": 64,
+      "navGroupVisible": false,
+      "hScroll": 0,
+      "shot": "1180-rail-topology.png",
+      "errors": []
+    },
+    {
+      "viewport": "1180-rail",
+      "route": "settings",
+      "sidebarW": 64,
+      "navGroupVisible": false,
+      "hScroll": 0,
+      "shot": "1180-rail-settings.png",
+      "errors": []
+    },
+    {
+      "viewport": "1180-rail",
+      "route": "audit",
+      "sidebarW": 64,
+      "navGroupVisible": false,
+      "hScroll": 0,
+      "shot": "1180-rail-audit.png",
+      "errors": []
+    },
+    {
+      "viewport": "900",
+      "route": "overview",
+      "sidebarW": 64,
+      "navGroupVisible": false,
+      "hScroll": 0,
+      "shot": "900-overview.png",
+      "errors": []
+    },
+    {
+      "viewport": "900",
+      "route": "alerts",
+      "sidebarW": 64,
+      "navGroupVisible": false,
+      "hScroll": 0,
+      "shot": "900-alerts.png",
+      "errors": []
+    },
+    {
+      "viewport": "900",
+      "route": "incidents",
+      "sidebarW": 64,
+      "navGroupVisible": false,
+      "hScroll": 0,
+      "shot": "900-incidents.png",
+      "errors": []
+    },
+    {
+      "viewport": "900",
+      "route": "topology",
+      "sidebarW": 64,
+      "navGroupVisible": false,
+      "hScroll": 0,
+      "shot": "900-topology.png",
+      "errors": []
+    },
+    {
+      "viewport": "900",
+      "route": "settings",
+      "sidebarW": 64,
+      "navGroupVisible": false,
+      "hScroll": 0,
+      "shot": "900-settings.png",
+      "errors": []
+    },
+    {
+      "viewport": "900",
+      "route": "audit",
+      "sidebarW": 64,
+      "navGroupVisible": false,
+      "hScroll": 0,
+      "shot": "900-audit.png",
+      "errors": []
+    },
+    {
+      "viewport": "390-mobile",
+      "route": "overview",
+      "sidebarW": 64,
+      "navGroupVisible": false,
+      "hScroll": 0,
+      "shot": "390-mobile-overview.png",
+      "errors": []
+    },
+    {
+      "viewport": "390-mobile",
+      "route": "alerts",
+      "sidebarW": 64,
+      "navGroupVisible": false,
+      "hScroll": 0,
+      "shot": "390-mobile-alerts.png",
+      "errors": []
+    },
+    {
+      "viewport": "390-mobile",
+      "route": "incidents",
+      "sidebarW": 64,
+      "navGroupVisible": false,
+      "hScroll": 0,
+      "shot": "390-mobile-incidents.png",
+      "errors": []
+    },
+    {
+      "viewport": "390-mobile",
+      "route": "topology",
+      "sidebarW": 64,
+      "navGroupVisible": false,
+      "hScroll": 0,
+      "shot": "390-mobile-topology.png",
+      "errors": []
+    },
+    {
+      "viewport": "390-mobile",
+      "route": "settings",
+      "sidebarW": 64,
+      "navGroupVisible": false,
+      "hScroll": 0,
+      "shot": "390-mobile-settings.png",
+      "errors": []
+    },
+    {
+      "viewport": "390-mobile",
+      "route": "audit",
+      "sidebarW": 64,
+      "navGroupVisible": false,
+      "hScroll": 0,
+      "shot": "390-mobile-audit.png",
+      "errors": []
+    }
+  ]
+}

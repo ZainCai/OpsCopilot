@@ -88,11 +88,20 @@ src/
 
 端点契约与冻结声明详见 [`docs/前端分离说明-冻结console.md`](../docs/前端分离说明-冻结console.md)。
 
-## W11 手工验证步骤（RCA 区块 / 拓扑画布 / AI 抽屉 / Runbook 区块）
+## 双分辨率走查（自动化，已落地）
 
-> 排期 W11-3 验收项「双分辨率截图」：本工程开发环境无无头浏览器依赖（不为此
-> 强装 puppeteer/playwright），按下方步骤在真实浏览器双分辨率（≥1600px 宽 &
-> ≤960px 窄）人工走查一遍即视为验收；自动化截图留 W12 工具链评估。
+> 排期 W11-3 验收项「双分辨率截图」已由 `scripts/walkthrough.mjs` 自动化：
+> puppeteer-core + **系统 Edge**（零浏览器下载），5 视口（1920/1366/1180 图标轨/900/390）
+> × 6 路由逐页截图 + 侧栏宽度/横向溢出/HTTP 错误断言，`/rca(/session)` 的 503 视为
+> 设计内降级不计错。产物落 `docs/reviews/web-walkthrough-<yyyymmdd>/`（PNG + report.json）。
+
+```bash
+# 前置：后端在 8090（灰度实例）或自起；dev 代理指过去
+VITE_API_PROXY=http://127.0.0.1:8090 npx vite --port 5173 --strictPort &
+npm i -D puppeteer-core && node scripts/walkthrough.mjs
+```
+
+人工走查（RCA 区块 / 拓扑画布 / AI 抽屉 / Runbook 区块的交互深度项）仍按下述步骤补：
 
 前置：起后端（事件+拓扑+RCA 会话能力）——
 
