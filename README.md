@@ -77,11 +77,12 @@ export OPS_TEST_PG_DSN='postgres://opscopilot:opscopilot@localhost:5432/opscopil
 | `OPS_DB_DSN` | 空 = 内存降级 | TimescaleDB 真相源（事件/队列/审计/变更/渠道共池，D7 `OPS_DB_MAX_CONNS=16`） |
 | `OPS_NOISE_MODE` | `shadow` | **ADR-011 转正模式**：`shadow` 只标注不拦截；`enforce` 真拦截 + 放行通知；非法值启动失败。回退 = 改回 shadow 重启 |
 | `OPS_AUTOATTACH` | `off` | **W10-6 簇→事件生产自动挂簇**：`on`（须 enforce，Validate 强制）时 new-incident 判决自动建单 + `AttachCluster` 挂簇 + `attach_cluster` 审计；共簇冲突跳过计 `opscopilot_autoattach_total{outcome}`；建单幂等键与链路 A 同源不双建。详见 `.env.example` |
+| `OPS_INCIDENT_AUTOCREATE` | `off` | 链路 A 外部告警自动建单：**默认 off，转正见 [ADR-016](docs/adr/ADR-016-autoCreate转正与灰度.md)**——off 时只入 `ingest_queue` 排队不建单（影子期，可回放）；on 须随附调优参数 `OPS_INGEST_BATCH=500`/`OPS_INGEST_INTERVAL=1s`（默认参数端到端建单仅 ≈4 ev/s，容量基线 §2.2） |
 | `OPS_RCA` / `OPS_RCA_AUTO` | `on` / `off` | **ADR-014/二期池 #4**：按需根因分析 `GET /api/v1/incidents/{id}/rca`；`on` 时 critical 升级成功 → 异步自动 RCA（actor=auto） |
 | `OPS_LLM_ENDPOINT` 等 `OPS_LLM_*` | 空 = 禁用 | **ADR-015**：llm-gateway（OpenAI-compatible 单出口）接线 RCA conclude 与复盘会话；密钥绝不入库/入日志；超时预算 LLM ≤ RCA − 2s |
 | `OPS_SESSION` | `off` | **二期池 #7**：RCA 复盘会话 `GET/POST /api/v1/incidents/{id}/rca/session`（热态 alert-Redis + PG 真相 000018，懒恢复；LLM 未配 fail-open pending） |
 
-其余：`OPS_INCIDENT_AUTOCREATE`、`OPS_PULL_ALERTS`、`OPS_ESCALATION*`、`OPS_SLA_*`（事件 SLA 按级默认，W10-2）、`OPS_KPI_WINDOW`（KPI 观察窗，W10-3）、`OPS_LEADER_*`、`OPS_NOISE_SINK_*`、`OPS_MEMLIMIT_*`、`OPS_TOPOLOGY_EDGES` 等见 `.env.example` 注释与配置清单。
+其余：`OPS_PULL_ALERTS`、`OPS_ESCALATION*`、`OPS_SLA_*`（事件 SLA 按级默认，W10-2）、`OPS_KPI_WINDOW`（KPI 观察窗，W10-3）、`OPS_LEADER_*`、`OPS_NOISE_SINK_*`、`OPS_MEMLIMIT_*`、`OPS_TOPOLOGY_EDGES` 等见 `.env.example` 注释与配置清单。
 
 **双实例/多副本部署（ADR-012）**：多副本直接部署即可——PG advisory lock 选主，leader 跑拓扑采集/判决链路/拉取/归档，事件链路（webhook 入队、消费 worker、REST/SSE、通知、升级扫描）全实例常驻，认领租约 + 建单幂等保证 at-least-once 不重复；本实例 leader 态看 `/metrics` 的 `opscopilot_is_leader`。
 
