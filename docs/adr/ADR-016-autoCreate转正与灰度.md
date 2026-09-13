@@ -152,6 +152,15 @@ OPS_INGEST_INTERVAL=1s          # 默认 5s → 1s
   消费全数死信）——已用仓库自带 `scripts/migrate`（幂等重放）对齐至 v20 并登记台账，
   灰度租户坏窗口期残骸已一次性清洗后再启动；`opscopilot upgrade` 在"golang-migrate CLI
   建的 PK+dirty 混合形状"上登记语句待修（本次以 migrate 重放绕过，未改 Go 代码）。
+- **乱码事件与清洗（2026-09-13 20:40–21:00）**：种子中文标题入库成 U+FFFD——根因
+  Git Bash 向原生 curl.exe 传参按 GBK 码页转换（非前后端问题），payload 改临时文件
+  `--data-binary @file` 修复（`23cad8b`）；乱码种子单及其队列/审计/挂簇残骸已清
+  （挂簇 0 孤儿=FK 级联已生效；孤儿审计真 10 条按业务 ID 列重查后删除）。
+- **清洗后基线（2026-09-13 21:05，段二观察起算点）**：`autoattach attached=4 /
+  conflict=0 / skipped=0` · leader=1 · alerts_processed=102 · verdicts new-incident 4/
+  dedup 90/cluster-merge 8 · sink_drops=0 水位=0 · ingest_queue pending=0 / 入队 104 =
+  消费 104 / 死信 0 · incident(gray01)=9 · attach_cluster 审计=4 · rate_limited=0、
+  burst 聚合单=0。
 - **段二·一周观察窗到期评估（待填，到期日 2026-09-20）**：留此一行——届时按本 ADR
   段二判据核对 ≥7 天读数：误建单争议=0、`conflict` 计数不增长、`ingest_queue
   Pending` 无持续增长、burst 折叠段排空时长可接受，并附 `gray_autocreate_status.sh`
