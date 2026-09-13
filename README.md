@@ -67,7 +67,7 @@ export OPS_TEST_PG_DSN='postgres://opscopilot:opscopilot@localhost:5432/opscopil
 
 ### 环境变量
 
-全量 **68 个运行时 env 键**（`OPS_*` 66 + `REDIS_*` 2）的默认值、非法值行为与消费方逐条见 **`docs/配置清单-OpsEnv.md`**；`.env.example` 是运行时镜像（含每项注释）。常用面摘录：
+全量 **69 个运行时 env 键**（`OPS_*` 67 + `REDIS_*` 2）的默认值、非法值行为与消费方逐条见 **`docs/配置清单-OpsEnv.md`**；`.env.example` 是运行时镜像（含每项注释）。常用面摘录：
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
@@ -223,6 +223,11 @@ opscopilot upgrade --dry-run  # 只读：列缺口，不建表、不备份、不
 change_record / alert_cluster / runbook 三表 / alert_event 前 10 万行）。备份失败即中止，
 DB 不动。定位为开发/演示库的文本级快照（非物理备份；恢复 = 空库重放该文件）。
 
+`schema_migrations` 表形状按探测分流（M2 出口收口，round10 P1-2）：自建形状
+（`version integer PRIMARY KEY`）用 `ON CONFLICT` 登记；主线 `migrate` CLI 建的
+（`version bigint, dirty boolean NOT NULL`，无 PK）按其"单行=当前版本"约定用
+同事务 `DELETE + INSERT (version, dirty=false)` 登记——两种通道库都可放心跑 upgrade。
+
 跨版本拒启：server 启动时（有 `OPS_DB_DSN` 才校验）比对 `schema_migrations` 与二进制内
 `SchemaMaxVersion` 常量（`cmd/opscopilot/version.go`，测试钉死与 migrations/ 最大编号一致）：
 
@@ -232,6 +237,7 @@ DB 不动。定位为开发/演示库的文本级快照（非物理备份；恢�
 | DB 落后 ≤ `OPS_MAX_VERSION_GAP`（默认 3） | 放行 + 响亮 WARNING 提示跑 upgrade |
 | DB 落后 > gap | 拒启 |
 | DB 更新（旧二进制配新库） | 拒启：恢复 backups/pre-upgrade 备份或换配套二进制 |
+| 台账读 0 但域表已在（scripts/migrate / psql 建的**未跟踪存量库**） | 放行 + 响亮 WARNING 提示跑 upgrade 登记（"读 0"≠"落后 20"，不误拒启；round10 P2-D4） |
 | 无 `OPS_DB_DSN` / schema_migrations 不可读 | 跳过校验（内存降级哲学，同 pg sink 缺席） |
 
 ### 运维脚本入口
@@ -276,7 +282,7 @@ bash scripts/run_rca_eval.sh（证据版）             → 4/4 top1=100%，静�
 | `功能点清单-M2候选.md` | F-xx 功能点全集与优先级 |
 | `M1出口验收报告-2026-09-11.md` · `M2执行排期-W9到W11.md` | 出口验收与周排期（进度行含提交号） |
 | `OpsCopilot项目优化方案-2026-09-11.md` | 12 项优化 + 二期池三波收口记录 |
-| `配置清单-OpsEnv.md` | **68 个 env 键唯一装载表**（默认值/非法值行为/消费方）+ 测试/CLI 键附录 |
+| `配置清单-OpsEnv.md` | **69 个 env 键唯一装载表**（默认值/非法值行为/消费方）+ 测试/CLI 键附录 |
 | `容量模型-三级估算.md` · `容量基线-2026-09-12.md` | 三级估算与实测基线（部署必查项标注） |
 | `方案-双链路事件来源.md` | 事件双链路（外部导入 ∥ 人工建单）融合与去重方案 |
 | `设计-sessionstore消费方与接线.md` | 复盘会话五个开放问题的拍板记录（#7 S1/S2 蓝图） |
