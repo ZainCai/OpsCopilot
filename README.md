@@ -33,10 +33,10 @@ opscopilot/
 | 阶段 | 状态 | 证据 |
 |---|---|---|
 | M1（骨架 + 影子降噪转正评估） | ✅ 已出口（2026-09-11） | `docs/M1出口验收报告-2026-09-11.md`；评估集 tools/evaluate.py 100% |
-| W9 转正 + 通知闭环（M2 第一个里程碑） | ✅ 全部完成 | `docs/M2执行排期-W9到W11.md`（逐任务 ✅ + commit）、`docs/W9出口演练记录-enforce端到端.md` |
-| 优化方案 12 项 + 二期池三波 | ✅ 12/12 收口（09-12） | `docs/OpsCopilot项目优化方案-2026-09-11.md`（进度行含提交号） |
-| W10 事件域补全（进行中） | W10-6 簇→事件生产自动挂簇 ✅（`OPS_AUTOATTACH`，评测桥接收口）；余见排期表 | `docs/M2执行排期-W9到W11.md` W10 进度行 |
-| W11 RCA + 交付收尾 | 按需 RCA（ADR-014）、llm-gateway conclude（ADR-015）、复盘会话 S1+S2（#7）、自动触发（#4）已先行落地 | 各 ADR + `docs/设计-sessionstore消费方与接线.md` |
+| M2（W9~W11：enforce 端到端 + 事件域主工作台 + RCA 可用 + 交付收尾） | ✅ 已出口（2026-09-13，附 3 条件全部闭环） | `docs/M2出口评审纪要-2026-09-13.md`；出口条件①CI 首跑确认见 §三 P1-3 行（run #87 全绿）、②M3 排期入池已随 M3 闭环、③升级通道宣贯已入 README 拒启矩阵 |
+| M3（round10 P2 遗留 15 项，阶段 1-3） | ✅ 全部完成（阶段1 `61ad06c` / 阶段2 `81ade6b` / 阶段3 `b5087fe`） | `docs/reviews/round10-P2遗留-M3清单.md`（M3 闭环回填节：逐项 commit + 落地要点） |
+| 全局精简（web 死类 + tools poll 合并） | ✅ 已推送（`e5c8637` / `7be4abd`，行为不变 + 逐项清单审查） | 精简清单见两次 commit message |
+| ADR-016 autoCreate 转正灰度（段一/段二） | 🔄 段二观察中（观察窗 2026-09-13 21:05 → 09-20；中期四项判据全绿） | `docs/adr/ADR-016-autocreate-promotion-gray.md` 灰度执行记录 |
 
 ## 本机环境说明（重要）
 
@@ -272,18 +272,21 @@ DB 不动。定位为开发/演示库的文本级快照（非物理备份；恢�
 
 `make env-up` 启动 TimescaleDB + 双 Redis + 应用。compose 已配置 `OPS_LISTEN_ADDR=0.0.0.0:8080`（容器隔离即安全边界）与 Redis healthcheck；应用容器为 distroless（无 shell），探活用 `GET /healthz` 由外部编排层负责。默认 DB 口令仅限本地开发（见 `.env.example` 注释）。
 
-## 验证结果（2026-09-12，Go 1.27.1 windows/amd64）
+## 验证结果（2026-09-15，Go 1.27.1 windows/amd64）
 
 ```
 go build ./... / go vet ./...                     → 通过
-go test ./... -count=1（含 OPS_TEST_PG_DSN 门控的 PG 集成测试）→ 全绿（无 DSN 自动 skip）
-py scripts/check_module_boundaries.py             → 通过：无跨模块内部 import
+go test ./... -count=1（含 OPS_TEST_PG_DSN 门控的 PG 集成测试）→ 全绿（无 DSN 自动 skip；M3 收口后本机 22 包）
+go test -race ./...（本机 Windows 无 gcc 跑不了）→ CI 兜底：run #87 `-race` 步骤通过
+py scripts/check_module_boundaries.py             → 通过：无跨模块内部 import（含 cmd/tools/scripts 扩面）
 bash scripts/run_rca_eval.sh（证据版）             → 4/4 top1=100%，静默守护 3/3，挂簇走 OPS_AUTOATTACH 生产路径
+web 双分辨率走查（5 视口 × 6 路由）                  → CI web-walkthrough job 30/30 绿（run #87）
+CI 首跑（GitHub Actions）                          → run #87（8e8932e）四 job 全绿，含真库 pgstore 实跑（非 skip）
 ```
 
 ## 架构决策记录
 
-`docs/adr/` 存 ADR 全集（001 事件骨干 / 002 算子前置 / 003 LLM 单出口 / 004 Redis 双实例 / 005 审计分离 / 006 数据库部署 / 007 拓扑置信度 / 008 外部事件代 / 009 监听门禁 / 010 工单归档 / 011 enforce 转正 / 012 单 owner 水平扩展 / 013 前端独立工程 / 014 RCA 最小链路 / 015 llm-gateway 转正 conclude；完整索引见 `docs/adr/README.md`）。
+`docs/adr/` 存 ADR 全集（001 事件骨干 / 002 算子前置 / 003 LLM 单出口 / 004 Redis 双实例 / 005 审计分离 / 006 数据库部署 / 007 拓扑置信度 / 008 外部事件代 / 009 监听门禁 / 010 工单归档 / 011 enforce 转正 / 012 单 owner 水平扩展 / 013 前端独立工程 / 014 RCA 最小链路 / 015 llm-gateway 转正 conclude / 016 autoCreate 转正灰度 / 017 审计信任边界；完整索引见 `docs/adr/README.md`）。
 
 **任何 P0 修订或影响其他决策的变更，先写 ADR 再改文档**——这是 v1.3 §5.2 的硬性流程，源于 C17 部署策略与数据层特性冲突的事故。每份 ADR 末尾的"交叉检查提醒"记录耦合项。
 
@@ -293,28 +296,28 @@ bash scripts/run_rca_eval.sh（证据版）             → 4/4 top1=100%，静�
 |---|---|
 | `智能运维副驾驶技术架构方案_v1.3.md` | 总架构基线 |
 | `功能点清单-M2候选.md` | F-xx 功能点全集与优先级 |
-| `M1出口验收报告-2026-09-11.md` · `M2执行排期-W9到W11.md` | 出口验收与周排期（进度行含提交号） |
+| `M1出口验收报告-2026-09-11.md` · `M2执行排期-W9到W11.md` · `M2出口评审纪要-2026-09-13.md` | 出口验收/周排期/出口评审（含 3 条件闭环与签名留白） |
 | `OpsCopilot项目优化方案-2026-09-11.md` | 12 项优化 + 二期池三波收口记录 |
 | `配置清单-OpsEnv.md` | **69 个 env 键唯一装载表**（默认值/非法值行为/消费方）+ 测试/CLI 键附录 |
-| `容量模型-三级估算.md` · `容量基线-2026-09-12.md` | 三级估算与实测基线（部署必查项标注） |
+| `容量模型-三级估算.md` · `容量基线-2026-09-12.md` | 三级估算与实测基线（部署必查项标注；ADR-016 灰度硬依据） |
 | `方案-双链路事件来源.md` | 事件双链路（外部导入 ∥ 人工建单）融合与去重方案 |
 | `设计-sessionstore消费方与接线.md` | 复盘会话五个开放问题的拍板记录（#7 S1/S2 蓝图） |
 | `W9出口演练记录-enforce端到端.md` · `W9-4-E2E延迟打点与P95实测.md` | enforce 端到端与延迟专项 |
-| `前端分离说明-冻结console.md` | web/ 独立工程与 console.html 冻结说明 |
-| `reviews/` | 历次全局审核报告 + rca-eval 评测报告（含转正门禁章） |
+| `前端分离说明-冻结console.md` · `前端契约-runbook.md` · `前端视觉对齐收口纪要-2026-09-13.md` | web/ 独立工程、契约与视觉收口 |
+| `reviews/` | 历次全局审核报告（第一~十轮）+ rca-eval 评测报告 + round10 P2 清单（M3 闭环回填） + 走查证据 |
 | `history/` | 早期堆在仓库根的审核报告归档（D11） |
 
 ## 版本状态
 
 - 远端：`https://github.com/ZainCai/OpsCopilot.git`，分支 `main`；
 - 提交身份：`ZainCai <zaincai@outlook.com>`；
-- 里程碑轨迹：M1 第 0 周骨架（`0549778`）→ W1 环境底座 → W2~W6 连接器/拓扑/降噪/评估 → **M1 出口**（方案 B）→ W9 转正+通知闭环 → 二期池 12/12 + 波次三件（ADR-014/015、#7 会话、W10-6 自动挂簇）——逐任务提交号见 `docs/M2执行排期-W9到W11.md` 进度行；
+- 里程碑轨迹：M1 第 0 周骨架（`0549778`）→ W1 环境底座 → W2~W6 连接器/拓扑/降噪/评估 → **M1 出口**（方案 B）→ W9 转正+通知闭环 → 二期池 12/12 + 波次三件（ADR-014/015、#7 会话、W10-6 自动挂簇）→ **M2 出口**（2026-09-13，3 条件闭环）→ **M3**（round10 P2 15 项，`61ad06c`/`81ade6b`/`b5087fe`）→ **全局精简**（`e5c8637`/`7be4abd`）→ **CI 首跑确认**（`8e8932e`，run #87 全绿）→ **v1.0.0 归档发布**（本文档 + `docs/RELEASE-notes-v1.0.0.md`）；逐任务提交号见 `docs/M2执行排期-W9到W11.md` 进度行；
 - 授权：专有软件，保留所有权利（详见仓库 `LICENSE` 文件）。
 
 ## 已知限制
 
-- 读路径无鉴权（GET 面暴露聚合数字与事件列表）：跨源默认仅同源（D2），生产部署建议反代加认证；游标 HMAC 留 M3 候选；
+- 读路径无鉴权（GET 面暴露聚合数字与事件列表）：跨源默认仅同源（D2），生产部署建议反代加认证；游标 HMAC 留后续候选；
 - 降噪队列落库为"队满丢弃"取向：极端洪峰/慢 DB 下 PG 判决流可缺条目（Redis/PG 镜像与内存态非强一致），丢失面唯一出口是 `opscopilot_noise_sink_drops_total{store}` + ERROR 日志——通知链路不受影响；
 - 值班升级台账 / 事件 Store / 审计在无 DB 时退化内存：重启即丢、仅单实例正确（启动响亮 WARNING）；
-- 多实例 per-item 建单限流、读路径鉴权、排班/多级升级、RCA 长任务化（异步 job）均为 M3 候选，当前刻意不做（见排期"并行不占关键路径"与 ADR-014 留桩说明）；
+- 多实例 per-item 建单限流、读路径鉴权、排班/多级升级、RCA 长任务化（异步 job）均不在 M1-M3 交付范围，当前刻意不做（见排期"并行不占关键路径"与 ADR-014 留桩说明；读路径鉴权 HMAC 留待后续候选）；
 - 自动挂簇（W10-6）一簇一事件：多指纹共簇仅首单持故障域，其余事件处置口径 = 人工 `MergeInto` 归并（L2 只提示不自动级联），口径详见排期 W10-6 注记与评测报告 §5。
