@@ -201,17 +201,19 @@ func (g *RESTGateway) handleTransitionIncident(w http.ResponseWriter, r *http.Re
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	var in struct {
-		To         string `json:"to"`
-		Actor      string `json:"actor"`
-		SLAMinutes int    `json:"sla_minutes"` // W10-2 可选覆盖（流转同时改目标时长）
+		To    string `json:"to"`
+		Actor string `json:"actor"`
+		// P2-D5：指针区分"未提供"（nil = keep current）与显式值——
+		// 0 = 清除 SLA 覆盖回按级默认（此前零值吞掉 clear 语义）。
+		SLAMinutes *int `json:"sla_minutes"`
 	}
 	if err := dec.Decode(&in); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid body: "+err.Error())
 		return
 	}
-	if in.SLAMinutes < 0 || in.SLAMinutes > slaMinutesMax {
+	if in.SLAMinutes != nil && (*in.SLAMinutes < 0 || *in.SLAMinutes > slaMinutesMax) {
 		writeErr(w, http.StatusBadRequest,
-			"sla_minutes must be 0.."+strconv.Itoa(slaMinutesMax)+" (0 = keep current)")
+			"sla_minutes must be 0.."+strconv.Itoa(slaMinutesMax)+" (0 = clear override; absent = keep current)")
 		return
 	}
 	if strings.TrimSpace(in.Actor) == "" {
@@ -226,25 +228,20 @@ func (g *RESTGateway) handleTransitionIncident(w http.ResponseWriter, r *http.Re
 		return
 	}
 	id := r.PathValue("id")
-	inc, err := g.incidents.Transition(id, to, in.Actor)
+	// P2-D5：流转 + SLA 覆盖由 Store 原子提交（同一事务/锁），SetSLA 不再
+	// 有独立失败路径——"流转成功但覆盖未落"的半成功态从写路径消除。
+	inc, err := g.incidents.TransitionWithSLA(id, to, in.Actor, in.SLAMinutes)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if g.audit != nil {
+		detail := map[string]any{"to": string(to)}
+		if in.SLAMinutes != nil {
+			detail["sla_minutes"] = *in.SLAMinutes // 审计带覆盖值（含 0=clear）
+		}
 		g.audit.Append(AuditEntry{IncidentID: id, Action: AuditTransition, Actor: in.Actor,
-			Detail: map[string]any{"to": string(to)}})
-	}
-	// W10-2：流转可同时带 SLA 覆盖（同一鉴权门禁内完成，不再多一次往返）。
-	if in.SLAMinutes > 0 {
-		if err := g.incidents.SetSLA(id, in.SLAMinutes); err != nil {
-			g.logf("WARNING: set sla after transition (%s): %v", id, err)
-			writeErr(w, http.StatusInternalServerError, "internal error")
-			return
-		}
-		if fresh, gerr := g.incidents.Get(id); gerr == nil {
-			inc = fresh
-		}
+			Detail: detail})
 	}
 	writeJSON(w, http.StatusOK, inc)
 }

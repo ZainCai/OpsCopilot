@@ -111,6 +111,35 @@ func (s *MemStore) Get(id string) (Incident, error) {
 func (s *MemStore) Transition(id string, to State, actor string) (Incident, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.transitionLocked(id, to, actor)
+}
+
+// TransitionWithSLA P2-D5：流转 + SLA 覆盖同一把锁内提交（sla 非 nil 时
+// 等价 Transition + SetSLA 的原子版；非法流转整笔回滚，SLA 不落）。
+func (s *MemStore) TransitionWithSLA(id string, to State, actor string, sla *int) (Incident, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	inc, err := s.transitionLocked(id, to, actor)
+	if err != nil {
+		return Incident{}, err
+	}
+	if sla != nil {
+		if *sla < 0 {
+			return Incident{}, errors.New("incident: sla minutes must be >= 0")
+		}
+		cur, ok := s.byID[id]
+		if !ok {
+			return Incident{}, ErrNotFound
+		}
+		cur.SLAMinutes = *sla
+		cur.UpdatedAt = s.now()
+		inc.SLAMinutes = *sla
+		inc.UpdatedAt = cur.UpdatedAt
+	}
+	return inc, nil
+}
+
+func (s *MemStore) transitionLocked(id string, to State, actor string) (Incident, error) {
 	inc, ok := s.byID[id]
 	if !ok {
 		return Incident{}, ErrNotFound

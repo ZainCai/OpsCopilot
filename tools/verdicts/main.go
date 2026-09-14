@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"opscopilot/internal/config"
 )
 
 // verdict 一条影子判决（与 evaluate.py 的打分字段一一对应）。
@@ -42,10 +44,10 @@ func resolveTenant(v string) string {
 
 func main() {
 	var (
-		dsn    = flag.String("dsn", os.Getenv("OPS_DB_DSN"), "PG DSN（缺省读 OPS_DB_DSN）")
+		dsn    = flag.String("dsn", os.Getenv(config.EnvDBDSN), "PG DSN（缺省读 OPS_DB_DSN）")
 		since  = flag.Duration("since", 7*24*time.Hour, "只取最近 N 时长的判决")
 		out    = flag.String("out", "", "输出文件（缺省 stdout）")
-		tenant = flag.String("tenant", os.Getenv("OPS_TENANT"), "租户（缺省读 OPS_TENANT，再缺省 default）")
+		tenant = flag.String("tenant", os.Getenv(config.EnvTenant), "租户（缺省读 OPS_TENANT，再缺省 default）")
 	)
 	flag.Parse()
 	*tenant = resolveTenant(*tenant) // 第七轮 H3：空租户会静默查 0 行（假 100%）

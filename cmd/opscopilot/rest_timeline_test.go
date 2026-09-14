@@ -202,134 +202,90 @@ func TestTimelinePartialDegradation(t *testing.T) {
 	}
 }
 
-// ---------- handler 级（内存装配，无 DB）：404 / 坏参数 / 降级归并 ----------
+// ---------- handler 级：契约体驱动器（mem 装配，无 DB） ----------
+//
+// P2-D3：mem 与 PG 两实现的 HTTP 契约收敛为共用契约体
+// runTimelineHandlerContract（见 rest_timeline_contract_test.go）；本驱动器
+// 提供 mem 装配（alert 源缺席 ⇒ partial+missing 由契约体断言）。PG 驱动器
+// 见 rest_timeline_e2e_pg_test.go。
 
-func TestTimelineHandlerNotFoundAndBadParams(t *testing.T) {
+// TestTimelineHandlerContractMem mem 装配的契约驱动器：节点入图 + 变更 +
+// 告警成簇挂簇 + 人工 ack，然后跑契约体（无 DSN ⇒ alert 源缺席）。
+func TestTimelineHandlerContractMem(t *testing.T) {
+	runTimelineHandlerContract(t, timelineContractEnv{
+		name: "mem",
+		newHandler: func(t *testing.T) (http.Handler, string) {
+			asm, h := restTest(t)
+			now := time.Now()
+
+			// ① 节点入图 + 变更（Record 的 nodeCheck 要求节点先在拓扑）。
+			if err := asm.Sink.IngestDiscover(context.Background(), &connector.DiscoverResult{
+				Nodes: []connector.ResourceNode{{
+					Key: "tl-n1", Type: "host", ObservedAt: now,
+					Labels: map[string]string{"instance": "i-tl"},
+				}},
+			}); err != nil {
+				t.Fatalf("discover: %v", err)
+			}
+			if _, err := asm.Changes.Record(topology.ChangeEvent{
+				ID: "chg-tl", NodeKey: "tl-n1", Type: topology.ChangeDeploy,
+				Source: "jenkins", Author: "bot", Summary: "v2 deploy",
+				Confidence: topology.ConfidenceHigh,
+				OccurredAt: now.Add(-5 * time.Minute),
+			}); err != nil {
+				t.Fatalf("record change: %v", err)
+			}
+
+			// ② 告警成簇（instance 反查 → 故障域含 tl-n1）并挂到事件。
+			asm.Noise.ProcessAlerts([]connector.Alert{{
+				Fingerprint: "fp-tl", Labels: map[string]string{"alertname": "DiskFull", "instance": "i-tl"},
+				Severity: "critical", StartsAt: now,
+			}})
+			active := asm.Noise.shadow.Clusterer().ActiveClusters()
+			if len(active) == 0 {
+				t.Fatal("no cluster formed")
+			}
+			if _, err := asm.Incidents.Create("INC-tl-deg", "磁盘打满", "critical", "tester"); err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			if err := asm.Incidents.AttachCluster("INC-tl-deg", active[0].Key); err != nil {
+				t.Fatalf("attach: %v", err)
+			}
+
+			// ③ 人工 ack（真 handler 写路径 → MemAuditLog）。
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/incidents/INC-tl-deg/transition",
+				strings.NewReader(`{"to":"acked","actor":"zhangsan"}`))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("transition: code = %d body = %s", rec.Code, rec.Body.String())
+			}
+			return h, "INC-tl-deg"
+		},
+		expectAlert: false, // 无 DSN ⇒ alert 源缺席（契约体断言 partial+missing）
+		minActions:  1,
+	})
+}
+
+// TestTimelineEmptyManualIncident200 空手工单（无簇、无变更、建单走 Store
+// 直连不写审计）→ 200 空页：源可用但无记录不算缺席（mem 特有场景；
+// PG 生产路径总有簇，见 e2e）。
+func TestTimelineEmptyManualIncident200(t *testing.T) {
 	asm, h := restTest(t)
-	if code, _ := getJSON(t, h, "/api/v1/incidents/nope/timeline"); code != http.StatusNotFound {
-		t.Fatalf("unknown incident: code = %d, want 404", code)
-	}
-	if _, err := asm.Incidents.Create("INC-tl-params", "时间线用例", "info", "tester"); err != nil {
+	if _, err := asm.Incidents.Create("INC-tl-empty", "手工单", "info", "tester"); err != nil {
 		t.Fatalf("seed incident: %v", err)
 	}
-	base := "/api/v1/incidents/INC-tl-params/timeline"
-	if code, _ := getJSON(t, h, base+"?limit=-2"); code != http.StatusBadRequest {
-		t.Fatalf("negative limit: code = %d, want 400", code)
-	}
-	if code, _ := getJSON(t, h, base+"?limit=abc"); code != http.StatusBadRequest {
-		t.Fatalf("non-numeric limit: code = %d, want 400", code)
-	}
-	if code, _ := getJSON(t, h, base+"?cursor=%23%24bad"); code != http.StatusBadRequest {
-		t.Fatalf("bad cursor: code = %d, want 400", code)
-	}
-	// 可用但全空：手工单无簇、无变更、建单走 Store 直连不写审计 → 空页 200。
-	code, body := getJSON(t, h, base)
+	code, body := getJSON(t, h, "/api/v1/incidents/INC-tl-empty/timeline")
 	if code != http.StatusOK {
 		t.Fatalf("empty timeline: code = %d body = %v", code, body)
 	}
 	if body["total"].(float64) != 0 || body["next_cursor"] != "" {
 		t.Fatalf("empty timeline body = %v, want total 0 / no cursor", body)
 	}
-}
-
-// TestTimelineHandlerDegradedNoDB 无 DSN 场景的降级语义端到端（handler 层）：
-// 告警源缺席计入 partial+missing，change（内存变更库×故障域）与 action
-// （内存审计）照常归并单调；这就是任务口径的"仅 audit+内存 change 可用则
-// 返回可用的并带 partial 标记"。
-func TestTimelineHandlerDegradedNoDB(t *testing.T) {
-	asm, h := restTest(t)
-	now := time.Now()
-
-	// ① 节点入图 + 变更（Record 的 nodeCheck 要求节点先在拓扑）。
-	if err := asm.Sink.IngestDiscover(context.Background(), &connector.DiscoverResult{
-		Nodes: []connector.ResourceNode{{
-			Key: "tl-n1", Type: "host", ObservedAt: now,
-			Labels: map[string]string{"instance": "i-tl"},
-		}},
-	}); err != nil {
-		t.Fatalf("discover: %v", err)
-	}
-	if _, err := asm.Changes.Record(topology.ChangeEvent{
-		ID: "chg-tl", NodeKey: "tl-n1", Type: topology.ChangeDeploy,
-		Source: "jenkins", Author: "bot", Summary: "v2 deploy",
-		OccurredAt: now.Add(-5 * time.Minute),
-	}); err != nil {
-		t.Fatalf("record change: %v", err)
-	}
-
-	// ② 告警成簇（instance 反查 → 故障域含 tl-n1）并挂到事件。
-	asm.Noise.ProcessAlerts([]connector.Alert{{
-		Fingerprint: "fp-tl", Labels: map[string]string{"alertname": "DiskFull", "instance": "i-tl"},
-		Severity: "critical", StartsAt: now,
-	}})
-	active := asm.Noise.shadow.Clusterer().ActiveClusters()
-	if len(active) == 0 {
-		t.Fatal("no cluster formed")
-	}
-	if _, err := asm.Incidents.Create("INC-tl-deg", "磁盘打满", "critical", "tester"); err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	if err := asm.Incidents.AttachCluster("INC-tl-deg", active[0].Key); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
-
-	// ③ 人工 ack（真 handler 写路径 → MemAuditLog）。
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/incidents/INC-tl-deg/transition",
-		strings.NewReader(`{"to":"acked","actor":"zhangsan"}`))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("transition: code = %d body = %s", rec.Code, rec.Body.String())
-	}
-
-	// ④ 时间线：200 + partial（无 DB ⇒ alert 缺席）+ change/action 归并单调。
-	code, body := getJSON(t, h, "/api/v1/incidents/INC-tl-deg/timeline")
-	if code != http.StatusOK {
-		t.Fatalf("timeline: code = %d body = %v", code, body)
-	}
+	// partial=true 是"无 DSN ⇒ alert 源缺席"的正常降级标记（空页≠全空缺席）。
 	if body["partial"] != true {
-		t.Fatalf("partial = %v, want true (no DB)", body["partial"])
-	}
-	missing, _ := body["missing"].(map[string]any)
-	if missing == nil || missing["alert"] == nil {
-		t.Fatalf("missing = %v, want alert entry", body["missing"])
-	}
-	itemsRaw, _ := body["items"].([]any)
-	if len(itemsRaw) < 2 {
-		t.Fatalf("items = %v, want change+action merged", body["items"])
-	}
-	var prev time.Time
-	var sawChange, sawAction bool
-	for _, raw := range itemsRaw {
-		it, _ := raw.(map[string]any)
-		tsStr, _ := it["ts"].(string)
-		ts, err := time.Parse(time.RFC3339Nano, tsStr)
-		if err != nil {
-			t.Fatalf("bad ts %q: %v", tsStr, err)
-		}
-		if ts.Before(prev) {
-			t.Fatalf("timeline not monotonic: %v after %v", ts, prev)
-		}
-		prev = ts
-		switch it["kind"] {
-		case TimelineKindChange:
-			sawChange = true
-			if c, _ := it["confidence"].(string); c == "" {
-				t.Fatalf("change item lost confidence: %v", it)
-			}
-			if s, _ := it["summary"].(string); !strings.Contains(s, "v2 deploy") {
-				t.Fatalf("change summary = %q, want to carry change summary", s)
-			}
-		case TimelineKindAction:
-			sawAction = true
-			if s, _ := it["summary"].(string); !strings.Contains(s, "zhangsan") {
-				t.Fatalf("action summary = %q, want actor in it", s)
-			}
-		}
-	}
-	if !sawChange || !sawAction {
-		t.Fatalf("merged items = %v, want both change and action", body["items"])
+		t.Fatalf("partial = %v, want true (no DB: alert source absent)", body["partial"])
 	}
 }
 

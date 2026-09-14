@@ -179,6 +179,11 @@ type Store interface {
 	Create(id, title, severity, createdBy string) (*Incident, error)
 	Get(id string) (Incident, error)
 	Transition(id string, to State, actor string) (Incident, error)
+	// TransitionWithSLA 流转 + SLA 覆盖原子提交（P2-D5）：sla 非 nil 时在
+	// 同一事务/锁内同时落 SLA 覆盖（0 = 清除覆盖回按级默认），杜绝"流转
+	// 成功、SLA 落库失败"的半成功态；sla=nil 时与 Transition 语义完全一致。
+	// 非法流转整笔回滚（SLA 也不落）；事件不存在返回 ErrNotFound。
+	TransitionWithSLA(id string, to State, actor string, sla *int) (Incident, error)
 	// AttachCluster 簇→事件关联。语义：重复挂同簇同单幂等（不产生副本、
 	// 不覆盖首挂）；簇已被他单占用返回可被 errors.Is(err, ErrClusterTaken)
 	// 判定的冲突（W10-6 自动挂簇据此"跳过并计数"，不当故障上抛）。

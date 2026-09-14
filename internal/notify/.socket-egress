@@ -1,0 +1,1 @@
+出口模块标记（ADR-015 / P2-D2 规则 4 自扩名单）：本目录生产代码禁止 import net/http——通知投递以 transport.HTTPClient 为发送器。check_module_boundaries.py 扫描本文件存在性即纳入名单。

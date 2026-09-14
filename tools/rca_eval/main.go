@@ -44,8 +44,10 @@
 // C（静默）段不产事件 → 转为"防误报守护"：段窗内影子判决必须为 0、
 // 不得新建本剧本之外的 Incident。
 //
-// 零依赖 internal/config（另一 agent 在改 config，此处只 flags+env 读
-// DSN/端点，取值口径同 tools/verdicts：flag 缺省回退 env）。
+// 依赖 internal/config 的 Env* 键常量（D1/round10）：OPS_DB_DSN /
+// OPS_TENANT / OPS_WEBHOOK_TOKEN 引常量，改名编译期即失联；仅评测工具
+// 特有的 OPS_APP_URL / OPS_INJECTOR_URL 不在服务端配置域（CLI 豁免，
+// 本地常量防魔法字符串，见 toolEnvAppURL）。
 //
 // 用法（编排见 scripts/run_rca_eval.sh）：
 //
@@ -82,6 +84,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"opscopilot/internal/config"
 )
 
 // ===================== 数据模型：golden =====================
@@ -296,11 +300,14 @@ func computeQuantiles(vs []int64) quantiles {
 
 func main() {
 	var (
-		appURL  = flag.String("app", envOr("OPS_APP_URL", "http://127.0.0.1:8080"), "被测 app 基址")
-		injURL  = flag.String("injector", envOr("OPS_INJECTOR_URL", "http://127.0.0.1:19090"), "faultinjector 基址")
-		dsn     = flag.String("dsn", os.Getenv("OPS_DB_DSN"), "PG DSN（缺省读 OPS_DB_DSN）")
-		token   = flag.String("token", envOr("OPS_WEBHOOK_TOKEN", "dev"), "写路径共享密钥（X-OpsCopilot-Token）")
-		tenant  = flag.String("tenant", os.Getenv("OPS_TENANT"), "评测租户（必须与被测 app 同租户；评测纪律：独立租户，杜绝历史数据污染）")
+		// OPS_APP_URL / OPS_INJECTOR_URL 为评测工具特有键（被测 app / 注入器
+		// 基址），不在 internal/config 服务端配置域——CLI 豁免（D1）；其余
+		// OPS_* 一律引 config.Env* 常量，改名编译期失联。
+		appURL  = flag.String("app", envOr(toolEnvAppURL, "http://127.0.0.1:8080"), "被测 app 基址")
+		injURL  = flag.String("injector", envOr(toolEnvInjectorURL, "http://127.0.0.1:19090"), "faultinjector 基址")
+		dsn     = flag.String("dsn", os.Getenv(config.EnvDBDSN), "PG DSN（缺省读 OPS_DB_DSN）")
+		token   = flag.String("token", envOr(config.EnvWebhookToken, "dev"), "写路径共享密钥（X-OpsCopilot-Token）")
+		tenant  = flag.String("tenant", os.Getenv(config.EnvTenant), "评测租户（必须与被测 app 同租户；评测纪律：独立租户，杜绝历史数据污染）")
 		goldenP = flag.String("golden", "tools/rca_eval/golden.json", "golden 定义文件")
 		outDir  = flag.String("out-dir", ".rca-eval", "JSONL/summary 产物目录（.gitignore 已覆盖）")
 		repDir  = flag.String("report-dir", "", "report.md 输出目录（空 = 不写，只出控制台与 JSONL）")
@@ -1195,6 +1202,14 @@ func waitUntil(ctx context.Context, t time.Time) {
 		}
 	}
 }
+
+// toolEnvAppURL / toolEnvInjectorURL 评测工具特有 env 键（D1 CLI 豁免：
+// 被测 app / 注入器基址不在 internal/config 服务端配置域；引本地常量防
+// 魔法字符串散落）。
+const (
+	toolEnvAppURL      = "OPS_APP_URL"
+	toolEnvInjectorURL = "OPS_INJECTOR_URL"
+)
 
 func envOr(k, def string) string {
 	if v := os.Getenv(k); v != "" {

@@ -101,6 +101,67 @@ RETURNING `+pgIncidentCols,
 	return inc, nil
 }
 
+// TransitionWithSLA P2-D5：流转 + SLA 覆盖同一事务提交（复用 Transition 的
+// 事务骨架：FOR UPDATE 读态 → planTransition 校验 → UPDATE 状态；sla 非 nil
+// 时同事务再写 sla_minutes）。非法流转回滚（SLA 不落）；SetSLA 独立失败
+// 路径（半成功态）从 REST 写路径消除。
+func (s *PGStore) TransitionWithSLA(id string, to State, actor string, sla *int) (Incident, error) {
+	if sla != nil && *sla < 0 {
+		return Incident{}, errors.New("incident: sla minutes must be >= 0")
+	}
+	ctx, cancel := s.ctx()
+	defer cancel()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Incident{}, fmt.Errorf("incident pg: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var cur State
+	err = tx.QueryRow(ctx, `
+SELECT state FROM incident WHERE tenant_id=$1 AND incident_id=$2 FOR UPDATE`,
+		s.tenantID, id).Scan(&cur)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Incident{}, ErrNotFound
+	}
+	if err != nil {
+		return Incident{}, fmt.Errorf("incident pg: select state: %w", err)
+	}
+	plan, perr := planTransition(cur, to, actor)
+	if perr != nil {
+		return Incident{}, perr
+	}
+	var inc Incident
+	err = scanIncident(tx.QueryRow(ctx, `
+UPDATE incident SET state=$3, updated_at=now(),
+  resolved_at = CASE WHEN $4::bool THEN now() ELSE resolved_at END,
+  ack_by      = CASE WHEN $5::text <> '' THEN $5 ELSE ack_by END,
+  auto_close_policy = CASE WHEN $6::bool THEN 'manual_only' ELSE auto_close_policy END,
+  acked_at    = CASE WHEN $7::bool AND acked_at IS NULL THEN now() ELSE acked_at END
+WHERE tenant_id=$1 AND incident_id=$2
+RETURNING `+pgIncidentCols,
+		s.tenantID, id, to, plan.StampResolved, plan.AckBy, plan.FlipManualOnly, plan.StampAckedAt), &inc)
+	if err != nil {
+		return Incident{}, fmt.Errorf("incident pg: update state: %w", err)
+	}
+	if sla != nil {
+		tag, err := tx.Exec(ctx, `
+UPDATE incident SET sla_minutes=$3, updated_at=now()
+WHERE tenant_id=$1 AND incident_id=$2`, s.tenantID, id, *sla)
+		if err != nil {
+			return Incident{}, fmt.Errorf("incident pg: update sla: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return Incident{}, ErrNotFound
+		}
+		inc.SLAMinutes = *sla
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Incident{}, fmt.Errorf("incident pg: commit: %w", err)
+	}
+	return inc, nil
+}
+
 // AttachCluster 簇→事件关联：一簇最多一事件（DB 唯一索引兜底）；重复
 // 挂同一事件幂等；簇已被其他事件占用报错（与 MemStore 语义一致）。
 func (s *PGStore) AttachCluster(id, clusterKey string) error {

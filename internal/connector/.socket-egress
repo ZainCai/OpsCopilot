@@ -1,0 +1,1 @@
+出口模块标记（ADR-015 / P2-D2 规则 4 自扩名单）：本目录生产代码禁止 import net/http——数据源拉取同挂 transport（二期池波三已删除裸 http.Client 注入兜底）。check_module_boundaries.py 扫描本文件存在性即纳入名单。

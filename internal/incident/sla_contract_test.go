@@ -125,3 +125,64 @@ func TestContractSetSLA(t *testing.T) {
 		}
 	})
 }
+
+// ---------------------------------------------------------------------------
+// 契约 19（P2-D5）：TransitionWithSLA 原子提交
+// ---------------------------------------------------------------------------
+
+func TestContractTransitionWithSLA(t *testing.T) {
+	runContract(t, func(t *testing.T, s Store, px string) {
+		// 带覆盖流转：状态推进 + SLA 同时落库。
+		inc := contractCreate(t, s, px, "TSLA", "critical", "ops")
+		v45 := 45
+		ret, err := s.TransitionWithSLA(inc.ID, StateAcked, "bob", &v45)
+		if err != nil {
+			t.Fatalf("transition with sla: %v", err)
+		}
+		if ret.State != StateAcked || ret.SLAMinutes != 45 {
+			t.Fatalf("return = %+v, want acked + sla 45", ret)
+		}
+		g := contractGet(t, s, inc.ID)
+		if g.State != StateAcked || g.SLAMinutes != 45 {
+			t.Fatalf("read-back = %+v, want acked + sla 45", g)
+		}
+
+		// sla=nil 等价 Transition（不动 SLA）。
+		plain := contractCreate(t, s, px, "TSLA-NIL", "warning", "ops")
+		if _, err := s.TransitionWithSLA(plain.ID, StateAcked, "bob", nil); err != nil {
+			t.Fatalf("transition nil sla: %v", err)
+		}
+		if got := contractGet(t, s, plain.ID); got.State != StateAcked || got.SLAMinutes != 0 {
+			t.Fatalf("nil sla must not touch sla: %+v", got)
+		}
+
+		// 0 = 清除覆盖回按级默认（随流转原子落）。
+		v0 := 0
+		if _, err := s.TransitionWithSLA(inc.ID, StateMitigated, "bob", &v0); err != nil {
+			t.Fatalf("transition clear sla: %v", err)
+		}
+		if got := contractGet(t, s, inc.ID); got.State != StateMitigated || got.SLAMinutes != 0 {
+			t.Fatalf("clear sla must land with transition: %+v", got)
+		}
+
+		// 非法流转 → 整笔回滚：SLA 也不落（原子性的关键断言）。
+		bad := contractCreate(t, s, px, "TSLA-BAD", "critical", "ops")
+		v99 := 99
+		if _, err := s.TransitionWithSLA(bad.ID, StateOpen, "bob", &v99); err == nil {
+			t.Fatal("illegal transition accepted")
+		}
+		if got := contractGet(t, s, bad.ID); got.State != StateOpen || got.SLAMinutes != 0 {
+			t.Fatalf("illegal transition must roll back SLA too: %+v", got)
+		}
+
+		// 不存在的单 → ErrNotFound（sla 一并拒绝）。
+		if _, err := s.TransitionWithSLA(px+"-MISS", StateAcked, "ops", &v45); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("TransitionWithSLA missing must be ErrNotFound, got %v", err)
+		}
+		// 负数拒绝（与 SetSLA 同口径）。
+		neg := -1
+		if _, err := s.TransitionWithSLA(inc.ID, StateResolved, "bob", &neg); err == nil {
+			t.Fatal("negative sla accepted")
+		}
+	})
+}

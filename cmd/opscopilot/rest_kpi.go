@@ -13,6 +13,13 @@
 // 时间戳逐条手算均值，与端点读数比对。
 //
 // 无分页（聚合结果一行）；读路径鉴权口径同其余 GET。
+//
+// 时钟口径（P2-D5）：window_start 由本进程 time.Now() 计算（进程钟），
+// created_at / resolved_at / acked_at 由存储侧时钟落戳（PG now()；Mem
+// time.Now()）。**两钟必须同步**：API 与 DB 同主机或已 NTP 校准时窗口边界
+// 精确；跨主机且未校准时，窗口以 API 进程钟为界，DB 钟偏移会造成窗口整体
+// 平移（漏掉刚创建的 incident 或把未来时间戳算进窗）。同仓库默认部署
+// （compose 同机）即满足；跨主机部署须保证 NTP 同步，否则 KPI 口径失真。
 package main
 
 import (

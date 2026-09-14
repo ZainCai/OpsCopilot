@@ -34,6 +34,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"opscopilot/internal/config"
 )
 
 // idPrefix 压测建单 ID 前缀（清理与辨识用）。
@@ -165,7 +167,7 @@ func main() {
 	if *cleanup {
 		target := *dsn
 		if target == "" {
-			target = os.Getenv("OPS_DB_DSN")
+			target = os.Getenv(config.EnvDBDSN)
 		}
 		if target == "" {
 			fmt.Fprintln(os.Stderr, "清理跳过：未提供 -dsn 且 OPS_DB_DSN 为空")
