@@ -161,6 +161,16 @@ OPS_INGEST_INTERVAL=1s          # 默认 5s → 1s
   dedup 90/cluster-merge 8 · sink_drops=0 水位=0 · ingest_queue pending=0 / 入队 104 =
   消费 104 / 死信 0 · incident(gray01)=9 · attach_cluster 审计=4 · rate_limited=0、
   burst 聚合单=0。
+- **段二中段读数（2026-09-15 00:07，观察窗第 2 天·中期核对）**：`autoattach
+  attached=146/conflict=0/skipped=0`（误建单争议=0、conflict 未增长）· leader=1 ·
+  alerts_processed=3418 · verdicts new-incident 146/dedup 3075/cluster-merge 197 ·
+  sink_drops=0 水位=0 write_dropped=0 · `ingest_queue(gray01)` pending=0 / 近 24h
+  入队 3360 = 消费 3360 / 死信 0（无积压）· incident(gray01) 总=11 近 24h 新建=0（告警
+  全部收敛到既有单）· create 审计总=13 近 24h=0 · rate_limited=0、burst 聚合单=0（未触发
+  折叠，排空时长观察项 N/A）· **决策延迟观察项**：`opscopilot_alert_fired_to_verdict_seconds`
+  3420 样本全 ≤0.25s，P95≈0.02s / P99≈0.03s、均值 11.9ms——无零星慢轮（对比容量基线
+  P95 秒级依赖活跃告警数，当前场景量级未及）。四项判据中期全绿。注：本机系统 bash 指向
+  WSL（无 go/curl），读数须用 Git Bash（`C:\Program Files\Git\bin\bash.exe`）。
 - **段二·一周观察窗到期评估（待填，到期日 2026-09-20）**：留此一行——届时按本 ADR
   段二判据核对 ≥7 天读数：误建单争议=0、`conflict` 计数不增长、`ingest_queue
   Pending` 无持续增长、burst 折叠段排空时长可接受，并附 `gray_autocreate_status.sh`
