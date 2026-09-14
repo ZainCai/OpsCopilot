@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # run_gray_autocreate.sh —— ADR-016 灰度段一环境起停管理（开发机 demo，租户 gray01）。
 #
-# 段一参数组（权威口径 docs/adr/ADR-016-autoCreate转正与灰度.md）：
+# 段一参数组（权威口径 docs/adr/ADR-016-autocreate-promotion-gray.md）：
 #   OPS_INCIDENT_AUTOCREATE=on + OPS_INGEST_BATCH=500 + OPS_INGEST_INTERVAL=1s
 #   + OPS_NOISE_MODE=enforce + OPS_AUTOATTACH=on + OPS_TENANT=gray01
 #   其余键走 .env / 出厂默认；链路接法沿用 scripts/run_demo.sh 现状

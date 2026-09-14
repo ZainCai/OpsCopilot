@@ -7,7 +7,7 @@
 
 - **只记录与展示，不自动执行**（排期 W11-4 定案，对齐 F-12 清单"M1 仅记录与展示"）。系统是"给人看的手册挂载台账 + 人事后手填的执行流水"，**没有**"点一下按钮让系统替你跑手册"这回事。执行相关响应恒带 **`auto_execution: false`** 契约声明（同 duplicates 端点 `auto_merge:false` 的取向），前端据此渲染"记录"而非"运行"语义。
 - **执行记录不算审计证据**（对齐《sessionstore消费方与接线》拍板②口径）：`runbook_execution_log` 是独立表，不进 `incident_audit` 哈希链，`result`/`refs` 无防篡改。合规取证面仍以 `/audit` 为准；runbook 展示面**不要**标注"审计级"。
-- **降级**：无 DB（无 `DB_DSN`）时 runbook store 不接线，**所有 runbook 端点显式 503**（不返回空 200 伪装"没有手册"）。前端对 503 应显示"该功能需持久化后端"，与 RCA/session 端点降级表现一致。
+- **降级**：无 DB（无 `OPS_DB_DSN`）时 runbook store 不接线，**所有 runbook 端点显式 503**（不返回空 200 伪装"没有手册"）。前端对 503 应显示"该功能需持久化后端"，与 RCA/session 端点降级表现一致。
 - **鉴权**：读路径（GET）无鉴权（S1 回环部署口径）；写路径（POST/DELETE）**必带** `X-OpsCopilot-Token` 请求头（值 = 服务端 `OPS_WEBHOOK_TOKEN`）。未配置密钥时写路径不设门禁（仅限回环部署）。写路径 POST 还要求 `Content-Type: application/json`（CSRF 免预检阻挡），否则 415。
 - **租户**：单租户隐式（`OPS_TENANT`），前端不传 `tenant_id`，一切按后端装配期固定的租户读写。
 

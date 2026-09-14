@@ -175,7 +175,7 @@ M2 **只记录与展示**，不驱动自动升级（OPS_ESCALATION_* 是独立�
 
 ### 测试库隔离（二期池波一-1）
 
-`OPS_TEST_PG_DSN` 若直接复用开发库（`DB_DSN`），incident 契约用例的翻页探针
+`OPS_TEST_PG_DSN` 若直接复用开发库（`OPS_DB_DSN`），incident 契约用例的翻页探针
 `walkAll`（≤100 页硬上限，`internal/incident/store_contract_test.go`）会翻遍
 过滤条件下的**全表**——开发库数据累积（压测/联调残留）超约 200 行即偶发变红。
 d87d89a 后实测：旧开发库 `-count=2` 稳定红 3 例

@@ -2,7 +2,7 @@
 # reset_test_pg.sh —— 二期池波一-1：测试 PG 数据隔离（建独立测试库 + 应用迁移）。
 #
 # 背景（为什么需要这个脚本）：
-#   OPS_TEST_PG_DSN 此前直接复用开发库（DB_DSN 指向的 opscopilot），
+#   OPS_TEST_PG_DSN 此前直接复用开发库（OPS_DB_DSN 指向的 opscopilot），
 #   incident 契约用例的翻页探针 walkAll（internal/incident/
 #   store_contract_test.go，≤100 页硬上限）会翻遍过滤条件下的**全表**
 #   （PG 共享库里其他前缀的行也算一页），开发库数据一旦累积超 ~200 行
@@ -35,7 +35,7 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-# 载入 .env（Git Bash 下兼容 CRLF；不存在则跳过），DB_DSN / OPS_TEST_PG_DSN 由它提供
+# 载入 .env（Git Bash 下兼容 CRLF；不存在则跳过），OPS_DB_DSN / OPS_TEST_PG_DSN 由它提供
 if [ -f .env ]; then
   set +e; set -a; . <(sed 's/\r$//' .env); rc=$?; set +a; set -e
   [ $rc -eq 0 ] || echo "警告：.env 载入失败（忽略，用环境变量/默认值）" >&2
@@ -53,7 +53,7 @@ TEST_DB="${OPS_TEST_DB:-opscopilot_test}"
 if [ -n "${OPS_TEST_PG_DSN:-}" ]; then
   DSN="$OPS_TEST_PG_DSN"
 else
-  BASE="${DB_DSN:-postgres://opscopilot:opscopilot@localhost:5432/opscopilot?sslmode=disable}"
+  BASE="${OPS_DB_DSN:-postgres://opscopilot:opscopilot@localhost:5432/opscopilot?sslmode=disable}"
   after="${BASE##*/}"        # 最后一个 / 之后的内容（含可能的 ?query）
   name="${after%%\?*}"       # 原库名
   rest="${after#"$name"}"    # ?query 或空

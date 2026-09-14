@@ -2,7 +2,7 @@
 
 优化方案 #9「前端分离」的落地工程：**Vite + React + TypeScript**，只消费后端
 REST/SSE（`/api/v1/*`），不再往二进制里嵌页面逻辑。决策记录见
-[`docs/adr/ADR-013-前端独立工程.md`](../docs/adr/ADR-013-前端独立工程.md)。
+[`docs/adr/ADR-013-frontend-standalone.md`](../docs/adr/ADR-013-frontend-standalone.md)。
 
 ## 与内嵌 console.html 的关系（冻结说明）
 

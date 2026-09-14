@@ -1,4 +1,4 @@
-# 若存在 .env 则载入（供 make migrate 的 DB_DSN 等使用）
+# 若存在 .env 则载入（供 make migrate 的 OPS_DB_DSN 等使用）
 ifneq (,$(wildcard .env))
 include .env
 endif
@@ -25,7 +25,7 @@ env-down:
 	docker compose down -v
 
 migrate:
-	migrate -path migrations -database "$${DB_DSN}" up
+	migrate -path migrations -database "$${OPS_DB_DSN}" up
 
 gen:
 	bash scripts/gen.sh
