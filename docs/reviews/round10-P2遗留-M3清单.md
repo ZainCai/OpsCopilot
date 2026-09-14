@@ -14,8 +14,8 @@
 | 6 | P2-B1 | verdict writer 生命周期只绑显式 `Stop()` 不挂 ctx——绕过 `Assembly.Close` 的嵌入式用法会泄 writer（现两条路径均已调 Stop） | `cmd/opscopilot/noise_writequeue.go:205/285` | 文件头注释补"Stop 是唯一退出点" |
 | 7 | P2-B2 | `rca_auto` pending 有界但 `seen` map 无淘汰（上界=进程生命周期 critical 事件数，量级小） | `cmd/opscopilot/rca_auto.go:62/106` | 长值守卫对齐 memguard 做法 |
 | 8 | P2-C1 | `run_rca_eval.sh` 含明文 key 的 env 文件创建后、`trap stop_all EXIT` 注册前存在失败路径残留（文件已被 gitignore，故 P2） | `scripts/run_rca_eval.sh:83/135` | 文件创建处即挂 `trap 'rm -f …' EXIT` |
-| 9 | P2-C2 | `redactDSN` 只按 `@` 打码 URL 形态；keyword 形态 DSN（`password=…`）可原样进连接失败错误 → 启动 WARNING 日志 | `cmd/opscopilot/version.go`（redactDSN，round10 时 :95-100） | 补 `password=` 分支打码 |
-| 10 | P2-C3 | upgrade 逻辑备份值字面量仅双写单引号，依赖会话 `standard_conforming_strings=on` | `cmd/opscopilot/version.go`（sqlTextLiteral/backupBeforeUpgrade，round10 时 :448-459） | 备份文件头注入 `SET standard_conforming_strings = on;` |
+| 9 | P2-C2 | `redactDSN` 只按 `@` 打码 URL 形态；keyword 形态 DSN（`password=…`）可原样进连接失败错误 → 启动 WARNING 日志 | `cmd/opscopilot/schema_gate.go`（redactDSN） | 补 `password=` 分支打码 |
+| 10 | P2-C3 | upgrade 逻辑备份值字面量仅双写单引号，依赖会话 `standard_conforming_strings=on` | `cmd/opscopilot/upgrade_backup.go`（sqlTextLiteral/backupBeforeUpgrade） | 备份文件头注入 `SET standard_conforming_strings = on;` |
 | 11 | P2-C4 | 信息项：runbook 写面不入 incident_audit 哈希链、session 正文不入审计、`actor/created_by` body 自报可冒充（均有明示注释/拍板） | `cmd/opscopilot/rest_runbook.go:60-92`、`rest_rca_session.go:70-80`、`docs/设计-sessionstore消费方与接线.md` | 二期真身份落地时收口为一条 ADR |
 | 12 | P2-D1 | tools CLI 以字面量散读 OPS_DB_DSN/OPS_TENANT/OPS_WEBHOOK_TOKEN 等，绕过 `internal/config` 键名常量——改名静默失联 | `tools/verdicts/main.go:45-48`、`tools/loadtest/main.go:168`、`tools/rca_eval/main.go:299-303,1200` | 引 `config.Env*` 常量或纪律文档明列 CLI 豁免 |
 | 13 | P2-D2 | 边界脚本盲区：`cmd/`、`tools/`、`scripts/migrate` 不在扫描面；规则 4 出口模块名单硬编码不随新包自扩；"cmd 禁散读 OPS_*"无 Go 侧源码测试钉 | `scripts/check_module_boundaries.py`（对照 llmgw/connector 既有同构测试） | 扩扫描面 + 名单自扩 + 补 cmd 散读钉测试 |
