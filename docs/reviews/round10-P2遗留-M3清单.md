@@ -24,3 +24,28 @@
 
 > 编号沿用 round10 报告原名，便于回读上下文；"已修 2 项"（D4/D6）的证据见
 > `docs/M2出口评审纪要-2026-09-13.md` §一 与本轮 fix(db)/docs 提交。
+
+---
+
+## M3 闭环回填（2026-09-15）
+
+15 项全部随 M3 三个阶段完成并推送（每阶段交付附 gofmt/vet/build + 无 DSN/带真库全量 `go test ./...` + 脚本 `bash -n` 验证清单；CI 真库/race 门禁自 run #81 起稳定绿，4A 首跑确认见 `docs/M2出口评审纪要-2026-09-13.md` §三 P1-3 行）：
+
+| # | 原编号 | 闭环 commit（阶段） | 落地要点（回读入口） |
+|---|---|---|---|
+| 1 | P2-A1 | `61ad06c`（阶段1） | heldConn `pool.Acquire` 移锁外，锁内仅钉住/换出（`leader.go`） |
+| 2 | P2-A2 | `61ad06c`（阶段1） | persistedSig 前提提升为断言/硬契约，后半程入锁 |
+| 3 | P2-A3 | `61ad06c`（阶段1） | StopVerdictWriter 去重计数（sink_drops 上界口径统一） |
+| 4 | P2-A4 | `61ad06c`（阶段1） | lease ≥ 批最坏时长 / 处理中续租（ingest_queue） |
+| 5 | P2-A5 | `61ad06c`（阶段1） | 补 N 路并发 ProcessAlerts + StopVerdictWriter + memguard + leader heldConn 并发用例（与 CI race 兜底互补） |
+| 6 | P2-B1 | `81ade6b`（阶段2） | verdict writer 文件头注释补"Stop 是唯一退出点" |
+| 7 | P2-B2 | `81ade6b`（阶段2） | rca_auto `seen` 长值守卫对齐 memguard 做法 |
+| 8 | P2-C1 | `81ade6b`（阶段2） | run_rca_eval env 文件创建处即挂 `trap 'rm -f …' EXIT` |
+| 9 | P2-C2 | `81ade6b`（阶段2） | redactDSN 补 `password=` keyword 分支打码 |
+| 10 | P2-C3 | `81ade6b`（阶段2） | 备份文件头注入 `SET standard_conforming_strings = on;` |
+| 11 | P2-C4 | `81ade6b`（阶段2） | 信息项收口为 ADR-017（审计信任边界，二期真身份落地时启用） |
+| 12 | P2-D1 | `b5087fe`（阶段3） | tools CLI 引 `config.Env*` 常量（D1 键收敛） |
+| 13 | P2-D2 | `b5087fe`（阶段3） | 边界脚本扩面 cmd/tools/scripts/migrate + 名单自扩 + cmd 散读钉测试 ×3 + boundary_test.go |
+| 14 | P2-D3 | `b5087fe`（阶段3） | 时间线收敛共用契约体 `runTimelineHandlerContract`（对齐 SLA/KPI 契约打法） |
+| 15 | P2-D5 | `b5087fe`（阶段3） | SLA 语义三条：REST 显式 clear、`TransitionWithSLA` 原子方法、KPI 同钟要求落文档 |
+
