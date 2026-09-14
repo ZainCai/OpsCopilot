@@ -46,7 +46,7 @@ Base：`/api/v1`。读路径无鉴权（受 CORS/监听门禁保护，ADR-009）
 | `/api/v1/audit` | GET | 全局审计检索：`actor`、`action`（封闭集合，未知 400）、`since`/`until`（RFC3339，半开 `[since,until)`）、`limit`（默认 200 上限 1000）、`cursor`（keyset，坏 400）→ `{entries,count,next_cursor,persistence,partial_hint?}`，时间倒序；行含后端提取的 `summary`（W12 审计解锁包） | — | rest_audit.go |
 | `/api/v1/incidents/{id}/merge` | POST | `{target_id,actor}` 人工合并 | ✅ | rest_incidents.go |
 | `/api/v1/incidents/{id}/transition` | POST | `{to,actor}` 状态机流转 | ✅ | rest_stream.go |
-| `/api/v1/alerts` | GET | 影子判决流（alert_event source='shadow'）`limit`（默认 200、上限 1000）→ `{alerts,count}`，含知识库富化字段 | — | rest_alerts.go |
+| `/api/v1/alerts` | GET | 影子判决流（alert_event source='shadow'）`limit`（默认 200、上限 1000）、`since`/`until`（RFC3339 时间过滤）、`cursor`（keyset 游标分页）→ `{alerts,count,next_cursor}`，含知识库富化字段 | — | rest_alerts.go |
 | `/api/v1/notify/channels` | GET / POST | 渠道列表（含禁用）/ 幂等 upsert `{name,kind,url,min_severity}` | POST ✅ | rest_notify.go、notify_channels.go |
 | `/api/v1/notify/channels/{name}/enabled` | POST | 软开关 `{"enabled":bool}` | ✅ | notify_channels.go |
 | `/api/v1/notify/channels/{name}` | DELETE | 删除（内置 console 兜底渠道不可删） | ✅ | notify_channels.go |

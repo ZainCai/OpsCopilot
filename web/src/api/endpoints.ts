@@ -50,7 +50,7 @@ export const ENDPOINTS = {
   kpis: `${V1}/kpis`, //                  GET
 
   // 告警中心 · 影子判决流（rest_alerts.go；需 OPS_DB_DSN）
-  alerts: `${V1}/alerts`, //            GET  ?limit=（默认 200，上限 1000）
+  alerts: `${V1}/alerts`, //            GET  ?limit=（默认 200，上限 1000）&since=&until=&cursor=（keyset 游标，2026-09-14 起）
 
   // 鉴权探测（rest_gateway.go handleAuthStatus）
   authStatus: `${V1}/auth/status`, //   GET

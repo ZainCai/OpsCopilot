@@ -16,15 +16,19 @@ import { clampText, fmtTime, timeAgoText } from "../lib/format";
 export function AlertsView({ onConn }: { onConn: (ok: boolean) => void }): React.ReactElement {
   const [alerts, setAlerts] = useState<ShadowAlert[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [nextCursor, setNextCursor] = useState("");
   const [err, setErr] = useState<string>("");
   const [selected, setSelected] = useState<{ a: ShadowAlert; key: string } | null>(null);
 
+  /** 首屏/刷新：重置列表与游标（keyset 分页，翻页期间新告警不干扰已读页）。 */
   const load = useCallback(async () => {
     setLoading(true);
     setErr("");
     try {
       const data = await getJSON<AlertsResponse>(ENDPOINTS.alerts, { limit: 200 });
       setAlerts(data.alerts ?? []);
+      setNextCursor(data.next_cursor ?? "");
       onConn(true);
     } catch (e) {
       const msg = e instanceof ApiError
@@ -36,6 +40,21 @@ export function AlertsView({ onConn }: { onConn: (ok: boolean) => void }): React
       setLoading(false);
     }
   }, [onConn]);
+
+  /** 加载更多：携带游标向后翻页并追加。 */
+  const loadMore = useCallback(async () => {
+    if (!nextCursor || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const data = await getJSON<AlertsResponse>(ENDPOINTS.alerts, { limit: 200, cursor: nextCursor });
+      setAlerts((prev) => [...prev, ...(data.alerts ?? [])]);
+      setNextCursor(data.next_cursor ?? "");
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [nextCursor, loadingMore]);
 
   useEffect(() => {
     void load();
@@ -76,6 +95,13 @@ export function AlertsView({ onConn }: { onConn: (ok: boolean) => void }): React
             desc: "降噪引擎影子模式下每次告警处理都会在此留痕（需 OPS_DB_DSN）",
           }}
         />
+        {nextCursor ? (
+          <div className="flex-row justify-center" style={{ marginTop: 12 }}>
+            <button type="button" className="btn btn--sm" onClick={() => void loadMore()} disabled={loadingMore}>
+              {loadingMore ? "加载中…" : "加载更多"}
+            </button>
+          </div>
+        ) : null}
       </Panel>
       {selected ? <AlertDetail a={selected.a} /> : null}
     </>

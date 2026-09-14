@@ -22,6 +22,8 @@ export interface ShadowAlert {
 export interface AlertsResponse {
   alerts: ShadowAlert[];
   count: number;
+  /** keyset 游标分页：空 = 已到末尾（后端 /api/v1/alerts 自 2026-09-14 起支持） */
+  next_cursor?: string;
 }
 
 // ---------- 簇（GET /api/v1/clusters[/{key}]） ----------
