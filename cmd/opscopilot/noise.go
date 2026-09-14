@@ -101,6 +101,11 @@ type NoiseEngine struct {
 	// vqSpec 队列参数快照（构造注入，StartVerdictWriter 消费；#2 通道：
 	// 唯一装载点在 internal/config，这里只存解析好的值）。
 	vqSpec config.NoiseSection
+	// stopDropsOnce StopVerdictWriter 的残量计数护栏（P2-A3）：main 停机
+	// 序列与 Assembly.Close 双保险都会调用。残量 = 该调用时点"未落库条数"
+	// 的保守上界，只计第一次——第二次调用再给 writer 一次 drain 预算，
+	// 但残量已含在第一次口径内，重复计数会让 sink_drops 虚高。
+	stopDropsOnce sync.Once
 	// ---- W10-6 簇→事件生产自动挂簇（OPS_AUTOATTACH，仅 enforce 生效）----
 	// autoAttach 开关快照（构造注入）；incStore/auditLog 由装配层
 	// SetAutoAttach 挂载（与 SetGate 同款"配置意图 ↔ 运行时行为"装配纪律：

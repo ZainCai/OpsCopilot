@@ -50,9 +50,10 @@ const ingestTimeout = 5 * time.Second
 // 装配层经 OPS_INGEST_BATCH_TIMEOUT_PER_ITEM 可调。
 //
 // 注意：#11 后领取/确认不再共享一个事务（跨实例行锁本就不覆盖处理全程，
-// 互斥语义由**认领租约**承担）。批超时的意义收缩为"单轮消费的整体上界"：
-// 处理超过 OPS_INGEST_LEASE_DURATION 的批可能被别的实例重领（幂等重做，
-// 确认回写因 owner 条件落空）——租约默认 2m，正常 DB 下默认批量远触不到。
+// 互斥语义由**认领租约**承担）。批超时的意义收缩为"单轮消费的整体上界"。
+// P2-A4：认领租约在 processBatch 按本批最坏时长动态放大（max(配置租约,
+// 批超时+30s 余量)）——固定默认租约 2m 小于默认批 20×15s=300s 时，慢批
+// 合法越租会被他实例重领做重复劳动。
 func batchTimeoutFor(batch int, perItem time.Duration) time.Duration {
 	if batch <= 0 {
 		batch = config.DefaultIngestBatch
@@ -167,6 +168,16 @@ func (q *PGIngestQueue) processBatch(limit int, process func(Item) error) (int, 
 	ctx, cancel := context.WithTimeout(context.Background(), batchTimeoutFor(limit, q.batchPerItem))
 	defer cancel()
 
+	// P2-A4：租约随本批最坏时长动态放大。固定租约（默认 2m）小于默认批
+	// 20×15s=300s 时，慢批（单条拖到 perItem 上限）合法越过租约 → 他实例
+	// 重领做重复劳动（幂等但浪费，且确认回写落空刷 WARNING）。取
+	// max(配置租约, 批超时+30s 余量)：批超时本身有 10m 上限（batchTimeoutFor），
+	// 租约随之有界；调大 batch 配置时租约自动跟上，无需人工同步。
+	lease := q.lease
+	if worst := batchTimeoutFor(limit, q.batchPerItem) + 30*time.Second; worst > lease {
+		lease = worst
+	}
+
 	rows, err := q.pool.Query(ctx, `
 WITH claim AS (
   SELECT id FROM ingest_queue
@@ -180,7 +191,7 @@ UPDATE ingest_queue q
 SET locked_by = $4, locked_until = now() + make_interval(secs => $5::double precision)
 FROM claim WHERE q.id = claim.id
 RETURNING q.id, q.origin, q.source_ref, q.payload, q.attempts`,
-		q.tenant, limit, maxIngestAttempts, q.owner, q.lease.Seconds())
+		q.tenant, limit, maxIngestAttempts, q.owner, lease.Seconds())
 	if err != nil {
 		return 0, fmt.Errorf("ingest: claim: %w", err)
 	}

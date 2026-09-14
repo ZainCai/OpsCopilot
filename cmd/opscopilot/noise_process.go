@@ -122,7 +122,7 @@ func (n *NoiseEngine) ProcessAlerts(alerts []connector.Alert) {
 	n.logf("shadow verdict: %d alerts (new %d, dedup %d, merged %d) — cumulative converge %d/%d",
 		len(alerts), created, suppressed, merged, n.converged, n.total)
 
-	var dirty []noise.ClusterRecord
+	var dirty []dirtyCluster
 	if n.records != nil {
 		dirty = n.collectDirtyClusters()
 	}
@@ -360,29 +360,55 @@ func clusterSig(cl noise.Cluster) string {
 		strconv.Itoa(cl.AlertCount)
 }
 
-// collectDirtyClusters 锁内挑选签名变化的簇。
+// dirtyCluster 待落库簇 + 它的落库签名。
+// P2-A2（round10）：签名在持久化**成功后**提交（commit 语义）。旧实现是
+// 锁内预更新签名 + 落库失败回滚——正确性依赖"ProcessAlerts 串行调用"
+// （两路并发：A 预更新 → B 比对跳过 → A 落库失败回滚 → 该簇永不再写）。
+// 提交语义下并发多路天然安全：同一簇可能被多路同时选中，重复写幂等
+// 无害；失败者签名未提交，下一批仍选中补写——**永不丢写**，结构上不再
+// 依赖宿主串行（对齐 noise.go 头部"本结构不依赖这一实现细节"的声明）。
+type dirtyCluster struct {
+	rec noise.ClusterRecord
+	sig string
+}
+
+// collectDirtyClusters 锁内挑选签名变化的簇（**只比较、不更新**——签名
+// 提交在 persistClusters 成功后，见 dirtyCluster 注释）。
 // 活跃簇 + 本批新 resolve 的簇（状态从 open/acked → resolved）都会入选；
 // 早已 resolved 且未变的簇不再重复写（F3 写放大修复）。
 // 收尾做签名缓存的容量 GC（#6）：簇已从 Clusterer 消失（内存淘汰或窗口
 // 老化）后其签名永久无用——超上限先清这类孤儿键；活簇的签名不动
 // （动了指纹缓存只是多写一次，但留孤儿才是只进不出的真泄漏）。
-func (n *NoiseEngine) collectDirtyClusters() []noise.ClusterRecord {
+func (n *NoiseEngine) collectDirtyClusters() []dirtyCluster {
 	clusters := n.shadow.Clusterer().Clusters()
-	dirty := make([]noise.ClusterRecord, 0, len(clusters))
+	dirty := make([]dirtyCluster, 0, len(clusters))
 	for _, cl := range clusters {
 		sig := clusterSig(cl)
 		if n.persistedSig[cl.Key] == sig {
 			continue
 		}
-		n.persistedSig[cl.Key] = sig
-		dirty = append(dirty, cl.ToRecord(n.tenant))
+		dirty = append(dirty, dirtyCluster{rec: cl.ToRecord(n.tenant), sig: sig})
 	}
-	if excess := n.sigGuard.Over(len(n.persistedSig)); excess > 0 {
-		live := make(map[string]struct{}, len(clusters))
-		for _, cl := range clusters {
-			live[cl.Key] = struct{}{}
-		}
-		dropped := 0
+	n.gcSigCacheLocked()
+	return dirty
+}
+
+// gcSigCacheLocked 签名缓存容量 GC（必须持 n.mu 调用）：簇已从 Clusterer
+// 消失（内存淘汰或窗口老化）后其签名永久无用——超上限先清这类孤儿键；
+// 活簇的签名不动（动了指纹缓存只是多写一次，但留孤儿才是只进不出的真泄漏）。
+// P2-A2（round10）注记：commit 语义下签名在 persist **成功后**才提交，
+// collect 时缓存的"当前规模"少算本批将提交的条目——只在这里 GC 会让
+// 批末缓存突破上限（上限 1 驻留 2，上限 N 驻留 N+批簇数）。故 persistClusters
+// 提交后也调一次，批末缓存仍压回上限（#6 有界化承诺不被语义变更破坏）。
+func (n *NoiseEngine) gcSigCacheLocked() {
+	clusters := n.shadow.Clusterer().Clusters()
+	live := make(map[string]struct{}, len(clusters))
+	for _, cl := range clusters {
+		live[cl.Key] = struct{}{}
+	}
+	dropped := 0
+	for excess := n.sigGuard.Over(len(n.persistedSig)); excess > 0; {
+		dropped = 0
 		for k := range n.persistedSig {
 			if dropped >= excess {
 				break
@@ -392,34 +418,41 @@ func (n *NoiseEngine) collectDirtyClusters() []noise.ClusterRecord {
 				dropped++
 			}
 		}
-		n.sigGuard.Evicted(dropped) // dropped=0（签名全对应活簇）时不计数——容量此时由簇上限护栏兜底
+		if dropped == 0 {
+			break // 无孤儿可清：容量此时由簇上限护栏兜底，不空转
+		}
+		n.sigGuard.Evicted(dropped)
+		excess = n.sigGuard.Over(len(n.persistedSig))
 	}
-	return dirty
 }
 
-// persistClusters 幂等写入脏簇。
-// 第五轮审核 G1：签名在锁内 collectDirtyClusters 已更新，若 Save 失败
-// 不回滚，下一批签名比对会说"无变化"——**丢失的写入永不补齐**（对
-// resolved 簇是永久丢失），原注释"自动补齐"不成立。失败即回滚该 key
-// 的签名，下一批重写。失败只计数+日志，不中断告警链路。
-func (n *NoiseEngine) persistClusters(dirty []noise.ClusterRecord) {
+// persistClusters 幂等写入脏簇，**成功后提交签名**（P2-A2 commit 语义）。
+// 失败不提交签名：下一批 collectDirtyClusters 仍会选中该簇重写（旧实现
+// "失败即回滚签名"在串行假设下等价；并发下不依赖串行也能保证不丢写）。
+// 失败只计数+日志，不中断告警链路。提交后补一次签名缓存 GC（见
+// gcSigCacheLocked 注记：commit 语义下必须批末回收，否则缓存破上限）。
+func (n *NoiseEngine) persistClusters(dirty []dirtyCluster) {
 	if n.records == nil {
 		return
 	}
 	failed := 0
-	for _, rec := range dirty {
-		if err := n.records.SaveCluster(rec); err != nil {
+	for _, dc := range dirty {
+		if err := n.records.SaveCluster(dc.rec); err != nil {
 			failed++
 			n.saveFailures.Add(1)
-			n.mu.Lock()
-			delete(n.persistedSig, rec.ClusterKey)
-			n.mu.Unlock()
+			continue // 签名未提交，下一批补写
 		}
+		n.mu.Lock()
+		n.persistedSig[dc.rec.ClusterKey] = dc.sig
+		n.mu.Unlock()
 	}
 	if failed > 0 {
-		n.logf("WARNING: cluster persist failed for %d/%d clusters (rolled back signatures, cumulative failures %d)",
+		n.logf("WARNING: cluster persist failed for %d/%d clusters (signatures not committed, next batch will rewrite; cumulative failures %d)",
 			failed, len(dirty), n.saveFailures.Load())
 	}
+	n.mu.Lock()
+	n.gcSigCacheLocked()
+	n.mu.Unlock()
 }
 
 // RestoreFrom 从落库记录重建内存簇状态（ADR-001：Redis 丢失后从真相源

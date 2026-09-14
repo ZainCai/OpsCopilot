@@ -303,6 +303,9 @@ func (n *NoiseEngine) StartVerdictWriter() {
 // 随后恢复它就把残量照常写完（判决不重复投递，最多计多不减，宁可对账
 // 偏悲观不可静默乐观）。必须在 Redis 客户端 / pgxpool 关闭之前调用
 // （main.go 停机序列、Assembly.Close 双保险，幂等）。
+// P2-A3（round10）：残量计数只在**第一次**调用生效（stopDropsOnce）——
+// 双调用下第二次 stop 仍会给 writer 额外 drain 预算，但残量已含在第一次
+// 口径内，重复计数会让 sink_drops 虚高。
 func (n *NoiseEngine) StopVerdictWriter() {
 	if n == nil {
 		return
@@ -315,9 +318,11 @@ func (n *NoiseEngine) StopVerdictWriter() {
 		return
 	}
 	if left := q.stop(drain); left > 0 {
-		n.m.CountSinkDrop(q.storeLabel(), uint64(left))
-		slog.Error("noise verdict sink drain timeout, undrained verdicts dropped",
-			"store", q.storeLabel(), "undrained", left, "drain", drain.String())
+		n.stopDropsOnce.Do(func() {
+			n.m.CountSinkDrop(q.storeLabel(), uint64(left))
+			slog.Error("noise verdict sink drain timeout, undrained verdicts dropped",
+				"store", q.storeLabel(), "undrained", left, "drain", drain.String())
+		})
 	}
 }
 

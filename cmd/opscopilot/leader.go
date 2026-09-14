@@ -274,12 +274,18 @@ func (l *LeaderElector) probe() (bool, error) {
 
 // heldConn 返回选举连接（无则从池 Acquire 一条并钉住——"独占连接"的含义：
 // 只归选举环用，不还池，保证复检/解锁都落在同一 PG 会话上）。
+// P2-A1（round10）：Acquire 移到锁外——慢 DB 下取连接可阻塞至
+// max(retry,2s)，锁内执行会把 IsLeader()/Stop() 等锁上操作一起串行化。
+// 双重检查保证并发 heldConn 只钉一条：竞态输家 Release 自己取的那条。
 func (l *LeaderElector) heldConn(ctx context.Context) (*pgxpool.Conn, error) {
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	if l.pinned != nil {
-		return l.pinned, nil
+		conn := l.pinned
+		l.mu.Unlock()
+		return conn, nil
 	}
+	l.mu.Unlock()
+
 	timeout := l.retry
 	if timeout < leaderAcquireMinTimeout {
 		timeout = leaderAcquireMinTimeout
@@ -290,7 +296,16 @@ func (l *LeaderElector) heldConn(ctx context.Context) (*pgxpool.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	l.mu.Lock()
+	if l.pinned != nil {
+		existing := l.pinned
+		l.mu.Unlock()
+		conn.Release() // 竞态输家：归还刚取到的连接，用先钉住的那条
+		return existing, nil
+	}
 	l.pinned = conn
+	l.mu.Unlock()
 	return conn, nil
 }
 

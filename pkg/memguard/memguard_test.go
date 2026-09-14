@@ -3,6 +3,8 @@ package memguard
 import (
 	"bytes"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"opscopilot/pkg/metrics"
@@ -87,5 +89,40 @@ func TestRegisterToExportsMetrics(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), `opscopilot_mem_evictions_total{store="demo"} 3`) {
 		t.Fatalf("registered counter must see new evictions\n---\n%s", buf.String())
+	}
+}
+
+// TestConcurrentEvictionAndGauge P2-A5（round10）：淘汰进行中并发 gauge
+// 求值——多 goroutine 同时 Over/Evicted/SetSize/WritePrometheus，不得有
+// 数据竞争（-race 兜底），且淘汰计数最终一致（每次 Evicted(1) 恰计 1）。
+// Guard 自身互斥（Over/Evicted/SetSize 均持 mu），gauge 回调经原子计数器
+// 求值——两者并发不交叠任何裸共享写。
+func TestConcurrentEvictionAndGauge(t *testing.T) {
+	g := New("demo", 1000, 0.9)
+	reg := metrics.New()
+	g.RegisterTo(reg)
+
+	var val atomic.Int64
+	g.SetSize(func() int { return int(val.Load()) })
+
+	const workers = 8
+	const rounds = 200
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < rounds; j++ {
+				g.Over(1100) // 恒超 100 → 水位 WARN 限流路径同样并发
+				g.Evicted(1)
+				val.Add(1)
+				var buf bytes.Buffer
+				_ = reg.WritePrometheus(&buf) // gauge 实时求值（读 size 回调）
+			}
+		}()
+	}
+	wg.Wait()
+	if got := g.Evictions(); got != workers*rounds {
+		t.Fatalf("evictions = %d, want %d", got, workers*rounds)
 	}
 }

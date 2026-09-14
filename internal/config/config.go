@@ -494,13 +494,16 @@ const (
 
 	DefaultPullInterval = 30 * time.Second
 
-	DefaultIngestInterval            = 5 * time.Second
-	DefaultIngestBatch               = 20
-	DefaultIngestRateLimit           = 50 // 5 分钟内最多建 50 单，其余进聚合单
-	DefaultIngestRateWindow          = 5 * time.Minute
-	DefaultIngestBatchPerItem        = 15 * time.Second // 批消费超时 15s/条（第七轮 M-2）
-	DefaultAlertBodyLimit      int64 = 4 << 20          // 4MiB：入站 webhook 与拉取响应共用的单一定义
-	DefaultIngestLeaseDuration       = 2 * time.Minute  // 认领租约（#11/ADR-012）：过期可被重领
+	DefaultIngestInterval           = 5 * time.Second
+	DefaultIngestBatch              = 20
+	DefaultIngestRateLimit          = 50 // 5 分钟内最多建 50 单，其余进聚合单
+	DefaultIngestRateWindow         = 5 * time.Minute
+	DefaultIngestBatchPerItem       = 15 * time.Second // 批消费超时 15s/条（第七轮 M-2）
+	DefaultAlertBodyLimit     int64 = 4 << 20          // 4MiB：入站 webhook 与拉取响应共用的单一定义
+	// 认领租约（#11/ADR-012）：过期可被重领。P2-A4：这是**下限**——认领时
+	// 按批最坏时长动态放大（max(此值, batch×perItem+30s)，批超时上限 10m），
+	// 见 cmd/opscopilot/ingest_queue.go processBatch。
+	DefaultIngestLeaseDuration = 2 * time.Minute
 
 	// leader 选举（#11/ADR-012）：默认开（有 DB 即竞选）；竞选/复检节拍 5s
 	// ——failover 接管上界就锁在"一个节拍"内（验收标准 3 的 15s 限时余量充足）。
