@@ -73,6 +73,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -484,7 +485,7 @@ func scoreFaultSegment(ctx context.Context, pool *pgxpool.Pool, tenant, appURL, 
 	const winSlack = 45 * time.Second
 	fpKeys := map[string][]string{}
 	for _, a := range seg.Alerts {
-		keys := pollStrings(ctx, pool, unitTO, func(qctx context.Context) ([]string, error) {
+		keys := pollStrings(ctx, unitTO, func(qctx context.Context) ([]string, error) {
 			rows, err := pool.Query(qctx, `SELECT DISTINCT cluster_key FROM alert_event
 WHERE tenant_id=$1 AND fingerprint=$2 AND occurred_at >= $3 AND occurred_at < $4`,
 				tenant, a.Fingerprint, abs.Start.Add(-2*time.Second), abs.End.Add(winSlack))
@@ -842,47 +843,75 @@ func ensureTenant(ctx context.Context, pool *pgxpool.Pool, tenant string) {
 	}
 }
 
-// pollStrings 轮询查询直至非空或超时（超时也返回空——状态判定在调用方）。
-func pollStrings(ctx context.Context, pool *pgxpool.Pool, timeout time.Duration,
-	q func(context.Context) ([]string, error)) []string {
+// errPollTimeout 轮询超时哨兵：pollUntil 超时返回，调用方按原语义映射零值。
+var errPollTimeout = errors.New("poll timeout")
+
+// pollIncidentRow pollIncident 单行扫描载体（3 列一次 Scan）。
+type pollIncidentRow struct {
+	ID    int64
+	IncID string
+	T0    time.Time
+}
+
+// pollUntil 轮询骨架：以 step 间隔执行 query，query 返回 (v, done=true) 即
+// 返回 v；返回 err（done=false）立即上抛；超时返回 errPollTimeout。单次
+// 查询统一 5s 超时（与原四处实现一致）。调用方负责 err 映射
+// （fatal/容忍/零值），保证各调用点语义与合并前逐位等价。
+func pollUntil[T any](ctx context.Context, timeout, step time.Duration,
+	query func(context.Context) (T, bool, error)) (T, error) {
 	deadline := time.Now().Add(timeout)
 	for {
 		cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		out, err := q(cctx)
+		v, done, err := query(cctx)
 		cancel()
-		if err == nil && len(out) > 0 {
-			return out
+		if done {
+			return v, nil
+		}
+		if err != nil {
+			return v, err
 		}
 		if time.Now().After(deadline) {
-			return nil
+			return v, errPollTimeout
 		}
-		time.Sleep(2 * time.Second)
+		time.Sleep(step)
 	}
+}
+
+// pollStrings 轮询查询直至非空或超时（超时也返回空——状态判定在调用方）。
+func pollStrings(ctx context.Context, timeout time.Duration,
+	q func(context.Context) ([]string, error)) []string {
+	out, err := pollUntil(ctx, timeout, 2*time.Second, func(cctx context.Context) ([]string, bool, error) {
+		out, qerr := q(cctx)
+		// 原语义：查询错误一律容忍（继续轮询），仅非空结果算完成。
+		return out, qerr == nil && len(out) > 0, nil
+	})
+	if err == errPollTimeout {
+		return nil
+	}
+	return out
 }
 
 func pollIncident(ctx context.Context, pool *pgxpool.Pool, timeout time.Duration,
 	tenant, sourceRef string) (int64, string, time.Time) {
-	deadline := time.Now().Add(timeout)
-	for {
-		cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		var rowID int64
-		var incID string
-		var t0 time.Time
+	r, err := pollUntil(ctx, timeout, 2*time.Second, func(cctx context.Context) (pollIncidentRow, bool, error) {
+		var r pollIncidentRow
 		err := pool.QueryRow(cctx, `SELECT id, incident_id, created_at FROM incident
 WHERE tenant_id=$1 AND origin='prometheus' AND source_ref=$2
-ORDER BY created_at DESC LIMIT 1`, tenant, sourceRef).Scan(&rowID, &incID, &t0)
-		cancel()
-		if err == nil {
-			return rowID, incID, t0
+ORDER BY created_at DESC LIMIT 1`, tenant, sourceRef).Scan(&r.ID, &r.IncID, &r.T0)
+		if err == pgx.ErrNoRows {
+			return r, false, nil // 未建成：继续轮询（原语义）
 		}
-		if err != pgx.ErrNoRows {
-			fatal(2, "incident 查询失败: %v", err)
-		}
-		if time.Now().After(deadline) {
-			return 0, "", time.Time{}
-		}
-		time.Sleep(2 * time.Second)
+		return r, err == nil, err
+	})
+	switch {
+	case err == nil:
+		return r.ID, r.IncID, r.T0
+	case err == errPollTimeout:
+		return 0, "", time.Time{}
+	default:
+		fatal(2, "incident 查询失败: %v", err)
 	}
+	panic("unreachable")
 }
 
 // pollClusterOwner 轮询 incident_cluster：簇是否已被**生产自动挂簇路径**
@@ -891,25 +920,25 @@ ORDER BY created_at DESC LIMIT 1`, tenant, sourceRef).Scan(&rowID, &incID, &t0)
 // （incident_cluster 本身无 tenant 列，簇键全局唯一）。
 func pollClusterOwner(ctx context.Context, pool *pgxpool.Pool, tenant, clusterKey string,
 	timeout time.Duration) (string, bool) {
-	deadline := time.Now().Add(timeout)
-	for {
-		cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	owner, err := pollUntil(ctx, timeout, 2*time.Second, func(cctx context.Context) (string, bool, error) {
 		var owner string
 		err := pool.QueryRow(cctx, `SELECT i.incident_id FROM incident_cluster ic
 JOIN incident i ON i.id = ic.incident_row_id
 WHERE ic.cluster_key=$1 AND i.tenant_id=$2`, clusterKey, tenant).Scan(&owner)
-		cancel()
-		if err == nil {
-			return owner, true
+		if err == pgx.ErrNoRows {
+			return "", false, nil // 未挂上：继续轮询（原语义）
 		}
-		if err != pgx.ErrNoRows {
-			fatal(2, "incident_cluster 查询失败: %v", err)
-		}
-		if time.Now().After(deadline) {
-			return "", false
-		}
-		time.Sleep(2 * time.Second)
+		return owner, err == nil, err
+	})
+	switch {
+	case err == nil:
+		return owner, true
+	case err == errPollTimeout:
+		return "", false
+	default:
+		fatal(2, "incident_cluster 查询失败: %v", err)
 	}
+	panic("unreachable")
 }
 
 // incidentT0 按 incident_id 回查创建时刻（簇持有者改判时重算 detect_lag 用）。
@@ -948,29 +977,29 @@ VALUES ($1, $2) ON CONFLICT DO NOTHING`, rowID, clusterKey); err != nil {
 
 func pollAuditRCA(ctx context.Context, pool *pgxpool.Pool, timeout time.Duration,
 	tenant, incID string) map[string]any {
-	deadline := time.Now().Add(timeout)
-	for {
-		cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	detail, err := pollUntil(ctx, timeout, 1*time.Second, func(cctx context.Context) ([]byte, bool, error) {
 		var detail []byte
 		err := pool.QueryRow(cctx, `SELECT detail FROM incident_audit
 WHERE tenant_id=$1 AND incident_id=$2 AND action='rca' ORDER BY occurred_at DESC LIMIT 1`,
 			tenant, incID).Scan(&detail)
-		cancel()
-		if err == nil {
-			var m map[string]any
-			if json.Unmarshal(detail, &m) == nil {
-				return m
-			}
-			return map[string]any{}
+		if err == pgx.ErrNoRows {
+			return nil, false, nil // 未落库：继续轮询（原语义）
 		}
-		if err != pgx.ErrNoRows {
-			fatal(2, "incident_audit 查询失败: %v", err)
+		return detail, err == nil, err
+	})
+	switch {
+	case err == nil:
+		var m map[string]any
+		if json.Unmarshal(detail, &m) == nil {
+			return m
 		}
-		if time.Now().After(deadline) {
-			return nil
-		}
-		time.Sleep(1 * time.Second)
+		return map[string]any{}
+	case err == errPollTimeout:
+		return nil
+	default:
+		fatal(2, "incident_audit 查询失败: %v", err)
 	}
+	panic("unreachable")
 }
 
 func fetchAnswerbook(ctx context.Context, injURL string) *answerbook {
