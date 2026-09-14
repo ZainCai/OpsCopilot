@@ -526,6 +526,10 @@ func NewAssembly(logger connector.Logger, cfg *config.Config) (*Assembly, error)
 		} else {
 			trig := NewRCATrigger(asm.RCA, audit, appMetrics, defaultRCATriggerQueue, logf)
 			asm.RCATrigger = trig
+			// P2-B2：rca_auto seen 守卫注册 /metrics（与 audit/ledger 同纪律）。
+			for _, g := range trig.MemGuards() {
+				g.RegisterTo(reg)
+			}
 			// OnEscalate 契约要求非阻塞（见 escalation.go 字段注释）：Trigger
 			// 只做内存去重 + 有界队列投递，critical 过滤也在其中完成。
 			asm.Escalation.OnEscalate = trig.Trigger

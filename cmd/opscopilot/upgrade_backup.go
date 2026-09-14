@@ -34,6 +34,15 @@ var backupTables = []string{
 // 属原始告警，可由 Redis 镜像/上游重放重建，不在回滚关键路径上）。
 const backupAlertEventLimit = 100000
 
+// backupFileHeader 备份文件头文本（P2-C3：注入 standard_conforming_strings
+// 会话设置——sqlTextLiteral 只双写单引号，其正确性依赖该设置；恢复 = 在
+// 空库上重放本文件，先设好，字面量规则不依赖恢复会话默认值）。
+func backupFileHeader(ts time.Time) string {
+	return fmt.Sprintf("-- opscopilot upgrade 应用前逻辑备份（%s UTC）\n"+
+		"-- 定位：开发/演示库的文本级快照，非物理备份；恢复 = 在空库上重放本文件。\n"+
+		"SET standard_conforming_strings = on;\n\n", ts.UTC().Format(time.RFC3339))
+}
+
 // backupBeforeUpgrade 逐表 SELECT 导出 INSERT 文本到 backups/pre-upgrade-<ts>.sql。
 // 列一律 ::text 取回（NULL 保持 NULL）：一套字面量规则覆盖 JSONB/时间戳/数组，
 // 不逐列做类型方言。表不存在（空库首装）跳过并注明。
@@ -49,8 +58,7 @@ func backupBeforeUpgrade(ctx context.Context, conn *pgx.Conn, dir string, ts tim
 	defer func() { _ = f.Close() }()
 	w := bufio.NewWriter(f)
 
-	fmt.Fprintf(w, "-- opscopilot upgrade 应用前逻辑备份（%s UTC）\n", ts.UTC().Format(time.RFC3339))
-	fmt.Fprintf(w, "-- 定位：开发/演示库的文本级快照，非物理备份；恢复 = 在空库上重放本文件。\n")
+	fmt.Fprint(w, backupFileHeader(ts))
 
 	for _, table := range backupTables {
 		cols, err := backupColumns(ctx, conn, table)
@@ -163,6 +171,8 @@ func dumpTable(ctx context.Context, conn *pgx.Conn, w io.Writer, table string, c
 // sqlTextLiteral 值 → SQL 字面量。备份查询所有列都 ::text 取回，故正常只会
 // 命中 nil/string；[]byte 与兜底分支防驱动方言变化时静默丢数据。
 // 单引号按 SQL 标准双写；其余原样进引号（::text 输出对 PG 字面量无损）。
+// 依赖：备份文件头已注入 `SET standard_conforming_strings = on`（P2-C3）——
+// 该会话设置下反斜杠是普通字符，双写单引号即完整转义。
 func sqlTextLiteral(v any) string {
 	switch x := v.(type) {
 	case nil:

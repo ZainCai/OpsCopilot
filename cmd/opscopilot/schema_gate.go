@@ -82,12 +82,28 @@ func readSchemaVersion(ctx context.Context, q rowQuerier) (int, error) {
 	return int(v), nil
 }
 
-// redactDSN DSN 可能含口令，日志/错误里只留"主机/库"段。
+// redactDSN DSN 可能含口令，日志/错误里只留"主机/库"段。两种 DSN 形态
+// 都打码（P2-C2：keyword 形态此前可把 password= 原样带进连接失败错误）：
+//   - URL 形态（postgres://user:pass@host:port/db）→ 保留 @ 之后（主机/库）；
+//   - keyword 形态（host=... password=xxx）→ password= 的值及其后全部省略
+//     （key= 以空白分隔，值可能含特殊字符，保守截断）。
+//
+// 兜底：两种形态都识别不出时原样返回（不猜，避免把非口令段误伤）。
 func redactDSN(dsn string) string {
 	if i := strings.Index(dsn, "@"); i >= 0 {
-		return "***@" + dsn[i+1:]
+		return "***@" + redactKeywordPassword(dsn[i+1:])
 	}
-	return dsn
+	return redactKeywordPassword(dsn)
+}
+
+// redactKeywordPassword 对 keyword 形态 DSN 的 password= 段打码；无则原样
+// 返回（@ 分支的剩余段也过一遍：URL query 里若带 password= 同样不漏）。
+func redactKeywordPassword(s string) string {
+	i := strings.Index(strings.ToLower(s), "password=")
+	if i < 0 {
+		return s
+	}
+	return s[:i] + "password=***"
 }
 
 // startupSchemaGate server 启动期的跨版本闸门（main.go 有 DSN 时调用）。

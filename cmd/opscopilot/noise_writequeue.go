@@ -35,6 +35,12 @@
 // （writer 可能仍在后台挣扎落库，进程关池后其失败只计入 write_dropped，
 // 属保守双记账的已知边角）。调用方保证该动作发生在 Redis 客户端 /
 // pgxpool 关闭之前（main.go 停机序列、Assembly.Close）。
+//
+// ⚠️ 生命周期（P2-B1 固化）：writer **只绑显式 Stop（StopVerdictWriter），
+// 不挂 ctx**——Stop 是唯一退出点。main.go 停机序列与 Assembly.Close 都保证
+// 调用它；嵌入式用法若绕过 Assembly.Close（不调 StartVerdictWriter 则本
+// 结构根本不存在，调了就一定要成对 Stop），否则 writer goroutine 驻留
+// （队列 drain 不会自行发生，进程不退出时它就是常驻协程）。
 package main
 
 import (

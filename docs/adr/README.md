@@ -20,6 +20,7 @@
 | [ADR-014](ADR-014-rca-minimal-pipeline.md) | 按需 RCA 最小链路：cmd 编排 + DTO 注入破禁互 import、六步规则+证据、conclude 留 llm-gateway 单出口挂点 | 已接受 |
 | [ADR-015](ADR-015-llm-gateway-conclude.md) | llm-gateway 接线转正 conclude：通用 OpenAI-compatible 出口（llmgw 纯协议 + transport 唯一发送）、默认禁用、LLM≤RCA−2s 预算、fail-open 回 pending、脱敏与出口 CI 锁 | 已接受 |
 | [ADR-016](ADR-016-autocreate-promotion-gray.md) | `OPS_INCIDENT_AUTOCREATE` 转正与灰度：默认保持 off、三段灰度（demo/压测 on 带调优参数 → 观察一周 → 评估翻默认）；W10-4（D13 收尾）决策留痕 | 已接受（09-13 按推荐案拍板） |
+| [ADR-017](ADR-017-audit-trust-boundary.md) | 审计信任边界与身份钩子：runbook 写面/session 正文不入审计、actor 自报可冒充——一期现状声明 + 二期真身份收口（P2-C4） | 已接受 |
 
 ## 写新 ADR 时的检查清单
 

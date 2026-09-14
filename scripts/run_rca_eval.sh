@@ -81,6 +81,10 @@ if [ "$WITH_LLM" = 1 ]; then
   # 整组 OPS_LLM_* 原样透传给被测 app：从 .env 逐行提取未注释赋值写入临时
   # env 文件（600 权限，trap 必删）。只统计条数，绝不回显取值/key。
   : > "$LLM_ENV_FILE"; chmod 600 "$LLM_ENV_FILE"
+  # P2-C1：文件一旦创建，立刻挂 EXIT trap 删除——trap stop_all（下方注册）
+  # 之前的任何失败路径（.env 提取 / 端口探测 / build）都不留明文 key 文件。
+  # 主 trap 覆盖本 trap 无妨：stop_all 自身也 rm 该文件（幂等）。
+  trap 'rm -f "$LLM_ENV_FILE"' EXIT
   if [ -f "$ROOT/.env" ]; then
     while IFS= read -r line; do
       printf '%s\n' "$line" >> "$LLM_ENV_FILE"

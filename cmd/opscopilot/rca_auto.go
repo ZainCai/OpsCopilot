@@ -28,6 +28,7 @@ import (
 	"sync"
 
 	"opscopilot/internal/incident"
+	"opscopilot/pkg/memguard"
 )
 
 // autoTriggerActor 自动触发写审计的 actor 值（REST 手动请求默认 "system:rca"，
@@ -39,6 +40,14 @@ const autoTriggerActor = "auto"
 // 超出即丢弃计 opscopilot_rca_autotrigger_dropped_total（运维可事后按需
 // GET /rca 补分析），宁可不跑也不堆 goroutine/堆内存。
 const defaultRCATriggerQueue = 64
+
+// maxRCATriggerSeen 内存 seen 集上限（P2-B2）。seen 上界本应是"进程生命
+// 周期内 critical 事件数"，量级小；给一个宽松上限防病态无限涨（畸形数据
+// 下 incident ID 无限增长）。超限**整体清空**重来：短期重复触发的去重由
+// PG 双保险（worker 回读审计）兜底，内存 seen 只优化热路径——清空不破坏
+// "同一 incident 只自动触发一次"的硬纪律（触发会重复投递，但分析前回读
+// 审计发现已有 actor=auto 记录即跳过，不重跑）。
+const maxRCATriggerSeen = 10000
 
 // rcaAnalyzer 自动触发对分析编排器的最小依赖面（*RCAOrchestrator 满足）。
 // 抽成接口只为单测注入计数替身——运行时装配仍传真实的同一个 orchestrator
@@ -58,8 +67,9 @@ type RCATrigger struct {
 
 	queue chan string
 
-	mu   sync.Mutex
-	seen map[string]struct{} // 内存双保险：本进程内已触发过的 incident 集
+	mu        sync.Mutex
+	seen      map[string]struct{} // 内存双保险：本进程内已触发过的 incident 集
+	seenGuard *memguard.Guard     // P2-B2：seen 长值守卫（超限整体清空，正确性由 PG 双保险兜底）
 }
 
 // NewRCATrigger 构造触发器。orch 必非 nil（装配保证：仅 RCA 启用时才建）；
@@ -75,8 +85,33 @@ func NewRCATrigger(orch rcaAnalyzer, audit AuditLog, m *AppMetrics,
 	}
 	return &RCATrigger{
 		orch: orch, audit: audit, m: m, logf: logf,
-		queue: make(chan string, queueSize),
-		seen:  map[string]struct{}{},
+		queue:     make(chan string, queueSize),
+		seen:      map[string]struct{}{},
+		seenGuard: memguard.New("rca_auto_seen", maxRCATriggerSeen, 0),
+	}
+}
+
+// MemGuards 暴露有界结构护栏（装配层统一注册 /metrics；对齐 audit/ledger 做法）。
+func (t *RCATrigger) MemGuards() []*memguard.Guard {
+	if t == nil || t.seenGuard == nil {
+		return nil
+	}
+	return []*memguard.Guard{t.seenGuard}
+}
+
+// guardSeenLocked seen 长值守卫（必须持 t.mu）：超限整体清空并计淘汰。
+// 清空而非 LRU：量级小 + 触发偶发，且正确性由 PG 双保险兜底——内存 seen
+// 只是热路径去重，清空后重复触发多一次审计回读，不会重跑分析（见
+// alreadyAutoAnalyzed 的 actor=auto 回读）。memguard.Guard 自身互斥、锁内
+// 不再回调持有方，故 t.mu 内调用安全。
+func (t *RCATrigger) guardSeenLocked() {
+	if t.seenGuard == nil {
+		return
+	}
+	if t.seenGuard.Over(len(t.seen)) > 0 {
+		n := len(t.seen)
+		t.seen = make(map[string]struct{})
+		t.seenGuard.Evicted(n)
 	}
 }
 
@@ -104,6 +139,7 @@ func (t *RCATrigger) Trigger(inc incident.Incident) {
 	case t.queue <- inc.ID:
 		t.mu.Lock()
 		t.seen[inc.ID] = struct{}{}
+		t.guardSeenLocked()
 		t.mu.Unlock()
 	default:
 		// 队列满：丢弃计数，绝不阻塞 escalation（这是可接受的降级——

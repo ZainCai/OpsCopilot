@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestSchemaMaxVersionMatchesMigrationsDir 防漂移钉：SchemaMaxVersion 是手工
@@ -144,6 +145,54 @@ func TestSQLTextLiteral(t *testing.T) {
 	}
 	if got := sqlTextLiteral([]byte("raw")); got != "'raw'" {
 		t.Fatalf("bytes: %s", got)
+	}
+}
+
+// TestBackupFileHeaderInjectsSCS P2-C3：备份文件头注入会话设置——
+// sqlTextLiteral 双写单引号的正确性依赖 standard_conforming_strings=on，
+// 恢复重放本文件先设好，不依赖恢复会话默认值。
+func TestBackupFileHeaderInjectsSCS(t *testing.T) {
+	h := backupFileHeader(time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC))
+	if !strings.HasPrefix(h, "-- opscopilot upgrade 应用前逻辑备份") {
+		t.Fatalf("header must start with the banner, got %q", h)
+	}
+	for _, want := range []string{
+		"SET standard_conforming_strings = on;",
+		"-- 定位：开发/演示库的文本级快照",
+	} {
+		if !strings.Contains(h, want) {
+			t.Fatalf("header missing %q\n---\n%s", want, h)
+		}
+	}
+}
+
+// TestRedactDSN P2-C2：URL 与 keyword 两种 DSN 形态的口令都打码（此前
+// keyword 形态可把 password= 原样带进连接失败错误 / 启动 WARNING 日志）。
+func TestRedactDSN(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"postgres://opscopilot:secret@localhost:5432/opscopilot?sslmode=disable",
+			"***@localhost:5432/opscopilot?sslmode=disable"},
+		{"host=localhost port=5432 user=opscopilot password=secret sslmode=disable",
+			"host=localhost port=5432 user=opscopilot password=***"},
+		{"host=localhost password= sslmode=disable",
+			"host=localhost password=***"},
+		{"postgres://localhost/opscopilot", "postgres://localhost/opscopilot"},
+		{"host=localhost user=opscopilot sslmode=disable", "host=localhost user=opscopilot sslmode=disable"},
+	}
+	for _, c := range cases {
+		if got := redactDSN(c.in); got != c.want {
+			t.Fatalf("redactDSN(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	// 任何形态都不该出现明文口令段（含 URL query 里的 password=）。
+	for _, in := range []string{
+		"postgres://opscopilot:supersecret@h:5432/db",
+		"host=h password=supersecret",
+		"postgres://u:p@h/db?password=querysecret",
+	} {
+		if got := redactDSN(in); strings.Contains(got, "supersecret") || strings.Contains(got, "querysecret") {
+			t.Fatalf("redactDSN leaked secret: %q -> %q", in, got)
+		}
 	}
 }
 

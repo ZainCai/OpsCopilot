@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"opscopilot/internal/incident"
+	"opscopilot/pkg/memguard"
 )
 
 // fakeAnalyzer rcaAnalyzer 计数替身（记录 id+actor；err 非空则分析失败）。
@@ -409,5 +410,36 @@ func TestRCATriggerRealOrchestrator(t *testing.T) {
 	drain(t, tr2)
 	if n := countAuto(); n != 1 {
 		t.Fatalf("auto rca audit rows after simulated restart = %d, want still 1", n)
+	}
+}
+
+// TestRCATriggerSeenBoundedEviction P2-B2：seen 超限整体清空并计淘汰。
+// 清空后同一 incident 可再次投递——重复触发由 PG 双保险（worker 回读审计
+// actor=auto）兜底不重跑，内存 seen 只优化热路径。
+func TestRCATriggerSeenBoundedEviction(t *testing.T) {
+	tr := NewRCATrigger(&fakeAnalyzer{}, NewMemAuditLog(), NewAppMetrics(), 8, nil)
+	// 用极小上限触发清空路径（生产上限 10000 量级下测不到）。注意 Over 语义：
+	// size > max 才超限，size == max 不算。
+	tr.seenGuard = memguard.New("rca_auto_seen", 2, 0)
+	tr.seen = map[string]struct{}{"old1": {}, "old2": {}, "old3": {}}
+	tr.guardSeenLocked()
+	if len(tr.seen) != 0 {
+		t.Fatalf("seen must be emptied at cap, got %d entries", len(tr.seen))
+	}
+	if got := tr.seenGuard.Evictions(); got != 3 {
+		t.Fatalf("evictions = %d, want 3", got)
+	}
+
+	// Trigger 路径：塞满 → 超限清空 → 仍接受新触发（先投递成功再置 seen）。
+	tr2 := NewRCATrigger(&fakeAnalyzer{}, NewMemAuditLog(), NewAppMetrics(), 8, nil)
+	tr2.seenGuard = memguard.New("rca_auto_seen", 3, 0)
+	for i := 0; i < 5; i++ {
+		tr2.Trigger(incident.Incident{ID: fmt.Sprintf("i-%d", i), Severity: "critical"})
+	}
+	if len(tr2.seen) > 3 {
+		t.Fatalf("seen size = %d, want <= cap 3 after eviction", len(tr2.seen))
+	}
+	if tr2.seenGuard.Evictions() == 0 {
+		t.Fatal("seen eviction must be counted")
 	}
 }
