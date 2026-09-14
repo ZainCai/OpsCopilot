@@ -113,7 +113,9 @@ jobs:
     #      由 resolveBrowser 兜底命中）。若 runner 镜像变更导致缺失，报错信息会列出
     #      尝试路径，可设 WALKTHROUGH_BROWSER 或加 browser-setup 一步补救；
     #   2) preview 就绪时序——healthz 轮询后另起 preview 并轮询 5173 首页 200，
-    #      若冷启动慢再加大重试窗口；
+    #      若冷启动慢再加大重试窗口；2026-09-14 首跑修复：vite preview 默认
+    #      只监听 IPv6 [::1]，curl 127.0.0.1（IPv4）轮询必然超时红掉本 job，
+    #      故显式 --host 127.0.0.1 且走查 URL 同步用 127.0.0.1（IPv4 全链路一致）；
     #   3) web/.npmrc 指向 npmmirror（lockfile resolved 同源），海外 runner 拉取
     #      通常可用，若明显变慢/超时再评估 CI 侧 registry 覆盖；
     #   4) artifact 用 docs/reviews/web-walkthrough-* 通配，会连带仓库里已归档的
@@ -196,7 +198,7 @@ jobs:
       - name: 起 vite preview（构建产物 + preview.proxy 转发 /api → 8080）
         working-directory: web
         run: |
-          VITE_API_PROXY=http://127.0.0.1:8080 nohup npx vite preview --port 5173 --strictPort > /tmp/vite-preview.log 2>&1 &
+          VITE_API_PROXY=http://127.0.0.1:8080 nohup npx vite preview --host 127.0.0.1 --port 5173 --strictPort > /tmp/vite-preview.log 2>&1 &
           ok=""
           for _ in $(seq 1 15); do
             sleep 1
@@ -206,7 +208,7 @@ jobs:
           if [ -z "$ok" ]; then echo "preview 未就绪，/tmp/vite-preview.log："; cat /tmp/vite-preview.log; exit 1; fi
       - name: 双分辨率走查（5 视口 × 6 路由，非 0 退出码即红）
         working-directory: web
-        run: node scripts/walkthrough.mjs http://localhost:5173
+        run: node scripts/walkthrough.mjs http://127.0.0.1:5173
       - name: 收集后端/preview 日志进走查产物目录
         if: always()
         run: |
