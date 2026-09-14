@@ -73,7 +73,6 @@ body { font-family: var(--font-sans); background: var(--bg); color: var(--text);
 .panel-sub { font-size: 11.5px; font-weight: 400; color: var(--text-3); } /* weight:400 供粗体标题内嵌时不被加粗（替代视图内联 fontWeight） */
 .panel-x { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; } /* 窄屏折行（390px 双分辨率走查口径）：审计过滤条三控件超宽时换行而非撑破文档 */
 .panel-b { padding: var(--pad); }
-.panel-b--flush { padding: 0; }
 
 /* 表格 */
 .tbl-wrap { overflow-x: auto; }
@@ -168,11 +167,6 @@ body { font-family: var(--font-sans); background: var(--bg); color: var(--text);
 .tl-kind.k-change    { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent); background: color-mix(in srgb, var(--warn) 10%, transparent); }
 .tl-kind.k-action    { color: var(--brand); border-color: color-mix(in srgb, var(--brand) 40%, transparent); background: color-mix(in srgb, var(--brand) 10%, transparent); }
 
-/* 骨架占位 */
-.todo-box { border: 1px dashed var(--line); border-radius: var(--radius); padding: 22px;
-            color: var(--text-2); font-size: 12.5px; line-height: 1.8; }
-.todo-box code { font-family: var(--font-mono); color: var(--text-3); overflow-wrap: anywhere; } /* 长端点路径窄屏防横向溢出（390 走查实测） */
-
 /* ===== W11-2 · RCA 区块（事件详情） =====
    六步流水线/证据链/AI 结论卡片改用原型 .pipeline/.chain/.ai-card（见下方与 AI 卡片块），
    旧 .rca-step chips 与 .rca-conc 已随之移除；以下仅保留仍被引用的行内样式。 */
@@ -207,7 +201,6 @@ body { font-family: var(--font-sans); background: var(--bg); color: var(--text);
 .ai-title { font-size: 12.5px; font-weight: 600; color: var(--ai); letter-spacing: .3px; }
 .ai-text { margin: 9px 0 0; font-size: 13px; line-height: 1.65; }
 .ai-chips { display: flex; gap: 7px; margin-top: 10px; flex-wrap: wrap; }
-.ai-actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
 
 /* ===== W11-4 · Runbook 挂载台账（只记不执行；docs/前端契约-runbook.md） ===== */
 .rb-off { opacity: .55; }                                   /* 503（store 未接线）变灰，同 RCA/session 降级口径 */
@@ -313,8 +306,6 @@ body { font-family: var(--font-sans); background: var(--bg); color: var(--text);
 .nav-i:hover { background: var(--panel); color: var(--text); }
 .nav-i.on { background: color-mix(in srgb, var(--brand) 18%, transparent); color: var(--brand); font-weight: 600; }
 .nav-i .ic { flex: none; display: inline-flex; }
-.nav-badge { margin-left: auto; font-family: var(--font-mono); font-size: 11px; padding: 0 6px;
-             border-radius: 6px; background: color-mix(in srgb, var(--crit) 22%, transparent); color: var(--crit); }
 .side-foot { padding: 12px 16px; border-top: 1px solid var(--line-soft);
              font-size: 11px; color: var(--text-3); font-family: var(--font-mono); }
 
@@ -322,8 +313,6 @@ body { font-family: var(--font-sans); background: var(--bg); color: var(--text);
 .page-act { margin-left: auto; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
 /* 按钮补全（原型 btn 家族） */
-.btn--ghost { background: transparent; border-color: transparent; color: var(--text-2); }
-.btn--ghost:hover { background: var(--panel); color: var(--text); }
 .btn--crit { border-color: color-mix(in srgb, var(--crit) 50%, transparent); color: var(--crit); }
 .btn--crit:hover { background: color-mix(in srgb, var(--crit) 12%, transparent); }
 .switch { width: 34px; height: 19px; border-radius: 10px; background: var(--line);
@@ -349,7 +338,6 @@ body { font-family: var(--font-sans); background: var(--bg); color: var(--text);
 .chip--crit { color: var(--crit); border-color: color-mix(in srgb, var(--crit) 35%, transparent); background: color-mix(in srgb, var(--crit) 8%, transparent); }
 .chip--info { color: var(--info); border-color: color-mix(in srgb, var(--info) 35%, transparent); background: color-mix(in srgb, var(--info) 8%, transparent); }
 .chip--ai   { color: var(--ai);   border-color: color-mix(in srgb, var(--ai) 40%, transparent);   background: color-mix(in srgb, var(--ai) 10%, transparent); }
-.chip--brand { color: var(--brand); border-color: color-mix(in srgb, var(--brand) 40%, transparent); background: color-mix(in srgb, var(--brand) 10%, transparent); }
 .chip.gap { gap: 5px; }
 
 /* 状态圆点（crit 呼吸提示，原型 pulse 口径） */
@@ -367,9 +355,9 @@ body { font-family: var(--font-sans); background: var(--bg); color: var(--text);
 /* 12 栏页面栅格（原型 page-grid/col-*；kpi-grid 保留 auto-fit——我们卡数 4~5 浮动，
    原型定 5 列的先决条件是固定 5 卡，此处不强抄） */
 .page-grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 14px; }
-.col-3 { grid-column: span 3; } .col-4 { grid-column: span 4; } .col-5 { grid-column: span 5; }
-.col-6 { grid-column: span 6; } .col-7 { grid-column: span 7; } .col-8 { grid-column: span 8; }
-.col-9 { grid-column: span 9; } .col-12 { grid-column: span 12; }
+.col-4 { grid-column: span 4; } .col-5 { grid-column: span 5; }
+.col-7 { grid-column: span 7; } .col-8 { grid-column: span 8; }
+.col-12 { grid-column: span 12; }
 
 /* 标签页（事件过滤等横向页签场景） */
 .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 16px; overflow-x: auto; }
@@ -379,10 +367,6 @@ body { font-family: var(--font-sans); background: var(--bg); color: var(--text);
 .tab-i:hover { color: var(--text); }
 .tab-i.on { color: var(--brand); border-bottom-color: var(--brand); font-weight: 600; }
 .tab-n { font-family: var(--font-mono); font-size: 11px; background: var(--panel-2); border-radius: 5px; padding: 0 5px; color: var(--text-2); }
-
-/* 行内迷你进度条（表格置信度/占比列） */
-.meter { width: 92px; height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; }
-.meter i { display: block; height: 100%; border-radius: 3px; }
 
 /* RCA 六步流水线（原型 pipeline；第二轮已由 RcaPanel .rca-step chips 迁入此 markup） */
 .pipeline { display: flex; align-items: stretch; gap: 0; overflow-x: auto; padding: 4px 0 2px; }
@@ -434,11 +418,8 @@ body { font-family: var(--font-sans); background: var(--bg); color: var(--text);
 .flex-col { display: flex; flex-direction: column; }
 .flex-wrap { flex-wrap: wrap; }
 .items-center { align-items: center; }
-.justify-between { justify-content: space-between; }
-.gap-4 { gap: 4px; } .gap-6 { gap: 6px; } .gap-8 { gap: 8px; } .gap-10 { gap: 10px; } .gap-14 { gap: 14px; }
+.gap-6 { gap: 6px; } .gap-8 { gap: 8px; } .gap-10 { gap: 10px; } .gap-14 { gap: 14px; }
 .flex-1 { flex: 1 1 0%; min-width: 0; }
-.flex-none { flex: 0 0 auto; }
-.cursor-pointer { cursor: pointer; }
 /* 第二轮换皮补缺：视图内联样式收敛点（原型无同名条目的注明本轮新增） */
 .p-12 { padding: 12px; }                 /* 移植原型 styles.css:579 */
 .text-center { text-align: center; }     /* 本轮新增（原型该场景为内联） */
@@ -471,8 +452,7 @@ body { font-family: var(--font-sans); background: var(--bg); color: var(--text);
   .sidebar .brand > div:last-child { display: none; }
   .nav-group { display: none; }
   .nav-i { position: relative; justify-content: center; padding: 0; }
-  .nav-i > span:not(.nav-badge) { display: none; }
-  .nav-badge { position: absolute; top: 3px; right: 6px; margin-left: 0; padding: 0 4px; font-size: 10px; }
+  .nav-i > span { display: none; }
   .side-foot { display: none; }
 }
 
