@@ -134,6 +134,31 @@ EOF
   echo ""
 }
 
+# web_build 在 web/ 下执行构建（VITE_OPS_TOKEN 注入写端点密钥）。
+# npm 定位兼容：PATH 有 npm 直接用；否则用 PATH 中 node 同目录的 npm-cli.js
+# （Windows 常见：npm.cmd 在 node 安装目录，Git Bash 的 exec 不自动补 .cmd 后缀，
+# 直接 node npm-cli.js 最稳）。
+web_build() {
+  if command -v npm >/dev/null 2>&1; then
+    (cd "$ROOT/web" && VITE_OPS_TOKEN="$GRAY_TOKEN" npm run build)
+    return $?
+  fi
+  local node_bin node_dir npm_cli
+  node_bin="$(command -v node || true)"
+  if [ -z "$node_bin" ]; then
+    echo "ERROR: web build 失败：PATH 无 node/npm；请安装 Node.js 或手动 npm run build 后重试" >&2
+    return 1
+  fi
+  node_dir="$(dirname "$node_bin")"
+  npm_cli="$node_dir/node_modules/npm/bin/npm-cli.js"
+  if [ ! -f "$npm_cli" ]; then
+    echo "ERROR: web build 失败：$node_dir 下找不到 npm-cli.js" >&2
+    return 1
+  fi
+  (cd "$ROOT/web" && VITE_OPS_TOKEN="$GRAY_TOKEN" node "$npm_cli" run build)
+  return $?
+}
+
 do_start() {
   preflight
   if [ -f "$PIDFILE" ] && [ -s "$PIDFILE" ]; then
@@ -148,8 +173,13 @@ do_start() {
   # 入口，旧 UI 静默运行比显式报错更难排查）。
   if [ ! -f "$WEB_DIST/index.html" ] || [ -n "$(find "$ROOT/web/src" -type f -newer "$WEB_DIST/index.html" -print -quit 2>/dev/null)" ]; then
     echo "building web (dist 缺失或过期) → $WEB_DIST ..."
-    (cd "$ROOT/web" && npm run build) >&2 \
-      || { echo "ERROR: web build 失败（npm run build）；确认已安装 Node.js/npm 或手动构建后重试" >&2; exit 1; }
+    # VITE_OPS_TOKEN 注入写端点共享密钥（X-OpsCopilot-Token）：灰度 token=dev 是
+    # 本地 demo 密钥，打进产物可接受（api/token.ts 注释：仅内网调试注入）。
+    # 正式部署应留空，改用界面输入 sessionStorage 或反向代理注入请求头。
+    if ! web_build >&2; then
+      echo "ERROR: web build 失败（npm run build）；确认已安装 Node.js/npm 或手动构建后重试" >&2
+      exit 1
+    fi
   fi
   (cd "$ROOT" && go build -o "$OUT/faultinjector.exe" ./tools/faultinjector)
   (cd "$ROOT" && go build -o "$OUT/opscopilot.exe" ./cmd/opscopilot)
