@@ -60,8 +60,10 @@ var consolePage = bytes.Replace(consoleHTML, []byte("{{BUILD}}"), []byte(buildSt
 // consolePath 控制台路由。
 const consolePath = "/console"
 
-// registerConsole 把控制台挂到 mux（/ 与 /console 都可达）。
-func registerConsole(mux *http.ServeMux) {
+// registerConsole 把控制台挂到 mux（/console 恒注册；根路由仅在换皮 UI 未
+// 挂载时注册 302——rootTaken 由 registerWebUI 的返回值给出，避免 ServeMux
+// 模式冲突，保证 dist 缺失时行为与历史一致）。
+func registerConsole(mux *http.ServeMux, rootTaken bool) {
 	serve := func(w http.ResponseWriter, _ *http.Request) {
 		// no-store：控制台页面必须每次回源（见包注释「缓存纪律」）。
 		w.Header().Set("Cache-Control", "no-store, must-revalidate")
@@ -70,7 +72,9 @@ func registerConsole(mux *http.ServeMux) {
 		_, _ = w.Write(consolePage)
 	}
 	mux.HandleFunc("GET /console", serve)
-	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, consolePath, http.StatusFound)
-	})
+	if !rootTaken {
+		mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, consolePath, http.StatusFound)
+		})
+	}
 }

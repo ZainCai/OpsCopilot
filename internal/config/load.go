@@ -117,6 +117,10 @@ const (
 	EnvMemLimitNoiseClusters    = "OPS_MEMLIMIT_NOISE_CLUSTERS"
 	EnvMemLimitNoiseSigCache    = "OPS_MEMLIMIT_NOISE_SIGCACHE"
 	EnvMemLimitAudit            = "OPS_MEMLIMIT_AUDIT"
+
+	// EnvWebDist 换皮控制台静态目录（web/ React 构建产物）；空 = 禁用挂载
+	// （回退 /console 最小视图）。
+	EnvWebDist = "OPS_WEB_DIST"
 )
 
 // LookupFunc 与 os.LookupEnv 同签名（测试注入假环境，不碰全局 env）。
@@ -235,6 +239,9 @@ func LoadFrom(lookup LookupFunc) (*Config, error) {
 	c.MemLimit.NoiseClusters = p.posInt(EnvMemLimitNoiseClusters, DefaultMemNoiseClusters)
 	c.MemLimit.NoiseSigCache = p.posInt(EnvMemLimitNoiseSigCache, DefaultMemNoiseSigCache)
 	c.MemLimit.Audit = p.posInt(EnvMemLimitAudit, DefaultMemAudit)
+
+	// 换皮控制台静态目录：默认 web/dist（相对 cwd）；显式空串 = 禁用挂载。
+	c.UI.WebDist = p.strOr(EnvWebDist, DefaultWebDist)
 
 	if len(p.errs) > 0 {
 		return nil, &Error{Errs: p.errs}

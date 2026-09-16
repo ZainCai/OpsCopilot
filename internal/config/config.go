@@ -327,6 +327,12 @@ type MetricsSection struct {
 	NotifyBodyLimit       int64         // 通知渠道配置请求体上限，64KiB
 }
 
+// UISection 换皮控制台（web/ React 工程构建产物静态挂载，替代只读 console.html
+// 作为首页）。dist 缺失/无效时装配层自动回退 /console，不影响既有功能。
+type UISection struct {
+	WebDist string // OPS_WEB_DIST；默认 "web/dist"（相对工作目录）；空 = 强制禁用挂载
+}
+
 // Config all-in-one 进程配置（schema 见各分组注释；env 清单文档镜像
 // docs/配置清单-OpsEnv.md 与 .env.example）。
 type Config struct {
@@ -352,6 +358,7 @@ type Config struct {
 	Session   SessionSection
 	MemLimit  MemLimitSection
 	Metrics   MetricsSection
+	UI        UISection
 }
 
 // Validate 全局校验：双 Redis 角色不得互换、地址不得相同（防止偷偷合并回
@@ -445,6 +452,9 @@ const (
 	// DefaultListenAddr HTTP 监听地址默认值（全局审查 S1：默认只绑回环——
 	// 进程暴露了可写的变更 webhook，无鉴权服务不得默认监听全部网络接口）。
 	DefaultListenAddr = "127.0.0.1:8080"
+	// DefaultWebDist 换皮控制台静态目录（OPS_WEB_DIST 默认）：相对工作目录，
+	// 随 exe 启动位置解析（run_demo/灰度脚本均在项目根拉起，可直读 web/dist）。
+	DefaultWebDist = "web/dist"
 	// DefaultAlertRedisAddr / DefaultCacheRedisAddr 仅用于 Defaults()（测试/
 	// 嵌入式构造基线）。**Load 通道不套用**：两个 Redis 地址 env 缺失即
 	// fail-fast（v1.2 C2 / G1"缺一拒绝启动"不放松）。
@@ -659,6 +669,7 @@ func Defaults() *Config {
 	c.Metrics.IncidentBodyLimit = DefaultIncidentBodyLimit
 	c.Metrics.ChangeBodyLimit = DefaultChangeBodyLimit
 	c.Metrics.NotifyBodyLimit = DefaultNotifyBodyLimit
+	c.UI.WebDist = DefaultWebDist
 	return c
 }
 

@@ -99,6 +99,8 @@ type Assembly struct {
 	logf func(string, ...any)
 	// pool DB 连接池（事件 Store / 导入队列 / 审计共享；生命周期归装配）。
 	pool *pgxpool.Pool
+	// cfg 装配期配置快照（路由层只读：换皮控制台目录等）。
+	cfg *config.Config
 	// sessionRDB 会话热态 Redis 客户端（OPS_SESSION=on 时装配自持，停机随
 	// Close 关闭；main.go 里 noise 侧的告警实例客户端是另一条链路，不复用
 	// ——降噪 off 时那台 client 根本不存在，会话不能借它）。
@@ -415,6 +417,7 @@ func NewAssembly(logger connector.Logger, cfg *config.Config) (*Assembly, error)
 		audit:     audit,
 		logf:      logf,
 		pool:      pgPool,
+		cfg:       cfg,
 	}
 	// 渠道 CRUD 后热生效：REST 写入配置即回调重载注册表（否则新渠道要
 	// 重启才生效——"配置改了没反应"是运维最恨的一类 bug）。
@@ -638,6 +641,9 @@ func (a *Assembly) Handler() http.Handler {
 		mux.HandleFunc("POST /api/v1/ingest/alertmanager", unavailable)
 		mux.HandleFunc("POST /api/v1/ingest/webhook", unavailable)
 	}
-	registerConsole(mux)
+	// 换皮控制台（web/dist）：先注册——成功则根路由归新 UI，/console 保留；
+	// 失败（dist 缺失/禁用）时 registerConsole 接管根路由 302（历史行为）。
+	webOK := registerWebUI(mux, a.cfg.UI.WebDist)
+	registerConsole(mux, webOK)
 	return mux
 }
