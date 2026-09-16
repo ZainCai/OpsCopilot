@@ -74,6 +74,9 @@ func registerConsole(mux *http.ServeMux, rootTaken bool) {
 	mux.HandleFunc("GET /console", serve)
 	if !rootTaken {
 		mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+			// 302 同样必须 no-store：此前的根跳转被浏览器启发式缓存过，
+			// 换皮 UI 挂载后旧跳转会继续把用户带到 /console（W-UI 实测坑）。
+			w.Header().Set("Cache-Control", "no-store, must-revalidate")
 			http.Redirect(w, r, consolePath, http.StatusFound)
 		})
 	}

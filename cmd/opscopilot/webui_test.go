@@ -88,6 +88,9 @@ func TestWebUIFallsBackWhenDistInvalid(t *testing.T) {
 	if loc := rec.Header().Get("Location"); loc != "/console" {
 		t.Fatalf("GET /: Location = %q, want /console", loc)
 	}
+	if cc := rec.Header().Get("Cache-Control"); !strings.Contains(cc, "no-store") {
+		t.Fatalf("GET /: 302 缺 no-store（浏览器会缓存旧跳转）, Cache-Control = %q", cc)
+	}
 }
 
 func TestWebUIDisabledWhenEmpty(t *testing.T) {
@@ -102,6 +105,9 @@ func TestWebUIDisabledWhenEmpty(t *testing.T) {
 	}
 	if loc := rec.Header().Get("Location"); loc != "/console" {
 		t.Fatalf("GET /: Location = %q, want /console", loc)
+	}
+	if cc := rec.Header().Get("Cache-Control"); !strings.Contains(cc, "no-store") {
+		t.Fatalf("GET /: 302 缺 no-store, Cache-Control = %q", cc)
 	}
 }
 
