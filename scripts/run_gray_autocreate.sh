@@ -37,6 +37,8 @@ GRAY_TOKEN="${GRAY_WEBHOOK_TOKEN:-dev}"
 DB_DSN="${GRAY_DB_DSN:-postgres://opscopilot:opscopilot@127.0.0.1:5432/opscopilot?sslmode=disable}"
 INJ_SCALE="${GRAY_SCALE:-1.0}"
 INJ_WARMUP="${GRAY_WARMUP:-60}"
+# 换皮控制台静态目录（web/ React 构建产物；注入 OPS_WEB_DIST）。
+WEB_DIST="${GRAY_WEB_DIST:-$ROOT/web/dist}"
 
 mkdir -p "$OUT"
 WINOUT="$(cygpath -w "$OUT")"
@@ -105,7 +107,7 @@ do_status() {
   fi
   echo "  healthz  $OPS_URL : $(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' --max-time 4 "$OPS_URL/healthz" || true)"
   echo "  注入器   $INJ_URL : $(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' --max-time 4 "$INJ_URL/-/healthy" || true)"
-  echo "  控制台   $OPS_URL/console    读数: bash scripts/gray_autocreate_status.sh"
+  echo "  控制台   $OPS_URL/（换皮 web UI）；$OPS_URL/console（最小视图）  读数: bash scripts/gray_autocreate_status.sh"
 }
 
 seed_push() {
@@ -141,6 +143,14 @@ do_start() {
   port_open "$OPS_PORT" && { echo "ERROR: $OPS_PORT 已被占（上一次的灰度实例？先 stop）" >&2; exit 1; }
 
   echo "building → $OUT/ ..."
+  # 换皮控制台（web/ React 产物，OPS_WEB_DIST）：dist 缺失或源码更新时重建。
+  # 依赖 npm（Git Bash PATH 需含 node/npm；缺失即中止并给指引——首页是用户
+  # 入口，旧 UI 静默运行比显式报错更难排查）。
+  if [ ! -f "$WEB_DIST/index.html" ] || [ -n "$(find "$ROOT/web/src" -type f -newer "$WEB_DIST/index.html" -print -quit 2>/dev/null)" ]; then
+    echo "building web (dist 缺失或过期) → $WEB_DIST ..."
+    (cd "$ROOT/web" && npm run build) >&2 \
+      || { echo "ERROR: web build 失败（npm run build）；确认已安装 Node.js/npm 或手动构建后重试" >&2; exit 1; }
+  fi
   (cd "$ROOT" && go build -o "$OUT/faultinjector.exe" ./tools/faultinjector)
   (cd "$ROOT" && go build -o "$OUT/opscopilot.exe" ./cmd/opscopilot)
 
@@ -155,7 +165,7 @@ do_start() {
   echo "starting opscopilot gray instance ($OPS_URL, tenant=$GRAY_TENANT) ..."
   # 段一参数组（ADR-016）+ run_demo 同款链路接法；OPS_PULL_ALERTS=on 让场景告警
   # 走链路 A 拉取入队（source_ref=promFingerprint）与 push 在队列汇流。
-  local psenv="\$env:OPS_TENANT='$GRAY_TENANT';\$env:OPS_INCIDENT_AUTOCREATE='on';\$env:OPS_INGEST_BATCH='500';\$env:OPS_INGEST_INTERVAL='1s';\$env:OPS_NOISE_MODE='enforce';\$env:OPS_AUTOATTACH='on';\$env:OPS_PULL_ALERTS='on';\$env:OPS_DB_DSN='$DB_DSN';\$env:REDIS_ALERT_ADDR='127.0.0.1:6380';\$env:REDIS_CACHE_ADDR='127.0.0.1:6381';\$env:OPS_PROM_URL='$INJ_URL';\$env:OPS_WEBHOOK_TOKEN='$GRAY_TOKEN';\$env:OPS_TOPOLOGY_EDGES='n1->n2,n2->n3';\$env:OPS_LISTEN_ADDR='127.0.0.1:$OPS_PORT';"
+  local psenv="\$env:OPS_TENANT='$GRAY_TENANT';\$env:OPS_INCIDENT_AUTOCREATE='on';\$env:OPS_INGEST_BATCH='500';\$env:OPS_INGEST_INTERVAL='1s';\$env:OPS_NOISE_MODE='enforce';\$env:OPS_AUTOATTACH='on';\$env:OPS_PULL_ALERTS='on';\$env:OPS_DB_DSN='$DB_DSN';\$env:REDIS_ALERT_ADDR='127.0.0.1:6380';\$env:REDIS_CACHE_ADDR='127.0.0.1:6381';\$env:OPS_PROM_URL='$INJ_URL';\$env:OPS_WEBHOOK_TOKEN='$GRAY_TOKEN';\$env:OPS_TOPOLOGY_EDGES='n1->n2,n2->n3';\$env:OPS_LISTEN_ADDR='127.0.0.1:$OPS_PORT';\$env:OPS_WEB_DIST='$(cygpath -m "$WEB_DIST")';"
   local ops_pid
   ops_pid="$(ps_start "$WINOUT\\opscopilot.exe" "" \
     "$WINOUT\\opscopilot.out.log" "$WINOUT\\opscopilot.err.log" "$psenv")"
@@ -179,7 +189,7 @@ do_start() {
   seed_push
   echo ""
   echo "灰度段一在跑：pidfile=$PIDFILE (injector $inj_pid / opscopilot $ops_pid)"
-  echo "  控制台   $OPS_URL/console"
+  echo "  控制台   $OPS_URL/（换皮 web UI）；$OPS_URL/console（最小视图）"
   echo "  读数     bash scripts/gray_autocreate_status.sh   （一次性，人跑）"
   echo "  停止     bash scripts/run_gray_autocreate.sh stop"
   echo "注意：注入器 warmup ${INJ_WARMUP}s + 场景节拍（连接器 30s 采集）——autoattach"
