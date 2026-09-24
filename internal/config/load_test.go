@@ -155,6 +155,24 @@ func TestLoadFromDefaultsAutoAttach(t *testing.T) {
 	}
 }
 
+// TestLoadFromDefaultsAutoCreateOn ADR-016 段三（2026-09-24 拍板）：出厂默认
+// off → on；显式 off 仍可关闭（影子期语义保留）。
+func TestLoadFromDefaultsAutoCreateOn(t *testing.T) {
+	c, err := LoadFrom(envMap(redisEnv("127.0.0.1:6380", "127.0.0.1:6381")))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !c.Ingest.AutoCreate {
+		t.Fatal("OPS_INCIDENT_AUTOCREATE default must be on (ADR-016 段三转正)")
+	}
+	env := redisEnv("127.0.0.1:6380", "127.0.0.1:6381")
+	env[EnvIngestAutoCreate] = "off"
+	c2, err := LoadFrom(envMap(env))
+	if err != nil || c2.Ingest.AutoCreate {
+		t.Fatalf("explicit off must load with AutoCreate=false: %v (%+v)", err, c2.Ingest)
+	}
+}
+
 func TestValidateAutoAttachRequiresEnforce(t *testing.T) {
 	// W10-6：挂点在 enforce 判决 new-incident 联动路径——shadow 或降噪关闭
 	// 时永不触发，同款 RCA_AUTO/SESSION 的 fail-fast。

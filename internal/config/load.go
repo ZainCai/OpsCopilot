@@ -172,7 +172,7 @@ func LoadFrom(lookup LookupFunc) (*Config, error) {
 	c.Pull.Enabled = p.onOff(EnvPullAlerts, false)
 	c.Pull.Interval = p.posDur(EnvPullInterval, DefaultPullInterval)
 
-	c.Ingest.AutoCreate = p.onOff(EnvIngestAutoCreate, false)
+	c.Ingest.AutoCreate = p.onOff(EnvIngestAutoCreate, true) // ADR-016 段三：出厂默认 on（2026-09-24 拍板）
 	c.Ingest.Interval = p.posDur(EnvIngestInterval, DefaultIngestInterval)
 	c.Ingest.Batch = p.posInt(EnvIngestBatch, DefaultIngestBatch)
 	c.Ingest.RateLimit = p.posInt(EnvIngestRateLimit, DefaultIngestRateLimit)
