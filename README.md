@@ -36,7 +36,7 @@ opscopilot/
 | M2（W9~W11：enforce 端到端 + 事件域主工作台 + RCA 可用 + 交付收尾） | ✅ 已出口（2026-09-13，附 3 条件全部闭环） | `docs/M2出口评审纪要-2026-09-13.md`；出口条件①CI 首跑确认见 §三 P1-3 行（run #87 全绿）、②M3 排期入池已随 M3 闭环、③升级通道宣贯已入 README 拒启矩阵 |
 | M3（round10 P2 遗留 15 项，阶段 1-3） | ✅ 全部完成（阶段1 `61ad06c` / 阶段2 `81ade6b` / 阶段3 `b5087fe`） | `docs/reviews/round10-P2遗留-M3清单.md`（M3 闭环回填节：逐项 commit + 落地要点） |
 | 全局精简（web 死类 + tools poll 合并） | ✅ 已推送（`e5c8637` / `7be4abd`，行为不变 + 逐项清单审查） | 精简清单见两次 commit message |
-| ADR-016 autoCreate 转正灰度（段一/段二） | 🔄 段二观察中（观察窗 2026-09-13 21:05 → 09-20；中期四项判据全绿） | `docs/adr/ADR-016-autocreate-promotion-gray.md` 灰度执行记录 |
+| ADR-016 autoCreate 转正（段一→段三） | ✅ 已转正（2026-09-24 拍板：出厂默认 off→on；段二四项判据全绿，到期评估见 ADR-016 灰度执行记录） | `docs/adr/ADR-016-autocreate-promotion-gray.md` 灰度执行记录 |
 
 ## 本机环境说明（重要）
 
@@ -77,7 +77,7 @@ export OPS_TEST_PG_DSN='postgres://opscopilot:opscopilot@localhost:5432/opscopil
 | `OPS_DB_DSN` | 空 = 内存降级 | TimescaleDB 真相源（事件/队列/审计/变更/渠道共池，D7 `OPS_DB_MAX_CONNS=16`） |
 | `OPS_NOISE_MODE` | `shadow` | **ADR-011 转正模式**：`shadow` 只标注不拦截；`enforce` 真拦截 + 放行通知；非法值启动失败。回退 = 改回 shadow 重启 |
 | `OPS_AUTOATTACH` | `off` | **W10-6 簇→事件生产自动挂簇**：`on`（须 enforce，Validate 强制）时 new-incident 判决自动建单 + `AttachCluster` 挂簇 + `attach_cluster` 审计；共簇冲突跳过计 `opscopilot_autoattach_total{outcome}`；建单幂等键与链路 A 同源不双建。详见 `.env.example` |
-| `OPS_INCIDENT_AUTOCREATE` | `off` | 链路 A 外部告警自动建单：**默认 off，转正见 [ADR-016](docs/adr/ADR-016-autocreate-promotion-gray.md)**——off 时只入 `ingest_queue` 排队不建单（影子期，可回放）；on 须随附调优参数 `OPS_INGEST_BATCH=500`/`OPS_INGEST_INTERVAL=1s`（默认参数端到端建单仅 ≈4 ev/s，容量基线 §2.2） |
+| `OPS_INCIDENT_AUTOCREATE` | `on` | 链路 A 外部告警自动建单：**默认 on（ADR-016 段三已转正，2026-09-24 拍板）**——on 时队列消费即建单；off = 只入 `ingest_queue` 排队不建单（影子期，可回放）；on 须随附调优参数 `OPS_INGEST_BATCH=500`/`OPS_INGEST_INTERVAL=1s`（默认参数端到端建单仅 ≈4 ev/s，容量基线 §2.2） |
 | `OPS_RCA` / `OPS_RCA_AUTO` | `on` / `off` | **ADR-014/二期池 #4**：按需根因分析 `GET /api/v1/incidents/{id}/rca`；`on` 时 critical 升级成功 → 异步自动 RCA（actor=auto） |
 | `OPS_LLM_ENDPOINT` 等 `OPS_LLM_*` | 空 = 禁用 | **ADR-015**：llm-gateway（OpenAI-compatible 单出口）接线 RCA conclude 与复盘会话；密钥绝不入库/入日志；超时预算 LLM ≤ RCA − 2s |
 | `OPS_SESSION` | `off` | **二期池 #7**：RCA 复盘会话 `GET/POST /api/v1/incidents/{id}/rca/session`（热态 alert-Redis + PG 真相 000018，懒恢复；LLM 未配 fail-open pending） |

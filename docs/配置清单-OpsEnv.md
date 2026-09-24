@@ -96,7 +96,7 @@ M2 **只记录与展示**，不驱动自动升级（OPS_ESCALATION_* 是独立�
 | 23 | `OPS_NOISE_SINK_DRAIN` | 降噪 | 正 duration | `5s`（同上；对齐 PG 语句超时 pgSinkTimeout 与停机预算） | **启动失败** | 停机 drain 上限超时：`StopVerdictWriter` 排空存量至多等本值，超时残量计 `opscopilot_noise_sink_drops_total{store}` 后放行停机（不再无限等） |
 | 24 | `OPS_PULL_ALERTS` | 拉取链路 | on/off | `off` | 非 on/off → **启动失败** | `cfg.Pull.Enabled` → `buildAlertPoller`（on 但缺 `OPS_PROM_URL` 仍是 WARNING+禁用，非配置非法） |
 | 25 | `OPS_PULL_INTERVAL` | 拉取链路 | 正 duration | `30s` | 原"WARNING 后取 30s"→ **启动失败** | `cfg.Pull.Interval` → `AlertPoller` |
-| 26 | `OPS_INCIDENT_AUTOCREATE` | ingest 队列 | on/off | `off`（影子期） | 非 on/off → **启动失败** | `cfg.Ingest.AutoCreate` → `IngestWorker`（off = 只排队不建单） |
+| 26 | `OPS_INCIDENT_AUTOCREATE` | ingest 队列 | on/off | `on`（ADR-016 段三转正，2026-09-24；on 须随附 `OPS_INGEST_BATCH=500`/`OPS_INGEST_INTERVAL=1s` 调优，见 ADR-016） | 非 on/off → **启动失败** | `cfg.Ingest.AutoCreate` → `IngestWorker`（on = 队列消费即建单；off = 只排队不建单，影子期可回放） |
 | 27 | `OPS_INGEST_INTERVAL` | ingest 队列 | 正 duration | `5s`（原构造函数写死默认） | **启动失败**（新增 env 通道） | `IngestWorker` 消费轮询 |
 | 28 | `OPS_INGEST_BATCH` | ingest 队列 | 正整数 | `20`（同上） | **启动失败** | `IngestWorker.batch` / 批超时规模因子 |
 | 29 | `OPS_INGEST_RATE_LIMIT` | ingest 队列 | 正整数 | `50`（**原 ingest_queue.go 魔法数字 burst 上限，#10**） | **启动失败** | `IngestWorker.applyRateLimit`（R1 风暴折叠聚合单） |

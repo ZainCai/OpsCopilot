@@ -197,3 +197,19 @@ OPS_INGEST_INTERVAL=1s          # 默认 5s → 1s
     `.env.example` 三处"默认 off"描述）；按 ADR 硬性关口，拍板前须带
     `AUTOCREATE=on + 调优参数组` 复跑 `scripts/run_capacity_baseline.sh`；
     不达标则维持 off 回段一——当前判据全绿，无回退触发。
+- **段三执行（2026-09-24 拍板：出厂默认 off → on）**：
+  - **代码**：`internal/config/load.go` `OPS_INCIDENT_AUTOCREATE` 默认
+    `false → true`；新增 `TestLoadFromDefaultsAutoCreateOn` 锁定默认 on +
+    显式 off 仍可关闭（影子期语义保留）。
+  - **三处描述同步**：README env 表 / `docs/配置清单-OpsEnv.md` #26 /
+    `.env.example`（默认值列与注释改 on，附调优参数随附提示与影子期 off 语义）。
+  - **容量基线硬关口处理（本机受限说明）**：`run_capacity_baseline.sh` 依赖
+    Docker CLI/`docker exec`（psq 走容器），本机无 Docker（栈由本机进程直接
+    监听）→ 无法在开发机复跑。替代证据链：①ADR 验收口径允许引用容量基线
+    M1 段数据（消费侧瓶颈 ≈6ms/条串行、调优 500/1s 实测 ≈160 ev/s、双 worker
+    2.1× 线性）；②灰度即以 on+500/1s 参数组运行中，段二整窗 pending=0 无积压
+    = M1 消费阶梯活体复证；③风暴折叠路径引用容量基线 §2.3 实测（92k 事件压入
+    仅 ~150 真单+3 聚合单，rate_limited=0 全程未触发）。正式 CI/带 Docker
+    环境可补跑。
+  - **回退成本**：改回 off 重启即影子态，已建单不删、队列语义不变（ADR
+    原文承诺维持）。
