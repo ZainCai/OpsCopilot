@@ -171,8 +171,29 @@ OPS_INGEST_INTERVAL=1s          # 默认 5s → 1s
   3420 样本全 ≤0.25s，P95≈0.02s / P99≈0.03s、均值 11.9ms——无零星慢轮（对比容量基线
   P95 秒级依赖活跃告警数，当前场景量级未及）。四项判据中期全绿。注：本机系统 bash 指向
   WSL（无 go/curl），读数须用 Git Bash（`C:\Program Files\Git\bin\bash.exe`）。
-- **段二·一周观察窗到期评估（待填，到期日 2026-09-20）**：留此一行——届时按本 ADR
-  段二判据核对 ≥7 天读数：误建单争议=0、`conflict` 计数不增长、`ingest_queue
-  Pending` 无持续增长、burst 折叠段排空时长可接受，并附 `gray_autocreate_status.sh`
-  首末两次读数（判断标准：pending 峰值 ≪ 批量×排空速率且趋势平/降；
-  attached/(attached+skipped) 无恶化；drops 恒 0——非 0 即查 sink 预算）。
+- **段二·一周观察窗到期评估（2026-09-24 补做收口；到期时刻 2026-09-20 21:05，
+  原 09-20 21:00 定时评估任务执行失败，此为补做）**：
+  - **首末读数对账**（判据口径：pending 峰值 ≪ 批量×排空速率且趋势平/降、
+    attached/(attached+skipped) 无恶化、drops 恒 0）——
+    基线 09-13 21:05：attached=4/conflict=0/skipped=0、alerts_processed=102、
+    ingest pending=0/入队104=消费104/死信0、incident=9；
+    末次 09-24 12:13：`attach_cluster` 审计 总=579、incident(gray01) 总=25、
+    create 审计 总=27（rate_limited 0、burst 聚合单 0）、
+    ingest pending=0/近24h入队22=消费22/死信0、
+    `opscopilot_noise_sink_drops_total{pg|redis|other}=0`、sink 队列=0。
+  - **四项判据核对**：①误建单争议=0 ✅（create 审计 27 条全程无争议标记）②conflict
+    不增长 ✅（审计 conflict=0，metrics 进程态亦 0）③`ingest_queue` Pending 无持续
+    增长 ✅（09-13/09-15/09-24 三次读数 pending 恒 0，无积压）④burst 折叠段排空时长
+    可接受 ✅（观察窗内 rate_limited=0、burst 聚合单=0，折叠路径未触发，N/A 无异常）。
+  - **决策延迟观察项**：中段 09-15 3420 样本全 ≤0.25s、P99≈0.03s 无零星慢轮；
+    末次 09-24 为重启后 13min 窗口 20 样本，18/20 ≤25ms、2 个 2.5–5s 慢轮
+    （mean 275ms）——归因 11:56 系统重启后 12:00 拉起的启动瞬态（warmup/建连），
+    非稳态劣化；建议段三拍板前附 24h 稳态复核（可选加强项）。
+  - **中断注记**：观察窗内系统重启 3 次（09-16 02:29、09-17 10:07、09-24 11:56）+
+    进程被外部强杀 2 次（09-17 13:35、09-18 01:05），恢复后读数未受污染；
+    累计有效运行 ≥7 天。
+  - **结论：达标 ✅ —— 建议进入段三：团队拍板把 `OPS_INCIDENT_AUTOCREATE` 出厂
+    默认改 `on`**（需同步 README env 表 / `docs/配置清单-OpsEnv.md` #26 /
+    `.env.example` 三处"默认 off"描述）；按 ADR 硬性关口，拍板前须带
+    `AUTOCREATE=on + 调优参数组` 复跑 `scripts/run_capacity_baseline.sh`；
+    不达标则维持 off 回段一——当前判据全绿，无回退触发。
