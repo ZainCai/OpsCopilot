@@ -23,7 +23,7 @@ OpsCopilot 智能运维副驾驶完成 M1/M2/M3 三线收口与全局精简，CI
 - 噪声治理：shadow → enforce 转正，Gate 持久化计数，sink 异步写 PG（drops 指标化）
 - 事件域主工作台：事件列表（游标分页）、混合时间线（mem/PG 契约体）、SLA 时钟、运维 KPI、全局审计检索、通知渠道 CRUD（generic/feishu/wecom）、值班升级
 - RCA：六步最小链路（ADR-014）+ llm-gateway conclude（ADR-015），评测集 top-1 4/4 = 100%
-- 自动挂簇/建单：`OPS_AUTOATTACH`（enforce 下直写收敛同单）；`OPS_INCIDENT_AUTOCREATE` 默认 off，按 ADR-016 三段灰度推进（当前段二观察中）
+- 自动挂簇/建单：`OPS_AUTOATTACH`（enforce 下直写收敛同单）；`OPS_INCIDENT_AUTOCREATE` 默认 **on**（ADR-016 段三已转正，2026-09-24 拍板；on 须随附 `OPS_INGEST_BATCH=500`/`OPS_INGEST_INTERVAL=1s` 调优，off = 只排队不建单的影子期语义保留）
 - 升级闸门：`opscopilot upgrade` 兼容 PK/golang-migrate 双形状 + 备份恢复演练（RTO/RPO 分钟级）
 - 前端：web/ 独立工程（ADR-013），5 视口 × 6 路由走查自动化纳入 CI
 
@@ -36,7 +36,8 @@ OpsCopilot 智能运维副驾驶完成 M1/M2/M3 三线收口与全局精简，CI
 
 ## 灰度与观察项（发布时点）
 
-- **ADR-016 段二观察中**：观察窗 2026-09-13 21:05 → 09-20；中期（09-15）四项判据全绿（attached=146 / conflict=0 / pending=0 / drops=0），决策延迟 3420 样本 P99≈0.03s 无零星慢轮
+- **ADR-016 段二观察中（发布时点记录）**：观察窗 2026-09-13 21:05 → 09-20；中期（09-15）四项判据全绿（attached=146 / conflict=0 / pending=0 / drops=0），决策延迟 3420 样本 P99≈0.03s 无零星慢轮
+- **段三转正（2026-09-24 更新）**：段二到期评估四项判据全绿（误建单=0 / conflict=0 / pending 恒 0 / burst 未触发、drops 恒 0），拍板出厂默认 off → on，代码/测试/文档同步已完成（commit `dc7583b` / `24280e8`）；容量基线硬关口因本机无 Docker 以「引用容量基线 §2.2 + 灰度活体复证」替代，详见 ADR-016 段三执行记录
 - 观察项记录在案：双实例共享 PG P95 劣化 4.6×、决策延迟 P99 零星慢轮（容量基线标注，多实例部署必查）
 
 ## 已知限制（详见 README「已知限制」）
