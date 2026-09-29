@@ -5,7 +5,9 @@
 //     逻辑同进程复用，错误统一经 gRPC status → HTTP 映射——一套语义
 //     两个门面，不会漂移；
 //   - 读路径（GET）默认无鉴权：S1 下 bind loopback-only，非回环暴露
-//     必须前置鉴权反代（main 启动警告已覆盖）；
+//     必须前置鉴权反代（main 启动警告已覆盖）；回环形态本身也不是无条件
+//     安全——浏览器可从受害者机器上打进来（DNS rebinding），故另有 Host 头
+//     白名单中间件（见本文件"Host 头校验"段，第十一轮 P1-1）；
 //   - 写路径仅 POST /api/v1/incidents（人工建单，W9 双链路链路 B），
 //     必须携带共享密钥（复用 ChangeWebhook 的 authorized 件）；
 //   - Go 1.22+ ServeMux 增强路由：method + {key} 路径参数 + PathValue。
@@ -13,6 +15,7 @@ package main
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -229,6 +232,106 @@ func (g *RESTGateway) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/notify/channels", g.handleNotifyChannels)
 	mux.HandleFunc("POST /api/v1/notify/channels/{name}/enabled", g.handleNotifyChannelItem)
 	mux.HandleFunc("DELETE /api/v1/notify/channels/{name}", g.handleNotifyChannelItem)
+}
+
+// ---- Host 头校验（第十一轮 P1-1：DNS rebinding 穿透回环门禁）----
+//
+// 威胁模型：默认部署 = 回环监听 + 空 token（ADR-009 的"安全默认"）。此时
+// authorized() 恒真、读路径本就无 Token，而"回环 = 只有本机能访问"这条前提
+// 对浏览器不成立：受害者机器上的恶意网页可把自家域名 DNS rebinding 到
+// 127.0.0.1 —— 请求从本机发出（监听方看是本机连接），对浏览器看是**同源**
+// （CORS 不拦），于是能读全局审计（高敏、读路径无 Token）并写全部写端点。
+// 这正是 ADR-009:7 自认的"代码层没有任何强制"缺口。
+//
+// 阻断点：浏览器不允许脚本伪造 Host，rebinding 请求必然携带**真实域名**的
+// Host 头；而合法本机调用的 Host 只会是回环形态。故回环监听时把 r.Host 收进
+// 白名单，不符即 403。
+//
+// 非回环监听**不启用**此校验：那种形态 ADR-009 已强制 token 门禁（无 token
+// 直接启动失败），且前置鉴权反代/自定义域名会让 Host 白名单变成误杀源。
+//
+// 覆盖面：接线单点在 newHTTPServer（包在整棵 mux 之外），因此 REST 读端点、
+// SSE 事件流、/console、换皮 UI 静态资源、/metrics、/healthz 与全部写路径
+// 一视同仁——留一个豁免路由就是留一条穿透路径。
+
+// hostGuardRejection 403 固定文案：不回显 r.Host（把用户可控输入反射进响应体
+// 是 XSS/日志注入的老坑），也不说明期望形态（那等于给攻击者对齐口径）。
+const hostGuardRejection = "forbidden: Host header not allowed"
+
+// loopbackHostForms 回环 host 的三个规范形态。IPv6 带方括号：r.Host 用的是
+// RFC 3986 host 形态（`[::1]:8080`），裸 `::1` 不会出现在 Host 头里。
+var loopbackHostForms = []string{"127.0.0.1", "localhost", "[::1]"}
+
+// listenAddrPort 取监听地址里的端口；拆不出（只写了 host）返回空串。
+func listenAddrPort(listenAddr string) string {
+	addr := strings.TrimSpace(listenAddr)
+	if _, port, err := net.SplitHostPort(addr); err == nil {
+		return port
+	}
+	return ""
+}
+
+// hostGuardAllowSet 构造回环监听下的 r.Host 白名单（字符串全等比对）。
+//
+// 集合构造规则（port 取配置的监听端口）：
+//   - 三个回环形态各带配置端口：`127.0.0.1:P`、`localhost:P`、`[::1]:P`；
+//   - 同时收进三个**裸形态**（无端口）：HTTP/1.1 允许客户端省略 :port
+//     （`curl -H 'Host: localhost'` 与部分探活脚本就是这么发的）。裸回环形态
+//     与 rebinding 域名（`evil.com[:P]`）不可能碰撞，放宽不削弱防护；
+//   - 配置端口不可知（只写了 host，或 `:0` 让内核派随机端口）时，集合只含裸
+//     形态，并由 portKnown=false 让 hostGuard 退化为按 host 部分判定——否则
+//     合法本机调用会带着随机端口被整段拒掉（静默砖化比放行更糟）。
+//
+// 比对是**字符串全等、不做大小写归一**：IP 形态无大小写，`localhost` 由 HTTP
+// 规范视为小写；大写形态一律拒（宁可让调用方改客户端，也不给 `LOCALHOST.x`
+// 这类构造留缝）。
+//
+// 返回 portKnown 表示"配置端口是否可用于比对"（非空且非 "0"）。
+func hostGuardAllowSet(listenAddr string) (allow map[string]struct{}, portKnown bool) {
+	port := listenAddrPort(listenAddr)
+	portKnown = port != "" && port != "0"
+	allow = make(map[string]struct{}, len(loopbackHostForms)*2)
+	for _, h := range loopbackHostForms {
+		allow[h] = struct{}{} // 缺端口形态：按 r.Host 原样比对
+		if portKnown {
+			allow[h+":"+port] = struct{}{}
+		}
+	}
+	return allow, portKnown
+}
+
+// hostGuard 包装 next，对回环监听启用 Host 头白名单校验（见上方威胁模型）。
+// listenAddr 取 cfg.Security.ListenAddr（与 checkListenSecurity 同源，回环判定
+// 复用 listen_guard.go 的 isLoopbackHost——两处判定不漂移）。
+//
+// 非回环监听原样返回 next（不启用校验）。
+func hostGuard(listenAddr string, next http.Handler) http.Handler {
+	addr := strings.TrimSpace(listenAddr)
+	host := addr
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		host = h
+	}
+	if !isLoopbackHost(host) {
+		return next
+	}
+	allow, portKnown := hostGuardAllowSet(addr)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := allow[r.Host]; ok {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// 服务端口不可知（host-only / `:0` 配置）：退化为只校验 host 部分，
+		// 端口任意。isLoopbackHost 自带去方括号，`[::1]:随机端口` 同样命中。
+		if !portKnown {
+			if h, _, err := net.SplitHostPort(r.Host); err == nil && isLoopbackHost(h) {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+		// 403 而非 421 Misdirected Request：421 语义是"换条连接重试"，客户端
+		// 会照做；这里是策略拒绝，要的是终态。
+		writeErr(w, http.StatusForbidden, hostGuardRejection)
+	})
 }
 
 // route 按 path 分发（CORS 包装层之下）。

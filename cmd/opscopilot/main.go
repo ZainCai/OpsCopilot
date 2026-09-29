@@ -30,10 +30,17 @@ import (
 // （不只是读头），而长连接期间后台读超时会被当作读错误 → 取消 request
 // context → SSE 在 ReadTimeout 到点时被服务端主动断开。挡 slow-loris 用
 // ReadHeaderTimeout 就够，ReadTimeout 在这里只有副作用。
+//
+// Handler 一律经 hostGuard 包装（第十一轮 P1-1：回环监听下的 DNS rebinding
+// 防护，规则与理由见 rest_gateway.go 的 Host 校验段）。包在这里而非
+// Assembly.Handler()：单点接线保证任何真实监听都被覆盖（含 SSE/console/
+// 静态），同时不污染装配层 handler——后者在测试里被 httptest.NewRequest
+// （Host 恒为 example.com）与 httptest.NewServer（随机端口）直接驱动，包在
+// Handler() 会把既有测试整片打成 403；guard 自身行为由 host_guard_test.go 直测。
 func newHTTPServer(m config.MetricsSection, addr string, h http.Handler) *http.Server {
 	return &http.Server{
 		Addr:              addr,
-		Handler:           h,
+		Handler:           hostGuard(addr, h),
 		ReadHeaderTimeout: m.HTTPReadHeaderTimeout,
 		WriteTimeout:      m.HTTPWriteTimeout,
 		IdleTimeout:       m.HTTPIdleTimeout,
