@@ -14,13 +14,10 @@
 // 出站调用点注入，见 assembly.go 与 llm_summarizer.go）；未配置时恒传
 // nil，conclude 记 pending，报告以结构化证据链交付（禁止伪 RCA）。
 //
-// TODO(#12 二期挂点说明)：
-//   - sessionstore（internal/sessionstore，P1-1 预留件）尚无运行时消费方——
-//     若二期做"分析会话/网关不可用时延迟重跑队列"（ADR-003 二档降级：gateway 全不可用
-//     时请求入延迟队列），挂点即在 cmd 构造 redis alert client 处
-//     （main.go 的 Redis 出口）→ sessionstore.New(client, config.RedisAlert)；
-//   - 自动触发（Escalation 联动）已随二期池波二 #4 落地：cmd/opscopilot/rca_auto.go
-//     在 critical 升级成功后复用本编排器 Analyze(actor="auto")，本文件零改动。
+// TODO(#12 二期)：延迟重跑队列（leader-only/SKIP LOCKED）——ADR-003 二档降级
+//
+//	（gateway 全不可用时请求入延迟队列）。sessionstore 已接线
+//	（assembly.go 的 SessionHot），队列落点直接复用该热态袋即可。
 package main
 
 import (

@@ -53,12 +53,12 @@ func (c *RedisConfig) Validate() error {
 	switch c.Role {
 	case RedisAlert:
 		if err := validateAddr(c.Addr); err != nil {
-			return errors.New("alert redis: " + err.Error())
+			return fmt.Errorf("alert redis: %w", err)
 		}
 		return nil
 	case RedisCache:
 		if err := validateAddr(c.Addr); err != nil {
-			return errors.New("cache redis: " + err.Error())
+			return fmt.Errorf("cache redis: %w", err)
 		}
 		return nil
 	default:

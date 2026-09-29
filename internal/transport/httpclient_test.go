@@ -34,8 +34,13 @@ func TestHTTPClientPost(t *testing.T) {
 			w.WriteHeader(http.StatusTeapot)
 			_, _ = io.WriteString(w, `{"error":"i'm a teapot"}`)
 		case "/slow":
-			time.Sleep(300 * time.Millisecond)
-			_, _ = io.WriteString(w, "late")
+			// 去固定 sleep（原为 time.Sleep(300ms) 后写 "late"）：慢端点的
+			// 语义是"响应在调用方预算内永远不到"。改为阻塞等"调用方已放弃"
+			// 这一条件（客户端超时/取消会把服务端 request context 置 Done）
+			// 后直接返回不写——断言语义不变，且不再让 handler 白睡 300ms
+			// 拖慢用例与 Server.Close。
+			<-r.Context().Done()
+			return
 		case "/huge":
 			_, _ = io.WriteString(w, strings.Repeat("z", DefaultHTTPMaxResponseBytes+128))
 		default:

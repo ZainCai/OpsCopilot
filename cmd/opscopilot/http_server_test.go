@@ -2,8 +2,7 @@
 package main
 
 import (
-	"bufio"
-	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -38,39 +37,25 @@ func TestNewHTTPServerTimeouts(t *testing.T) {
 // SSE 长连接不能被它掐断——handler 在每次写前推进写截止时间。
 //
 // 把 WriteTimeout 调到 300ms（真实是 30s）让回归能在毫秒级跑完：不推进截止
-// 时间的话，睡过 300ms 之后的写会立即失败（net.Conn 在超过截止时间时直接返回
+// 时间的话，越过 300ms 之后的写会立即失败（net.Conn 在超过截止时间时直接返回
 // ErrDeadlineExceeded，不落盘），事件永远到不了客户端。
 func TestEventStreamSurvivesWriteTimeout(t *testing.T) {
 	asm, h := restTest(t)
 	defer asm.Close()
 
+	const writeTimeout = 300 * time.Millisecond
 	srv := httptest.NewUnstartedServer(h)
-	srv.Config.WriteTimeout = 300 * time.Millisecond
+	srv.Config.WriteTimeout = writeTimeout
 	srv.Start()
-	defer srv.Close()
+	// srv.Close 必须经 t.Cleanup 且注册在 openSSE 之前：cleanup LIFO 保证
+	// openSSE 的 body-close 先执行（SSE 连接先断），否则 srv.Close 在
+	// defer 阶段等待永不退出的 handler 死锁（openSSE 抽取时踩过的坑）。
+	t.Cleanup(srv.Close)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/api/v1/events/stream", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status=%d", resp.StatusCode)
-	}
-	br := bufio.NewReader(resp.Body)
-	first, err := br.ReadString('\n')
-	if err != nil {
-		t.Fatalf("read first line: %v", err)
-	}
-	if !strings.HasPrefix(first, ": connected") {
-		t.Fatalf("first line=%q, want comment line", first)
-	}
+	// WriteTimeout 自响应头写出（建流）起算；openSSE 返回时流已建立，
+	// 以此刻为锚点向后推"越过 2×WriteTimeout"的等待条件。
+	streamStart := time.Now()
+	br := openSSE(t, srv.URL+"/api/v1/events/stream")
 
 	deadline := time.Now().Add(3 * time.Second)
 	for asm.Events.Subscribers() == 0 {
@@ -80,8 +65,16 @@ func TestEventStreamSurvivesWriteTimeout(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	// 睡过服务端 WriteTimeout：截止时间若不被推进，后续写必定失败。
-	time.Sleep(600 * time.Millisecond)
+	// 越过服务端 WriteTimeout 再触发写（原实现是裸 sleep(600ms)）：轮询
+	// "已越过 2×WriteTimeout 且流仍存活"这一条件——存活以订阅者仍在册为证
+	// （连接若被 WriteTimeout 掐断，handler 退出即退订）；超时失败带最后状态。
+	waitUntil(t, 5*time.Second, 10*time.Millisecond, "stream alive past server WriteTimeout",
+		func() (bool, string) {
+			elapsed := time.Since(streamStart)
+			subs := asm.Events.Subscribers()
+			return elapsed > 2*writeTimeout && subs == 1,
+				fmt.Sprintf("elapsed=%v subscribers=%d", elapsed, subs)
+		})
 
 	if _, err := asm.Incidents.Create("INC-SSE-WT", "sse write timeout regression", "high", "tester"); err != nil {
 		t.Fatal(err)

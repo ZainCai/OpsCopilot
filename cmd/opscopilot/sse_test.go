@@ -96,16 +96,15 @@ func TestEventHubCloseUnsubscribesAll(t *testing.T) {
 	}
 }
 
-// TestEventStreamEndpoint SSE 端点端到端：连上后建单/流转即收到推送。
-func TestEventStreamEndpoint(t *testing.T) {
-	asm, h := restTest(t)
-	srv := httptest.NewServer(h)
-	defer srv.Close()
-	defer asm.Close()
-
+// openSSE 建立 SSE 流的共用样板（第十一轮 P3 抽取，http_server_test.go 同包
+// 共用）：带可取消 context 发 GET，校验 200 / text/event-stream / 首行
+// ": connected" 握手注释行，返回行读取器。清理（关响应体、取消 context）
+// 挂在 t.Cleanup，调用方无需 defer。
+func openSSE(t *testing.T, url string) *bufio.Reader {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/api/v1/events/stream", nil)
+	t.Cleanup(cancel)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +112,7 @@ func TestEventStreamEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	t.Cleanup(func() { resp.Body.Close() })
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d", resp.StatusCode)
 	}
@@ -128,6 +127,39 @@ func TestEventStreamEndpoint(t *testing.T) {
 	if !strings.HasPrefix(first, ": connected") {
 		t.Fatalf("first line=%q, want comment line", first)
 	}
+	return br
+}
+
+// waitUntil 标准库轮询 helper（无 testify，第十一轮 P3"时序断言去 sleep"）：
+// 每 tick 求值一次 cond，直到其报告 done 或超时；超时失败信息带 desc 与
+// 最后一次状态快照，替代"裸 sleep 后断言"的脆弱时序。
+func waitUntil(t *testing.T, timeout, tick time.Duration, desc string, cond func() (done bool, status string)) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	status := "(not yet evaluated)"
+	for {
+		var done bool
+		done, status = cond()
+		if done {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("wait for %s: timed out after %v (last status: %s)", desc, timeout, status)
+		}
+		time.Sleep(tick)
+	}
+}
+
+// TestEventStreamEndpoint SSE 端点端到端：连上后建单/流转即收到推送。
+func TestEventStreamEndpoint(t *testing.T) {
+	asm, h := restTest(t)
+	srv := httptest.NewServer(h)
+	// srv.Close 经 t.Cleanup 且注册在 openSSE 之前（LIFO 保证 body 先关），
+	// 否则 defer 阶段 srv.Close 等 SSE handler 退出 → 死锁。
+	t.Cleanup(srv.Close)
+	defer asm.Close()
+
+	br := openSSE(t, srv.URL+"/api/v1/events/stream")
 
 	// 等待服务端完成订阅注册（Flush 早于 Subscribe，避免建单早于订阅而漏帧）。
 	deadline := time.Now().Add(3 * time.Second)

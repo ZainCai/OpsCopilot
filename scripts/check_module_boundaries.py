@@ -21,7 +21,8 @@
      **名单自扩**：出口模块以 `internal/<模块>/.socket-egress` 目录标记文件
      声明——新增出口模块 = 放标记文件，脚本零改动即纳入；删除标记文件即
      解除（标记文件内容不解析，仅存在性生效）。
-  5. （P2-D2）cmd/ 生产代码禁止散读 "OPS_*" env——必须经 internal/config
+  5. （P2-D2）cmd/ 生产代码禁止散读 "OPS_*" env（os.Getenv / os.LookupEnv
+     同抓）——必须经 internal/config
      的 Env* 键常量引用，键改名在编译期即失联（_test.go 豁免：
      OPS_TEST_PG_DSN 是集成测试环境专用键，本就在 config 域之外）。
   6. （P2-D2）tools/ 与 scripts/migrate 是独立 CLI 交付面：只允许 import
@@ -38,7 +39,7 @@ from pathlib import Path
 
 IMPORT_RE = re.compile(r'^\s*(?:import\s+)?(?:[_\w]+(?:\.[_\w]+)*\s+)?"(opscopilot/[^"]+)"')
 STDLIB_NETHTTP_RE = re.compile(r'^\s*(?:import\s+)?(?:[_\w]+(?:\.[_\w]+)*\s+)?"net/http"')
-ENV_GET_RE = re.compile(r'os\.Getenv\("OPS_')
+ENV_GET_RE = re.compile(r'os\.(Getenv|LookupEnv)\("OPS_')
 # 规则 4 出口模块标记文件：出口模块在此目录放 .socket-egress 即纳入名单（自扩）。
 SOCKET_EGRESS_MARK = ".socket-egress"
 ALLOWED_SHARED = ("opscopilot/internal/contracts", "opscopilot/pkg")
@@ -153,6 +154,8 @@ def selftest() -> int:
         # 规则 5（P2-D2）：cmd/ 生产码散读 OPS_* 被抓；_test.go 豁免；无散读放行。
         ("cmd 生产码散读 OPS_* 应被抓到", "cmd", "opscopilot", "main.go",
          "package main\n\nimport \"os\"\n\nfunc main() { _ = os.Getenv(\"OPS_DB_DSN\") }\n", 1),
+        ("cmd 生产码经 LookupEnv 散读 OPS_* 应被抓到（换函数名不绕过）", "cmd", "opscopilot", "main.go",
+         "package main\n\nimport \"os\"\n\nfunc main() { _, _ = os.LookupEnv(\"OPS_DB_DSN\") }\n", 1),
         ("cmd 测试文件散读 OPS_TEST_PG_DSN 应豁免", "cmd", "opscopilot", "x_test.go",
          "package main\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestX(t *testing.T) { _ = os.Getenv(\"OPS_TEST_PG_DSN\") }\n", 0),
         ("cmd 生产码无散读应放行", "cmd", "opscopilot", "main.go",

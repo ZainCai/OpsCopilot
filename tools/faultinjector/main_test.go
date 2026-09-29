@@ -3,6 +3,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -68,24 +69,46 @@ func indexOf(s, sub string) int {
 	return -1
 }
 
+// waitFor 标准库轮询 helper（无 testify，第十一轮 P3"时序断言去 sleep"）：
+// 每 tick 求值一次 cond，直到其报告 done 或超时；超时失败信息带 desc 与
+// 最后一次状态快照，替代"裸 sleep 后断言"的脆弱时序。
+func waitFor(t *testing.T, timeout, tick time.Duration, desc string, cond func() (done bool, status string)) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	status := "(not yet evaluated)"
+	for {
+		var done bool
+		done, status = cond()
+		if done {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("wait for %s: timed out after %v (last status: %s)", desc, timeout, status)
+		}
+		time.Sleep(tick)
+	}
+}
+
 // TestAnswerbookStartsAfterWarmup 答案簿从剧本起点展开，预热段不入簿。
 func TestAnswerbookStartsAfterWarmup(t *testing.T) {
 	inj := newInjector(0.001, 60)
-	// 缩放 0.001 → 每场景 ~0.3s，cycle ~1.8s：等几个周期再查。
-	time.Sleep(3 * time.Second)
 	mux := newMux(inj)
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/answerbook", nil))
+	// 原实现裸 sleep(3s)"等几个周期"——但答案簿是从剧本起点确定性展开到
+	// now+24h 的，段是否齐备与等了多久无关；改为轮询"段已出现"这一条件，
+	// 条件成立即查（快机毫秒级完成），超时才失败并带最后段数状态。
 	var resp struct {
 		PlaybookStart time.Time `json:"playbook_start"`
 		Segments      []Segment `json:"segments"`
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(resp.Segments) == 0 {
-		t.Fatal("answerbook must contain segments")
-	}
+	waitFor(t, 10*time.Second, 100*time.Millisecond, "answerbook to contain segments",
+		func() (bool, string) {
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, httptest.NewRequest("GET", "/answerbook", nil))
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			return len(resp.Segments) > 0, fmt.Sprintf("segments=%d", len(resp.Segments))
+		})
 	if !resp.PlaybookStart.Equal(inj.startedAt.Add(60 * time.Second)) {
 		t.Fatalf("playbook start = %v, want startedAt+60s", resp.PlaybookStart)
 	}

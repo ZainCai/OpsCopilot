@@ -355,8 +355,8 @@ body { font-family: var(--font-sans); background: var(--bg); color: var(--text);
 /* 12 栏页面栅格（原型 page-grid/col-*；kpi-grid 保留 auto-fit——我们卡数 4~5 浮动，
    原型定 5 列的先决条件是固定 5 卡，此处不强抄） */
 .page-grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 14px; }
-.col-4 { grid-column: span 4; } .col-5 { grid-column: span 5; }
-.col-7 { grid-column: span 7; } .col-8 { grid-column: span 8; }
+.col-4 { grid-column: span 4; }
+.col-8 { grid-column: span 8; }
 .col-12 { grid-column: span 12; }
 
 /* 标签页（事件过滤等横向页签场景） */
@@ -418,7 +418,7 @@ body { font-family: var(--font-sans); background: var(--bg); color: var(--text);
 .flex-col { display: flex; flex-direction: column; }
 .flex-wrap { flex-wrap: wrap; }
 .items-center { align-items: center; }
-.gap-6 { gap: 6px; } .gap-8 { gap: 8px; } .gap-10 { gap: 10px; } .gap-14 { gap: 14px; }
+.gap-6 { gap: 6px; } .gap-8 { gap: 8px; } .gap-14 { gap: 14px; }
 .flex-1 { flex: 1 1 0%; min-width: 0; }
 /* 第二轮换皮补缺：视图内联样式收敛点（原型无同名条目的注明本轮新增） */
 .p-12 { padding: 12px; }                 /* 移植原型 styles.css:579 */

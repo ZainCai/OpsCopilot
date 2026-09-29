@@ -102,6 +102,11 @@ export interface Incident {
   title?: string;
   severity?: string;
   state: IncidentState;
+  // 以下三字段 Go 侧无 omitempty（internal/incident/incident.go 的
+  // ack_by/resolved_at/source_meta json tag），JSON 恒出现 → TS 设必现非可选。
+  ack_by: string; // ack 动作执行人（空串 = 从未 ack）
+  resolved_at: string; // 零值 "0001-01-01T00:00:00Z" = 未 resolved
+  source_meta: string; // 双链路来源元数据（空串 = 无；迁移 000005）
   origin?: IncidentOrigin;
   source_ref?: string;
   created_by?: string;

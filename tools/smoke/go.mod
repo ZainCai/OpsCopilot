@@ -5,6 +5,10 @@
 // 本模块与顶层 opscopilot 隔离：生产 go.mod 只留 runtime 依赖
 // （grpc/protobuf/redis），冒烟想用什么重型库都加在这里，不污染主模块。
 //
+// 依赖联动提醒：嵌套模块的依赖**不随主模块联动**——go work / go get -u 都
+// 不会自动同步这里的版本；升级主 go.mod 的 grpc/protobuf 等共有依赖时，需
+// 对表主 go.mod 手工核对本文件版本，避免两侧漂移。
+//
 // 构建/运行（README 与 CI 均在此目录或其子目录执行）：
 //
 //	cd tools/smoke/goplugin && go build -o bin/plugin.exe ./plugin && go run ./host
