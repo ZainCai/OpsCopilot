@@ -149,6 +149,13 @@ func TestUpgradeDrillOnRealDB(t *testing.T) {
 	if !strings.Contains(real.String(), backupPath) {
 		t.Fatalf("upgrade output should name the backup path")
 	}
+	// 权限回归（第十一轮 P2）：全库明文备份必须 owner-only（0600），
+	// 否则本机任意用户可读 incident/审计/载荷。
+	if fi, err := os.Stat(backupPath); err != nil {
+		t.Fatalf("stat backup: %v", err)
+	} else if m := fi.Mode().Perm(); m != 0o600 {
+		t.Fatalf("backup file mode = %o, want 0600", m)
+	}
 
 	// 6) 幂等续跑：无缺口即空转。
 	var again bytes.Buffer

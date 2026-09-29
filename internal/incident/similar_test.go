@@ -27,36 +27,23 @@ func TestSimilarCandidatesContentSignalRequired(t *testing.T) {
 	}
 }
 
-// TestSimilarCandidatesDedupKeyAndCluster 去重键 / 簇命中入候选；已解决单跳过；
-// 排序按分值降序（去重键 50 > 簇 40）。
-func TestSimilarCandidatesDedupKeyAndCluster(t *testing.T) {
+// TestSimilarCandidatesClusterAndTitle 簇 / 标题命中入候选；已解决单跳过；
+// 排序按分值降序（簇 40 > 标题 25）。dedup_key 维度已删（第十一轮 P1-2：
+// 装配层从未填充的死快路，L1 去重需求如复活另立项）。
+func TestSimilarCandidatesClusterAndTitle(t *testing.T) {
 	now := time.Date(2026, 9, 10, 10, 0, 0, 0, time.UTC)
 	target := Incident{ID: "T", Title: "x", ClusterKeys: []string{"c:fp1@1"},
-		DedupKey: "n1|fp1|100", CreatedAt: now, State: StateOpen}
+		CreatedAt: now, State: StateOpen}
 	others := []Incident{
-		{ID: "K1", Title: "y", DedupKey: "n1|fp1|100", CreatedAt: now, State: StateOpen},
-		{ID: "C1", Title: "z", ClusterKeys: []string{"c:fp1@1"}, CreatedAt: now, State: StateOpen},
-		{ID: "R1", Title: "x", CreatedAt: now, State: StateResolved}, // 已解决：跳过
+		{ID: "K1", Title: " X ", CreatedAt: now, State: StateOpen},                                 // 标题规范化相同 +25
+		{ID: "C1", Title: "z", ClusterKeys: []string{"c:fp1@1"}, CreatedAt: now, State: StateOpen}, // 同簇 +40
+		{ID: "R1", Title: "x", CreatedAt: now, State: StateResolved},                               // 已解决：跳过
 	}
 	got := SimilarCandidates(target, others, time.Hour)
 	if len(got) != 2 {
 		t.Fatalf("candidates = %+v, want 2 (resolved skipped)", got)
 	}
-	if got[0].IncidentID != "K1" || got[0].Score < got[1].Score {
-		t.Fatalf("order = %+v, want K1 (dedup_key 50) first", got)
-	}
-}
-
-// TestDedupKeyForStable 归一化去重键：节点集合顺序无关，时间落入同桶则相同。
-func TestDedupKeyForStable(t *testing.T) {
-	at := time.Date(2026, 9, 10, 10, 7, 0, 0, time.UTC)
-	a := DedupKeyFor([]string{"n2", "n1"}, "fp1", at, 30*time.Minute)
-	b := DedupKeyFor([]string{"n1", "n2"}, "fp1", at.Add(time.Minute), 30*time.Minute)
-	if a != b {
-		t.Fatalf("dedup keys differ: %q vs %q (want stable within window)", a, b)
-	}
-	c := DedupKeyFor([]string{"n1"}, "fp1", at, 30*time.Minute)
-	if a == c {
-		t.Fatalf("dedup keys equal despite different node sets: %q", a)
+	if got[0].IncidentID != "C1" || got[0].Score < got[1].Score {
+		t.Fatalf("order = %+v, want C1 (cluster 40) first", got)
 	}
 }

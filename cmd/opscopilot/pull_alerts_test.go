@@ -244,7 +244,7 @@ func TestApplyRateLimitCountsOnlyNew(t *testing.T) {
 	if ref, burst := w.applyRateLimit("r4", false); burst || ref != "r4" {
 		t.Fatalf("refresh must pass through untouched: ref=%q burst=%v", ref, burst)
 	}
-	// 子秒窗口不得除零（与 cluster/DedupKeyFor 同一类缺陷）。
+	// 子秒窗口不得除零（限流窗分桶防御）。
 	w2 := NewIngestWorker(nil, incident.NewMemStore(), nil, 0, 0, true, 1, 500*time.Millisecond, nil)
 	if ref, burst := w2.applyRateLimit("r5", true); burst || ref != "r5" {
 		t.Fatalf("sub-second window must be safe (treated as unlimited): ref=%q burst=%v", ref, burst)

@@ -3,7 +3,6 @@ package incident
 
 import (
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -22,7 +21,6 @@ type Candidate struct {
 // 纯函数：不依赖存储实现，调用方传入候选集（通常是同状态/近期事件）。
 //
 // 判定维度（保守：任一**内容**维命中即入候选，命中越多分越高）：
-//   - dedup_key 相同（节点+指纹+时间窗归一化，最强信号）
 //   - 簇关联重叠（同一 cluster_key）
 //   - 标题规范化后相同（去空白/大小写）
 //   - 时间邻近（同一窗口内创建）——**仅加权，不作独立入选项**
@@ -39,10 +37,6 @@ func SimilarCandidates(target Incident, others []Incident, window time.Duration)
 		}
 		var reasons []string
 		score := 0
-		if target.DedupKey != "" && target.DedupKey == o.DedupKey {
-			reasons = append(reasons, "去重键相同")
-			score += 50
-		}
 		if overlap(target.ClusterKeys, o.ClusterKeys) {
 			reasons = append(reasons, "关联同一故障簇")
 			score += 40
@@ -66,22 +60,6 @@ func SimilarCandidates(target Incident, others []Incident, window time.Duration)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Score > out[j].Score })
 	return out
-}
-
-// DedupKeyFor 生成归一化去重键（L1/L2 共用）：节点集合 + 指纹 + 时间窗。
-// 调用方（装配层）负责在事件创建时填充 Incident.DedupKey。
-//
-// window < 1s 时 `int64(window.Seconds())` 为 0 → 除零 panic；子秒窗口在
-// 语义上等同"不按窗前分桶"，故退化为秒级桶（见下）。window >= 1s 时
-// 结果与历史一致。
-func DedupKeyFor(nodeKeys []string, fingerprint string, at time.Time, window time.Duration) string {
-	keys := append([]string(nil), nodeKeys...)
-	sort.Strings(keys)
-	bucket := at.Unix()
-	if secs := int64(window / time.Second); secs > 0 {
-		bucket = at.Unix() / secs
-	}
-	return strings.Join(keys, ",") + "|" + fingerprint + "|" + strconv.FormatInt(bucket, 10)
 }
 
 func overlap(a, b []string) bool {

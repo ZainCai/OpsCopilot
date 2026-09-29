@@ -47,11 +47,15 @@ func backupFileHeader(ts time.Time) string {
 // 列一律 ::text 取回（NULL 保持 NULL）：一套字面量规则覆盖 JSONB/时间戳/数组，
 // 不逐列做类型方言。表不存在（空库首装）跳过并注明。
 func backupBeforeUpgrade(ctx context.Context, conn *pgx.Conn, dir string, ts time.Time) (string, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// 权限收紧（第十一轮 P2）：备份是全库明文 SQL（incident/审计/载荷），
+	// 0755 目录 + 0644 文件让本机任意登录用户可读——目录 0700、文件 0600。
+	// 已存在的旧宽权限目录不回改（回改需递归 chown 语义，超出备份职责；
+	// 运维手册口径：旧备份自行删除或 chmod）。
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("建备份目录 %s: %w", dir, err)
 	}
 	path := filepath.Join(dir, fmt.Sprintf("pre-upgrade-%s.sql", ts.UTC().Format("20060102T150405Z")))
-	f, err := os.Create(path)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return "", fmt.Errorf("创建备份文件: %w", err)
 	}

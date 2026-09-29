@@ -136,7 +136,6 @@ type Incident struct {
 	Origin     Origin `json:"origin"`
 	SourceRef  string `json:"source_ref"`
 	SourceMeta string `json:"source_meta"`
-	DedupKey   string `json:"dedup_key"`
 	CreatedBy  string `json:"created_by"`
 	MergedInto string `json:"merged_into"`
 	// AutoClosePolicy 外部恢复能否自动关单：auto / manual_only（人工

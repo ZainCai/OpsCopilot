@@ -24,14 +24,16 @@ import (
 )
 
 // handleNotifyChannels GET（列表）/ POST（upsert）。
+// 门禁顺序（第十一轮 P2）：写路径 401 先于 503——"store 未接线"属内部拓扑，
+// 不向未鉴权调用方泄露（对齐 runbook/session 的 auth→store gate 口径）。
 func (g *RESTGateway) handleNotifyChannels(w http.ResponseWriter, r *http.Request) {
-	store := g.channels
-	if store == nil {
-		writeErr(w, http.StatusServiceUnavailable, "notify channel store not wired (needs OPS_DB_DSN)")
-		return
-	}
 	switch r.Method {
 	case http.MethodGet:
+		store := g.channels
+		if store == nil {
+			writeErr(w, http.StatusServiceUnavailable, "notify channel store not wired (needs OPS_DB_DSN)")
+			return
+		}
 		rows, err := store.List(r.Context())
 		if err != nil {
 			g.logf("WARNING: notify channels list: %v", err)
@@ -45,6 +47,11 @@ func (g *RESTGateway) handleNotifyChannels(w http.ResponseWriter, r *http.Reques
 	case http.MethodPost:
 		if !authorized(r.Header.Get(AuthHeader), g.token) {
 			writeErr(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		store := g.channels
+		if store == nil {
+			writeErr(w, http.StatusServiceUnavailable, "notify channel store not wired (needs OPS_DB_DSN)")
 			return
 		}
 		if !requireJSON(w, r) {
@@ -87,12 +94,8 @@ func (g *RESTGateway) handleNotifyChannels(w http.ResponseWriter, r *http.Reques
 }
 
 // handleNotifyChannelItem POST /{name}/enabled 与 DELETE /{name}。
+// 均为写路径：401 先于 503（同 handleNotifyChannels 口径，第十一轮 P2）。
 func (g *RESTGateway) handleNotifyChannelItem(w http.ResponseWriter, r *http.Request) {
-	store := g.channels
-	if store == nil {
-		writeErr(w, http.StatusServiceUnavailable, "notify channel store not wired (needs OPS_DB_DSN)")
-		return
-	}
 	name := strings.TrimSpace(r.PathValue("name"))
 	if name == "" {
 		writeErr(w, http.StatusBadRequest, "name is required")
@@ -100,6 +103,11 @@ func (g *RESTGateway) handleNotifyChannelItem(w http.ResponseWriter, r *http.Req
 	}
 	if !authorized(r.Header.Get(AuthHeader), g.token) {
 		writeErr(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	store := g.channels
+	if store == nil {
+		writeErr(w, http.StatusServiceUnavailable, "notify channel store not wired (needs OPS_DB_DSN)")
 		return
 	}
 	switch {
