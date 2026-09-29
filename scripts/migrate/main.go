@@ -47,12 +47,23 @@ func main() {
 	adminDB := flag.String("admin-db", "postgres", "执行建库/删库的管理库名")
 	flag.Parse()
 
-	if *dsn == "" {
-		log.Fatal("-dsn 必填")
+	ensure, dropFirst, err := planRun(*dsn, *createDB, *wipe)
+	if err != nil {
+		log.Fatal(err)
 	}
-	if err := run(*dsn, *path, *createDB || *wipe, *wipe, *adminDB); err != nil {
+	if err := run(*dsn, *path, ensure, dropFirst, *adminDB); err != nil {
 		log.Fatalf("失败: %v", err)
 	}
+}
+
+// planRun 校验命令行参数并映射为 run 的 ensure/dropFirst 语义：
+// -dsn 必填；-wipe 隐含 -create-db（先 DROP FORCE 再 CREATE）。
+// 纯函数、不触库，参数组合口径由 main_test.go 锁死。
+func planRun(dsn string, createDB, wipe bool) (ensure, dropFirst bool, err error) {
+	if dsn == "" {
+		return false, false, errors.New("-dsn 必填")
+	}
+	return createDB || wipe, wipe, nil
 }
 
 func run(dsn, path string, ensure, dropFirst bool, adminDB string) error {

@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -56,8 +57,8 @@ func main() {
 	)
 	flag.Parse()
 
-	if *conc <= 0 || *n <= 0 {
-		fmt.Fprintln(os.Stderr, "concurrency 与 n 必须为正")
+	if err := validateFlags(*conc, *n); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
 	if *n < *conc {
@@ -181,6 +182,15 @@ func main() {
 	if !pass {
 		os.Exit(1)
 	}
+}
+
+// validateFlags 校验压测规模参数（main 出口 2 的同一口径）。
+// 纯函数，供单测覆盖（第十一轮 P2「tools/loadtest 零测试」补位）。
+func validateFlags(conc, n int) error {
+	if conc <= 0 || n <= 0 {
+		return errors.New("concurrency 与 n 必须为正")
+	}
+	return nil
 }
 
 // scenario 一个压测场景（名称 + 统计）。
