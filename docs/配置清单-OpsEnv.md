@@ -16,7 +16,7 @@
 >   （v1.2 C2 / G1"缺一拒绝启动"）不因收敛放松；两地址归一化后相同
 >   （`localhost` ≡ `127.0.0.1`、大小写/空白不敏感）同样拒绝启动。
 
-统计：**69 个运行时 env 键**（`OPS_*` 67 + `REDIS_*` 2），19 组。
+统计：**70 个运行时 env 键**（`OPS_*` 68 + `REDIS_*` 2），19 组。
 （优化方案 #8 判决异步落库队列 `OPS_NOISE_SINK_*` 4 键，**队满丢弃取向**：
 慢 DB/极端洪峰下丢持久化保采集节拍，宁漏库存不丢通知——**PG 判决流可缺
 条目，Redis/PG 镜像与内存态非强一致**，丢弃面看
@@ -140,6 +140,7 @@ M2 **只记录与展示**，不驱动自动升级（OPS_ESCALATION_* 是独立�
 | 67 | `OPS_SLA_INFO_MINUTES` | 事件 SLA | 正整数（分钟） | `1440`（24h；severity 白名单外同按此档兜底） | 同上 → **启动失败** | 同上（info 档 + 未知级兜底） |
 | 68 | `OPS_KPI_WINDOW` | 运维 KPI | 正 duration | `168h`（7d；**W10-3 F-07 新增**） | 非正 duration/非法 → **启动失败**（REST `?window=` 非法是请求级 400，不动启动） | `config.KPI.Window` → `RESTLimits.KPIWindow` → `handleKPIs`（GET /api/v1/kpis 默认观察窗；聚合口径唯一来源 `internal/incident/kpi.go`，数据源 incident 表：MTTA/MTTR/吞吐，平均闭环与 MTTR 同口径合并） |
 | 69 | `OPS_MAX_VERSION_GAP` | DB | 正整数 | `3`（**W11-6 新增**） | 非正整数 → **启动失败**（posInt 同款） | `config.DB.MaxVersionGap` → `main.go` 启动闸门 `startupSchemaGate`（`cmd/opscopilot/version.go`）：DB schema 落后二进制 ≤ 本值 → WARNING 放行；> 本值 → 拒启；DB 领先二进制一律拒启。配套补差命令 `opscopilot upgrade [--dry-run]`（应用前自动逻辑备份到 `backups/pre-upgrade-<ts>.sql`） |
+| 70 | `OPS_WEB_DIST` | UI | 字符串（目录路径） | `web/dist`（相对工作目录；单源常量 `config.DefaultWebDist`） | 无非法值概念：空 = 强制禁用挂载；目录缺失/无 `index.html` → WARNING 回退 `/console` 最小视图（不启动失败——构建缺失不影响 API，见 `webui.go` 头注释） | `config.UI.WebDist` → `assembly.go` → `registerWebUI`（`cmd/opscopilot/webui.go`，ec57da8 换皮控制台静态挂载：`GET /{$}` 返 index.html（no-store）+ `GET /assets/` 静态产物；`/console` 冻结版仍独立可达） |
 
 > #6 指标（非 env，登记于此便于对照）：每个有界结构两项——
 > `opscopilot_mem_entries{store="builder|builder_edges|incidents|escalation_ledger|noise_dedup|noise_clusters|noise_sigcache|audit"}`（gauge）

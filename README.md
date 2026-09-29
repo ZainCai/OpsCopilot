@@ -23,7 +23,7 @@ opscopilot/
 ├── web/                     # 独立前端工程（Vite+React+TS，ADR-013；console.html 已冻结）
 ├── scripts/                 # 边界检查 / demo / 容量基线 / 评测 / 测试库重置等编排脚本
 ├── tools/                   # faultinjector（剧本注入器）、rca_eval（golden 评测集）、evaluate.py、loadtest 等
-├── migrations/              # golang-migrate SQL（000001~000020）
+├── migrations/              # golang-migrate SQL（编号上界以 `cmd/opscopilot/version.go` 的 `SchemaMaxVersion` 为准，测试钉死两者一致）
 ├── docs/                    # ADR、排期、方案、配置清单、容量、验收/评测报告、历史审核
 └── .github/workflows/ci.yml # CI：build/test + 边界检查 + Windows/Linux 冒烟
 ```
@@ -51,6 +51,11 @@ export GOPROXY=https://goproxy.cn,direct          # proxy.golang.org 不通，�
 # 全量校验（gofmt 无输出 + vet/build + 单测 + 模块边界）
 gofmt -l cmd internal tools pkg && go build ./... && go vet ./... && go test ./... -count=1
 py scripts/check_module_boundaries.py
+# 装了 make 的环境等价门禁：make lint（gofmt -l + go vet）/ make test / make race
+# （-race 本机 Windows 无 cgo/gcc 跑不了，CI build-and-check 兜底）
+
+# 带真库的测试（OPS_TEST_PG_DSN 门控的 pgstore 契约/集成用例）先重置测试库再跑：
+bash scripts/reset_test_pg.sh    # 开发库数据累积会让 walkAll 翻页探针偶发变红，见配置清单附录 B
 
 # 本地数据库迁移（需先 cp .env.example .env）
 migrate -path migrations -database "postgres://opscopilot:opscopilot@localhost:5432/opscopilot?sslmode=disable" up
@@ -62,12 +67,13 @@ export OPS_TEST_PG_DSN='postgres://opscopilot:opscopilot@localhost:5432/opscopil
 
 > 若想把 GOPROXY 固化：`go env -w GOPROXY=https://goproxy.cn,direct`（在原生终端执行）。
 > `make` 在 Git Bash 缺省未装，改用上条等价的直接 `migrate` 命令（golang-migrate CLI 须以 `go install -tags 'postgres'` 安装，否则报 `unknown driver postgres`）。
+> **提交卫生（第十一轮 P3 定案）**：commit 一律 conventional 中文——`type(scope): 摘要`（type ∈ feat/fix/docs/test/chore/ci/refactor…）；历史 5 条裸消息（M3 "阶段1/2/3" 三条 + 全局精简两条）**不追改**（git 历史不可变，只保证此后合规）。
 
 ## 运维接入
 
 ### 环境变量
 
-全量 **69 个运行时 env 键**（`OPS_*` 67 + `REDIS_*` 2）的默认值、非法值行为与消费方逐条见 **`docs/配置清单-OpsEnv.md`**；`.env.example` 是运行时镜像（含每项注释）。常用面摘录：
+全量 **70 个运行时 env 键**（`OPS_*` 68 + `REDIS_*` 2）的默认值、非法值行为与消费方逐条见 **`docs/配置清单-OpsEnv.md`**；`.env.example` 是运行时镜像（含每项注释）。常用面摘录：
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
@@ -209,10 +215,12 @@ opscopilot_noise_sink_queue / _drops_total{store} / opscopilot_noise_write_dropp
 opscopilot_autoattach_total{outcome="attached"|"conflict"|"skipped"}  W10-6 自动挂簇三出口计数（OPS_AUTOATTACH=on 才有样本）
 opscopilot_rca_requests_total{outcome} / _rca_duration_seconds / _rca_autotrigger_dropped_total
                                                                      按需 RCA 请求/耗时/自动触发队满丢弃
-opscopilot_llm_requests_total{outcome} / _session_llm_*              llm-gateway 与复盘会话出站请求（降级面可计数）
+opscopilot_llm_requests_total{outcome} / _llm_duration_seconds       llm-gateway 出站请求/耗时（conclude 出口，ADR-015；降级面 = outcome!=ok 可计数）
+opscopilot_session_llm_requests_total{outcome} / _session_llm_duration_seconds
+                                                                     复盘会话 assistant 轮 LLM 请求/耗时（#7；fail-open pending 计 outcome=timeout/error，绝不假答）
 opscopilot_audit_reads_total{source="global"|"incident"}             查审计读取尝试计数（W12 解锁包；本期"查审计"留痕替代——audit_read 动作 + 哈希链属 M3/ADR-005）
 opscopilot_mem_entries{store} / _mem_evictions_total{store}          内存有界结构规模/淘汰（#6）
-opscopilot_is_leader                                                 本实例 leader 态 0/1（ADR-012）
+opscopilot_is_leader                                                 本实例 leader 态 0/1（ADR-012；观测章原名 opscopilot_leader 作等价别名同时暴露）
 ```
 
 - **`_p50/_p95/_p99` 是本项目的扩展**：直方图额外保留 10000 个滑窗原始样本，分位按**最近秩法**在真实观测值上精确计算。无样本时渲染为 `NaN`。
@@ -298,7 +306,7 @@ CI 首跑（GitHub Actions）                          → run #87（8e8932e）�
 | `功能点清单-M2候选.md` | F-xx 功能点全集与优先级 |
 | `M1出口验收报告-2026-09-11.md` · `M2执行排期-W9到W11.md` · `M2出口评审纪要-2026-09-13.md` | 出口验收/周排期/出口评审（含 3 条件闭环与签名留白） |
 | `OpsCopilot项目优化方案-2026-09-11.md` | 12 项优化 + 二期池三波收口记录 |
-| `配置清单-OpsEnv.md` | **69 个 env 键唯一装载表**（默认值/非法值行为/消费方）+ 测试/CLI 键附录 |
+| `配置清单-OpsEnv.md` | **70 个 env 键唯一装载表**（默认值/非法值行为/消费方）+ 测试/CLI 键附录 |
 | `容量模型-三级估算.md` · `容量基线-2026-09-12.md` | 三级估算与实测基线（部署必查项标注；ADR-016 灰度硬依据） |
 | `方案-双链路事件来源.md` | 事件双链路（外部导入 ∥ 人工建单）融合与去重方案 |
 | `设计-sessionstore消费方与接线.md` | 复盘会话五个开放问题的拍板记录（#7 S1/S2 蓝图） |

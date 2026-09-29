@@ -72,6 +72,12 @@
 | 通知渠道投递（建单侧） | 由 ingest 消费出口驱动，跟随消息认领互斥 |
 | ChangePruner 变更库清理 | **例外说明**：任务清单原列 leader-only，评估后改为全实例——`ChangeStore` 内存 map 是**每实例各自增长**的（webhook 打到谁谁存），只让 leader 清会重新引入 W9-5 修掉的无界增长；PG 侧 `DELETE WHERE occurred_at<cutoff` 幂等，多实例重复执行无害 |
 | Escalation 升级扫描 | PG 台账 `(tenant_id, incident_id)` 主键认领（下节）；内存台账维持"仅单实例正确" |
+| RCATrigger 自动 RCA worker（`OPS_RCA_AUTO`，二期池波二 #4——本 ADR 定稿后新增，按"新增常驻循环须登记本矩阵"条款回填） | 挂在 EscalationPoller.OnEscalate 出口、随升级扫描全实例常驻；防重复=内存 seen + 审计回读双保险，分析链路只读无副作用，有界队列满即丢（计 `opscopilot_rca_autotrigger_dropped_total`）不回压升级 |
+| credential 周期清扫（10m，C9 收尾——同上回填） | 凭证 store 是**每实例内存态**（渠道 CRUD 打到谁谁存），`SweepExpired` 只清本实例过期条目、不写共享状态；清扫幂等，多实例各自执行无害（与 ChangePruner 同款"每实例内存各自增长"理由） |
+
+> **登记条款**：新增任何常驻后台循环（goroutine 长跑/定时任务）须回填本矩阵并
+> 注明 leader-only 还是全实例、多实例安全依据——第十一轮审核 P2 即因 RCATrigger
+> 与凭证清扫两处后加循环未登记而判矩阵漂移。
 
 ## ingest 队列认领租约（migration 000016）
 

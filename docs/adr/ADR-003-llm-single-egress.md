@@ -36,3 +36,5 @@
 ## 交叉检查提醒
 
 **任何新增的"直接调 LLM"代码路径都是对本 ADR 的违反**，CI 边界检查应配合 code review 拦截。
+
+**SSRF 面说明（第十一轮 P3 补记）**：`OPS_LLM_ENDPOINT` 与各连接器 URL（`OPS_PROM_URL` 等）均为 operator 启动期静态配置（fail-fast 校验、运行期不可变、不接受请求侧输入），信任前提是"配置者即运维负责人"；即便如此也**勿指向不可信主机**——单出口意味着指向哪里，携带 Secret 的出站请求（Authorization 头/API key）就打向哪里，指错主机等价于密钥外泄面。

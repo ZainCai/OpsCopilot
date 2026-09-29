@@ -33,7 +33,7 @@ envelope/键约定**而非重写；若消费方需要追加式轮次历史，Red
 ## 3. 接线形态
 
 **数据流（internal 禁互 import 纪律下）**：复用 rca_orchestrator.go / llm_summarizer.go 先例——
-**cmd/（package main）汇合装配**。新增 `cmd/opscopilot/rca_session.go`（暂名）：REST handler →
+**cmd/（package main）汇合装配**。新增 `cmd/opscopilot/rest_rca_session.go`（暂名 rca_session.go，落定实名 rest_rca_session.go）：REST handler →
 热态经 `sessionstore.New(alertRDB, config.RedisAlert)`（main.go 已有告警实例 Redis 出口），
 取证/结论复用 RCAOrchestrator，LLM 轮次只走 llmgw（ADR-003 单出口，禁直连）。
 **不进 contracts/gRPC**：SemanticModel 是取证面契约，会话是交互面，塞进去污染事件面
@@ -71,7 +71,7 @@ envelope 为带 `schema_ver` 的 JSON。
 1. **TTL：不改 2h 默认、不加配置项，Redis 仅热态缓冲，真相在 PG，靠"懒恢复"续命。**
    TTL 蒸发后 GET 会话发现 Redis 无 key → 从 PG 真相表重建轮次并回填 Redis（刷新 TTL）。
    "隔天续聊的复盘"由 PG 真相保证，Redis 只承担 TTL 内的读加速与在线态。
-   （修正 §1/§3 对 TTL 的担忧；实现见 `cmd/opscopilot/rca_session.go` 懒恢复路径。）
+   （修正 §1/§3 对 TTL 的担忧；实现见 `cmd/opscopilot/rest_rca_session.go` 懒恢复路径。）
 2. **轮次正文不算审计证据：正文落独立表 `rca_session_turn`，incident_audit 哈希链不动、
    不追加 'rca-review' 动作；`llm_meta` 只存哈希/长度（prompt SHA-256、字符/字节数、模型名），
    不存正文与 key。** §3 草案里"会话关闭可选追加审计"一项按此作废（不实施）；

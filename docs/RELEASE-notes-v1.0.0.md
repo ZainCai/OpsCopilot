@@ -47,7 +47,7 @@ OpsCopilot 智能运维副驾驶完成 M1/M2/M3 三线收口与全局精简，CI
 ## 部署起点
 
 - `docker compose up`（TimescaleDB + 双 Redis + 应用）或二进制 + `migrate` 迁移；`upgrade` 双形状可用
-- 环境键：69 个（`OPS_*` 67 + `REDIS_*` 2），唯一装载表 `docs/配置清单-OpsEnv.md`；`.env.example` 为运行时镜像
+- 环境键：70 个（`OPS_*` 68 + `REDIS_*` 2），唯一装载表 `docs/配置清单-OpsEnv.md`；`.env.example` 为运行时镜像
 - 部署必查：`OPS_INGEST_BATCH/INTERVAL`（on 时）、双实例 `OPS_INGEST_LEASE_DURATION`、NTP 同钟（KPI 窗口）、反代认证（读路径）
 
 ## 文档索引
