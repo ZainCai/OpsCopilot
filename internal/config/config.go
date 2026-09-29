@@ -172,7 +172,7 @@ type PullSection struct {
 
 // IngestSection 链路 A 导入队列与消费 worker（W9）。
 type IngestSection struct {
-	AutoCreate bool          // OPS_INCIDENT_AUTOCREATE=on 才消费建单（默认影子期只排队）
+	AutoCreate bool          // 出厂默认 on（ADR-016 段三 2026-09-24 转正）；off = 只排队不建单（影子期，可回放）
 	Interval   time.Duration // OPS_INGEST_INTERVAL 消费轮询，默认 5s
 	Batch      int           // OPS_INGEST_BATCH 单轮批量，默认 20
 	// RateLimit/RateWindow 建单风暴限流（R1）——原 burst 50/5min 是
@@ -505,6 +505,7 @@ const (
 	DefaultPullInterval = 30 * time.Second
 
 	DefaultIngestInterval           = 5 * time.Second
+	DefaultIngestAutoCreate         = true // ADR-016 段三转正（2026-09-24）：出厂默认 on
 	DefaultIngestBatch              = 20
 	DefaultIngestRateLimit          = 50 // 5 分钟内最多建 50 单，其余进聚合单
 	DefaultIngestRateWindow         = 5 * time.Minute
@@ -625,6 +626,7 @@ func Defaults() *Config {
 	c.Noise.SinkFlush = DefaultNoiseSinkFlush
 	c.Noise.SinkDrain = DefaultNoiseSinkDrain
 	c.Pull.Interval = DefaultPullInterval
+	c.Ingest.AutoCreate = DefaultIngestAutoCreate // ADR-016 段三转正（与 load.go onOff 默认同源）
 	c.Ingest.Interval = DefaultIngestInterval
 	c.Ingest.Batch = DefaultIngestBatch
 	c.Ingest.RateLimit = DefaultIngestRateLimit
